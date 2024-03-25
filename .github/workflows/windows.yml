@@ -1,0 +1,46 @@
+name: Windows (MSVC + Ninja)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Ninja
+        run: choco install ninja --no-progress -y
+
+      - name: Set up vcpkg
+        shell: bash
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git
+          ./vcpkg/bootstrap-vcpkg.sh
+
+      - name: Install dependencies (Lua 5.4)
+        shell: bash
+        run: |
+          ./vcpkg/vcpkg install lua:x64-windows
+
+      - name: Configure (Release, Ninja, MSVC)
+        shell: bash
+        run: |
+          cmake -S . -B build-win \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+
+      - name: Build (Release)
+        shell: bash
+        run: cmake --build build-win -j
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SRDWM-windows-Release
+          path: build-win/SRDWM.exe
