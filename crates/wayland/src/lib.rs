@@ -18,29 +18,40 @@
 //!   X windows: through `srdwm_core::WindowManager`, so layout, smart
 //!   placement, and drag/resize hit-testing are the *same* code path as X11
 //!   (`srdwm_core::window::ResizeEdge::hit_test`), not a reimplementation.
-//! - Decorations are drawn as a solid-color titlebar band (no text - font
-//!   rasterization is a real chunk of additional work, not something to
-//!   fake here) using smithay's `SolidColorRenderElement`.
-//! - Global keybindings are intercepted using a simple heuristic: any key
-//!   press with the Super/Mod4 modifier held is treated as WM-exclusive and
-//!   not forwarded to the focused client; everything else is forwarded.
-//!   Real WMs do something similar in practice (Super is rarely used by
-//!   applications); a more precise design would thread the config's actual
-//!   bound-key set into the platform layer, which is left as a TODO.
+//! - Decorations are a titlebar band rendered in software (`decoration.rs`:
+//!   solid background plus the actual window title, rasterized via
+//!   `fontdue` against whatever monospace font is found on the system) and
+//!   uploaded per-frame through smithay's `MemoryRenderBuffer`, the same
+//!   band geometry and button hit-testing as the X11 backend's drawn
+//!   titlebar.
+//! - Global keybindings are matched precisely: `WaylandPlatform::connect`
+//!   takes the config's actual bound-key combo strings (the same
+//!   `"Mod4+Shift+Return"` format `srd.bind` uses and the X11 backend grabs
+//!   via `XGrabKey`), and every keypress is translated to that same combo
+//!   string (via the keysym table shared with X11, `srdwm_core::keysyms`)
+//!   and checked against the set. Only a match is withheld from the focused
+//!   client; everything else is forwarded, mirroring X11's grab-specific-keys
+//!   behavior instead of the coarser "any Super-held key is ours" heuristic
+//!   an earlier pass used.
 //! - xdg-decoration is forced to server-side mode (`Mode::ServerSide`) so
 //!   well-behaved clients don't also draw their own client-side titlebar.
 
+mod decoration;
+mod udev;
+mod xwayland;
+
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Instant;
 
+use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::{
     AbsolutePositionEvent, ButtonState as BackendButtonState, Event as InputEventTrait, InputEvent,
     KeyState as BackendKeyState, KeyboardKeyEvent, PointerButtonEvent,
 };
 use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRenderElement};
+use smithay::backend::renderer::element::memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement};
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend};
@@ -97,11 +108,28 @@ struct CompState {
     wm: Rc<RefCell<WindowManager>>,
     surface_to_id: HashMap<WlSurface, WindowId>,
     id_to_window: HashMap<WindowId, DWindow>,
-    decorations: HashMap<WindowId, SolidColorBuffer>,
+    decorations: HashMap<WindowId, MemoryRenderBuffer>,
     pending: Rc<RefCell<Vec<CoreEvent>>>,
-    pointer_focus_super_held: bool,
+    bound_keys: Rc<HashSet<String>>,
     start_time: Instant,
+    /// `Some` only for the udev/DRM backend; see `udev.rs` module docs for
+    /// why its runtime state lives here rather than on a separate struct.
+    udev: Option<udev::UdevOutput>,
+    /// XWayland support; see `xwayland.rs` module docs. `xwm` is `None`
+    /// until `XWaylandEvent::Ready` fires.
+    xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState,
+    xwm: Option<smithay::xwayland::X11Wm>,
+    xwayland_windows: HashMap<xwayland::X11Window, WindowId>,
+    /// Mapped X11 windows still waiting for XWayland to associate a
+    /// `wl_surface` - see `xwayland.rs` and `commit()` above.
+    xwayland_pending: Vec<smithay::xwayland::X11Surface>,
 }
+
+/// Titlebar background is the same regardless of focus (matching the X11
+/// backend); only the title text color changes.
+const TITLEBAR_BG: (u8, u8, u8) = (0x2e, 0x34, 0x40);
+const TITLEBAR_FG_FOCUSED: (u8, u8, u8) = (0x88, 0xc0, 0xd0);
+const TITLEBAR_FG_UNFOCUSED: (u8, u8, u8) = (0x4c, 0x56, 0x6a);
 
 impl CompState {
     fn new_managed_window(&mut self, toplevel: ToplevelSurface) {
@@ -126,8 +154,26 @@ impl CompState {
         self.space.map_element(dwindow.clone(), (geom.x, geom.y + TITLEBAR_HEIGHT as i32), true);
         self.surface_to_id.insert(surface, id);
         self.id_to_window.insert(id, dwindow);
-        self.decorations.insert(id, SolidColorBuffer::new((geom.width as i32, TITLEBAR_HEIGHT as i32), [0.18, 0.204, 0.251, 1.0]));
+        self.redraw_decoration_buffer(id);
         self.pending.borrow_mut().push(CoreEvent::WindowCreated(id));
+    }
+
+    /// (Re)renders the titlebar band for `id` - background plus title text
+    /// via `decoration::render_titlebar` - and replaces the buffer in
+    /// `self.decorations`. Called on creation, geometry change (width
+    /// affects layout), and focus change (text color).
+    fn redraw_decoration_buffer(&mut self, id: WindowId) {
+        let Some(w) = self.wm.borrow().window(id).cloned() else { return };
+        if !w.decorated {
+            self.decorations.remove(&id);
+            return;
+        }
+        let focused = self.wm.borrow().focused_id() == Some(id);
+        let fg = if focused { TITLEBAR_FG_FOCUSED } else { TITLEBAR_FG_UNFOCUSED };
+        let width = w.geometry.width.max(1);
+        let data = decoration::render_titlebar(width, TITLEBAR_HEIGHT, &w.title, TITLEBAR_BG, fg);
+        let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (width as i32, TITLEBAR_HEIGHT as i32), 1, Transform::Normal, None);
+        self.decorations.insert(id, buffer);
     }
 
     fn remove_window(&mut self, surface: &WlSurface) {
@@ -151,8 +197,8 @@ impl CompState {
                 top.send_configure();
             }
         }
-        if let Some(deco) = self.decorations.get_mut(&id) {
-            deco.resize((geom.width as i32, TITLEBAR_HEIGHT as i32));
+        if self.decorations.contains_key(&id) {
+            self.redraw_decoration_buffer(id);
         }
     }
 }
@@ -169,11 +215,24 @@ impl CompositorHandler for CompState {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        // Two possible client kinds now: our own `ClientState` for regular
+        // Wayland clients, or smithay's `XWaylandClientData` for the single
+        // XWayland client (see `xwayland.rs`) - both carry a
+        // `CompositorClientState`, just under different wrapper types.
+        if let Some(state) = client.get_data::<ClientState>() {
+            return &state.compositor_state;
+        }
+        &client.get_data::<smithay::xwayland::XWaylandClientData>().expect("client is neither ours nor XWayland's").compositor_state
     }
 
     fn commit(&mut self, surface: &WlSurface) {
         smithay::backend::renderer::utils::on_commit_buffer_handler::<CompState>(surface);
+        // XWayland's association of an X11 window with this wl_surface can
+        // arrive at any point relative to the map request (see
+        // `xwayland.rs`'s module docs); `surface_associated` handles the
+        // common ordering, this retries the surfaces still waiting on a
+        // commit to actually make that association queryable.
+        self.retry_pending_x11_windows();
         if let Some(&id) = self.surface_to_id.get(surface) {
             if let Some(w) = self.id_to_window.get(&id) {
                 w.on_commit();
@@ -265,7 +324,11 @@ pub struct WaylandPlatform {
 }
 
 impl WaylandPlatform {
-    pub fn connect(wm: Rc<RefCell<WindowManager>>) -> PlatformResult<Self> {
+    /// `bound_keys` are the config's `"Mod4+Shift+Return"`-style combo
+    /// strings (see `srdwm_core::key_combo_string`) - the same set the X11
+    /// backend grabs individually via `XGrabKey`. Only a keypress matching
+    /// one of these is withheld from the focused client.
+    pub fn connect(wm: Rc<RefCell<WindowManager>>, bound_keys: &[String]) -> PlatformResult<Self> {
         let display: Display<CompState> = Display::new().map_err(err)?;
         let dh = display.handle();
 
@@ -310,8 +373,13 @@ impl WaylandPlatform {
             id_to_window: HashMap::new(),
             decorations: HashMap::new(),
             pending: pending.clone(),
-            pointer_focus_super_held: false,
+            bound_keys: Rc::new(bound_keys.iter().cloned().collect()),
             start_time: Instant::now(),
+            udev: None,
+            xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<CompState>(&dh),
+            xwm: None,
+            xwayland_windows: HashMap::new(),
+            xwayland_pending: Vec::new(),
         };
 
         let listener = ListeningSocket::bind_auto("wayland", 0..32).map_err(err)?;
@@ -350,15 +418,18 @@ impl WaylandPlatform {
         let size = self.backend.window_size();
         self.output.change_current_state(Some(OutputMode { size, refresh: 60_000 }), None, None, None);
 
-        let mut custom_elements: Vec<SolidColorRenderElement> = Vec::new();
+        let age = self.backend.buffer_age().unwrap_or(0);
+        let (renderer, mut framebuffer) = self.backend.bind().map_err(err)?;
+
+        let mut custom_elements: Vec<MemoryRenderBufferRenderElement<GlesRenderer>> = Vec::new();
         for (&id, deco) in self.state.decorations.iter() {
-            if let Some(geom) = self.wm.borrow().window(id).map(|w| w.geometry) {
-                custom_elements.push(SolidColorRenderElement::from_buffer(deco, (geom.x, geom.y), 1.0, 1.0, Kind::Unspecified));
+            let Some(geom) = self.wm.borrow().window(id).map(|w| w.geometry) else { continue };
+            match MemoryRenderBufferRenderElement::from_buffer(renderer, (geom.x as f64, geom.y as f64), deco, None, None, None, Kind::Unspecified) {
+                Ok(elem) => custom_elements.push(elem),
+                Err(e) => log::warn!("failed to import titlebar buffer for window {id}: {e}"),
             }
         }
 
-        let age = self.backend.buffer_age().unwrap_or(0);
-        let (renderer, mut framebuffer) = self.backend.bind().map_err(err)?;
         render_output(
             &self.output,
             renderer,
@@ -381,28 +452,7 @@ impl WaylandPlatform {
 fn handle_winit_event(state: &mut CompState, output: &Output, event: WinitEvent, closed: &mut bool) {
     match event {
         WinitEvent::CloseRequested => *closed = true,
-        WinitEvent::Input(InputEvent::Keyboard { event }) => {
-            let keycode = event.key_code();
-            let key_state = event.state();
-            let time = event.time_msec();
-            let serial = SERIAL_COUNTER.next_serial();
-            let Some(keyboard) = state.seat.get_keyboard() else { return };
-
-            let mut super_now = state.pointer_focus_super_held;
-            keyboard.input::<(), _>(state, keycode, key_state, serial, time, |_, mods, _handle| {
-                super_now = mods.logo;
-                FilterResult::Forward
-            });
-            state.pointer_focus_super_held = super_now;
-
-            if super_now && key_state == BackendKeyState::Pressed {
-                if let Some(name) = keysym_name_for(&keyboard, keycode) {
-                    state.pending.borrow_mut().push(CoreEvent::KeyPress { key_name: name, modifiers: Modifiers::SUPER });
-                }
-            }
-            // Not a WM shortcut: let the focused client see it (already
-            // forwarded by the FilterResult::Forward above).
-        }
+        WinitEvent::Input(InputEvent::Keyboard { event }) => handle_keyboard_key_event(state, &event),
         WinitEvent::Input(InputEvent::PointerMotionAbsolute { event }) => {
             let size = output.current_mode().map(|m| m.size).unwrap_or_default().to_logical(1);
             let pos = event.position_transformed(size);
@@ -419,14 +469,60 @@ fn handle_winit_event(state: &mut CompState, output: &Output, event: WinitEvent,
     }
 }
 
-fn keysym_name_for(keyboard: &smithay::input::keyboard::KeyboardHandle<CompState>, keycode: smithay::backend::input::Keycode) -> Option<String> {
-    let _ = keyboard;
-    let _ = keycode;
-    // TODO: translate via xkbcommon keysym -> name; the X11 backend's
-    // `keysyms` table isn't reachable from here without duplicating it.
-    // Global Wayland keybindings beyond the raw Super-modifier gate are not
-    // wired up yet - see docs/IMPLEMENTATION_STATUS.md.
-    None
+/// Shared between the winit (nested) and udev (bare-TTY) backends: both
+/// deliver keyboard events through smithay's generic `KeyboardKeyEvent`
+/// trait, so the precise-keybinding-matching logic (see the module docs)
+/// only needs to exist once.
+fn handle_keyboard_key_event<B: smithay::backend::input::InputBackend, E: KeyboardKeyEvent<B>>(state: &mut CompState, event: &E) {
+    let keycode = event.key_code();
+    let key_state = event.state();
+    let time = event.time_msec();
+    let serial = SERIAL_COUNTER.next_serial();
+    let Some(keyboard) = state.seat.get_keyboard() else { return };
+
+    let bound_keys = state.bound_keys.clone();
+    let matched: Option<(String, Modifiers)> =
+        keyboard.input(state, keycode, key_state, serial, time, move |_, mods, handle| {
+            let modifiers = core_modifiers_from_xkb(mods);
+            match keysym_name_for(handle) {
+                Some(name) if bound_keys.contains(&srdwm_core::key_combo_string(modifiers, &name)) => {
+                    FilterResult::Intercept((name, modifiers))
+                }
+                _ => FilterResult::Forward,
+            }
+        });
+
+    if key_state == BackendKeyState::Pressed {
+        if let Some((key_name, modifiers)) = matched {
+            state.pending.borrow_mut().push(CoreEvent::KeyPress { key_name, modifiers });
+        }
+    }
+    // Unmatched keys were already forwarded to the focused client by
+    // `FilterResult::Forward` inside the closure above.
+}
+
+/// Translates the effective xkb keysym for this keypress into the same
+/// `"Return"`/`"a"`/`"F5"`-style name `srdwm_core::keysyms` uses, so a
+/// binding written once in Lua resolves identically on X11 and Wayland.
+fn keysym_name_for(handle: smithay::input::keyboard::KeysymHandle<'_>) -> Option<String> {
+    srdwm_core::keysyms::keysym_to_name(handle.modified_sym().raw())
+}
+
+fn core_modifiers_from_xkb(mods: &smithay::input::keyboard::ModifiersState) -> Modifiers {
+    let mut m = Modifiers::empty();
+    if mods.shift {
+        m |= Modifiers::SHIFT;
+    }
+    if mods.ctrl {
+        m |= Modifiers::CTRL;
+    }
+    if mods.alt {
+        m |= Modifiers::ALT;
+    }
+    if mods.logo {
+        m |= Modifiers::SUPER;
+    }
+    m
 }
 
 fn last_pointer_pos(state: &CompState) -> Point<f64, Logical> {
@@ -580,6 +676,10 @@ impl Platform for WaylandPlatform {
     }
 
     fn redraw_decoration(&mut self, window: WindowId, _win: &CoreWindow, _focused: bool) -> PlatformResult<()> {
+        // Re-renders the title/focus-color band and re-syncs geometry;
+        // `sync_geometry` re-renders the decoration too, but only if one
+        // already exists, so this also covers first paint.
+        self.state.redraw_decoration_buffer(window);
         self.state.sync_geometry(window);
         Ok(())
     }
@@ -591,4 +691,21 @@ impl Platform for WaylandPlatform {
     fn ungrab_keyboard(&mut self) -> PlatformResult<()> {
         Ok(())
     }
+}
+
+/// Connects to Wayland, choosing between the udev/DRM backend (bare TTY, no
+/// host compositor to nest under - see `udev.rs`) and this module's winit
+/// backend (nested window), the same way real compositors decide
+/// nested-vs-native. Falls back to winit if udev initialization fails for
+/// any reason (no seat access, no DRM device, ...), logging why rather than
+/// failing outright.
+pub fn connect(wm: Rc<RefCell<WindowManager>>, bound_keys: &[String]) -> PlatformResult<Box<dyn Platform>> {
+    let no_host_display = std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none();
+    if no_host_display {
+        match udev::UdevPlatform::connect(wm.clone(), bound_keys) {
+            Ok(platform) => return Ok(Box::new(platform)),
+            Err(e) => log::warn!("udev/DRM backend unavailable ({e}); falling back to nested winit backend"),
+        }
+    }
+    Ok(Box::new(WaylandPlatform::connect(wm, bound_keys)?))
 }

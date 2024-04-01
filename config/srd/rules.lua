@@ -1,6 +1,13 @@
-- Window rules (match-by-title/class -> action).
+- Window rules (match-by-title/class -> action), applied once when a
+- matching window is first created.
 --
-- A dedicated `srd.rule(...)` API is not implemented yet - see
-- docs/IMPLEMENTATION_STATUS.md. For now, achieve the same effect from
-- srd.bind()'d keys or by reacting to srd.window.focused() in your own
-- functions. This file is intentionally a no-op placeholder.
+- srd.rule(matcher, actions)
+--   matcher: { title = "substring, case-insensitive", class = "exact app_id/WM_CLASS, case-insensitive" }
+--            at least one of title/class is required - an empty matcher matches nothing.
+--   actions: { floating = bool, maximized = bool, workspace = id,
+--              x = .., y = .., width = .., height = ..,
+--              decorated = bool, border_color = {r,g,b}, border_width = px }
+--
+- Examples:
+- srd.rule({ class = "pavucontrol" }, { floating = true })
+- srd.rule({ title = "picture-in-picture" }, { floating = true, width = 480, height = 270 })

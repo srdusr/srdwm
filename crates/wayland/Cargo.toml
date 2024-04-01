@@ -10,8 +10,20 @@ srdwm-core.workspace = true
 srdwm-platform.workspace = true
 log.workspace = true
 thiserror.workspace = true
+fontdue = "0.9"
 
 [dependencies.smithay]
 version = "0.7"
 default-features = false
-features = ["backend_winit", "renderer_gl", "desktop", "wayland_frontend"]
+features = [
+    "backend_winit",
+    "backend_drm",
+    "backend_libinput",
+    "backend_udev",
+    "backend_session_libseat",
+    "renderer_gl",
+    "renderer_pixman",
+    "desktop",
+    "wayland_frontend",
+    "xwayland",
+]

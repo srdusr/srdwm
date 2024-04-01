@@ -191,6 +191,33 @@ srd.bind("Mod4+d", function() srd.spawn("rofi -show drun") end) - Default: Mod4+
 srd.bind("Mod4+Return", function() srd.spawn("alacritty") end)  -- Default: Mod4+Return
 ```
 
+## Window Rules
+
+Match windows by title/class and apply actions once, when they're first
+created:
+
+```lua
+srd.rule(matcher, actions)
+```
+
+`matcher` fields (at least one required; an empty matcher matches nothing):
+- `title` - case-insensitive substring match against the window title.
+- `class` (alias `app_id`) - case-insensitive exact match against the
+  window's `WM_CLASS` (X11) / `app_id` (Wayland).
+
+`actions` fields (all optional):
+- `floating` (bool), `maximized` (bool)
+- `workspace` (number) - workspace id to place the window on
+- `x`, `y`, `width`, `height` (number) - explicit geometry; all four must be
+  given together to take effect
+- `decorated` (bool)
+- `border_color` (`{r, g, b}`), `border_width` (number)
+
+```lua
+srd.rule({ class = "pavucontrol" }, { floating = true })
+srd.rule({ title = "Picture-in-Picture" }, { floating = true, width = 480, height = 270 })
+```
+
 ## Platform-Specific Defaults
 
 ### Linux (X11/Wayland)
@@ -319,18 +346,21 @@ srd.reset_category("general")
 
 ### Debug Commands
 ```lua
-- Check configuration status
-srd.debug.config_status()
+- Check configuration status: returns { keys, bound_keys, log_entries, config_dir }
+local status = srd.debug.config_status()
 
-- Validate current configuration
-srd.debug.validate_config()
+- Validate current configuration against docs/DEFAULTS.md's ranges/formats:
+- returns ok (bool), errors (array of human-readable strings, empty when ok)
+local ok, errors = srd.debug.validate_config()
+- equivalently, at the top level:
+local ok, errors = srd.validate_config()
 
-- Show current settings
-srd.debug.show_settings()
+- Show current settings: logs every key = value and returns them as a table
+local settings = srd.debug.show_settings()
 
-- Performance profiling
+- Performance profiling: profile_stop() returns elapsed seconds (number)
 srd.debug.profile_start()
-srd.debug.profile_stop()
+local elapsed = srd.debug.profile_stop()
 ```
 
 This documentation provides a comprehensive reference for all default values and configuration options in SRDWM.

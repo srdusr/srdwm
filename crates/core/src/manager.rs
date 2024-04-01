@@ -2,6 +2,7 @@ use crate::geometry::Rect;
 use crate::layout::{Layout, MasterStackLayout, NoOpLayout, TilingConfig};
 use crate::monitor::{Monitor, MonitorId};
 use crate::placement::{PlacementConfig, SmartPlacement, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
+use crate::rules::WindowRule;
 use crate::window::{ResizeEdge, TitlebarHit, Window, WindowId};
 use crate::workspace::{Workspace, WorkspaceId};
 use std::collections::HashMap;
@@ -47,6 +48,7 @@ pub struct WindowManager {
     pub placement: PlacementConfig,
     drag: Option<DragState>,
     resize: Option<ResizeState>,
+    rules: Vec<WindowRule>,
 }
 
 impl Default for WindowManager {
@@ -76,7 +78,14 @@ impl WindowManager {
             placement: PlacementConfig::default(),
             drag: None,
             resize: None,
+            rules: Vec::new(),
         }
+    }
+
+    /// Registers a window rule; on every subsequent `add_window`, the first
+    /// rule whose matcher matches the new window has its actions applied.
+    pub fn add_rule(&mut self, rule: WindowRule) {
+        self.rules.push(rule);
     }
 
     pub fn register_layout(&mut self, name: impl Into<String>, layout: Box<dyn Layout>) {
@@ -119,19 +128,45 @@ impl WindowManager {
     /// it's left for the next `arrange_workspace` call to place.
     pub fn add_window(&mut self, mut window: Window) -> WindowId {
         let id = window.id;
-        window.workspace = self.current_workspace;
+        let actions = self.rules.iter().find(|r| r.matcher.matches(&window)).map(|r| r.actions.clone());
+
+        let workspace = actions.as_ref().and_then(|a| a.workspace).unwrap_or(self.current_workspace);
+        window.workspace = workspace;
+        if let Some(a) = &actions {
+            if let Some(floating) = a.floating {
+                window.floating = floating;
+            }
+            if let Some(decorated) = a.decorated {
+                window.decorated = decorated;
+            }
+            if let Some(color) = a.border_color {
+                window.border_color = color;
+            }
+            if let Some(width) = a.border_width {
+                window.border_width = width;
+            }
+        }
+
         if let Some(monitor) = self.primary_monitor() {
             window.monitor = monitor.id;
-            let layout_name = self.workspace(self.current_workspace).map(|w| w.layout.clone()).unwrap_or_default();
+            let layout_name = self.workspace(workspace).map(|w| w.layout.clone()).unwrap_or_default();
             if layout_name != "tiling" {
-                let existing: Vec<Rect> = self.windows_on_workspace(self.current_workspace).map(|w| w.geometry).collect();
+                let existing: Vec<Rect> = self.windows_on_workspace(workspace).map(|w| w.geometry).collect();
                 let size = (window.geometry.width, window.geometry.height);
                 window.geometry = SmartPlacement::place(monitor, &existing, size, &self.placement);
             }
         }
+        if let Some(geometry) = actions.as_ref().and_then(|a| a.geometry) {
+            window.geometry = geometry;
+        }
+        let maximize = actions.as_ref().and_then(|a| a.maximized).unwrap_or(false);
+
         self.windows.insert(id, window);
         self.order.push(id);
         self.focused = Some(id);
+        if maximize {
+            self.toggle_maximize(id);
+        }
         id
     }
 
@@ -708,6 +743,46 @@ mod tests {
         assert_eq!(wm.visible_windows().count(), 0);
         wm.switch_workspace(ws2);
         assert_eq!(wm.visible_windows().count(), 1);
+    }
+
+    #[test]
+    fn matching_rule_floats_new_window_on_add() {
+        let mut wm = wm_with_monitor();
+        wm.set_layout(wm.current_workspace(), "tiling");
+        wm.add_rule(WindowRule {
+            matcher: crate::rules::WindowMatch { title_contains: Some("calculator".into()), class: None },
+            actions: crate::rules::WindowRuleActions { floating: Some(true), ..Default::default() },
+        });
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "Calculator"));
+        assert!(wm.is_floating(id));
+    }
+
+    #[test]
+    fn non_matching_rule_leaves_window_untouched() {
+        let mut wm = wm_with_monitor();
+        wm.add_rule(WindowRule {
+            matcher: crate::rules::WindowMatch { title_contains: Some("calculator".into()), class: None },
+            actions: crate::rules::WindowRuleActions { floating: Some(true), ..Default::default() },
+        });
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "Terminal"));
+        assert!(!wm.is_floating(id));
+    }
+
+    #[test]
+    fn rule_assigns_window_to_target_workspace() {
+        let mut wm = wm_with_monitor();
+        let target = wm.add_workspace("scratch", "dynamic");
+        wm.add_rule(WindowRule {
+            matcher: crate::rules::WindowMatch { title_contains: None, class: Some("scratchpad".into()) },
+            actions: crate::rules::WindowRuleActions { workspace: Some(target), ..Default::default() },
+        });
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "notes");
+        w.app_id = "scratchpad".into();
+        wm.add_window(w);
+        assert_eq!(wm.window(id).unwrap().workspace, target);
     }
 
     #[test]

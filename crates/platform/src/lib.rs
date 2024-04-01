@@ -32,6 +32,14 @@ impl PlatformKind {
 /// Chooses a backend the way the legacy `PlatformFactory` did: prefer
 /// Wayland when a compositor is reachable, fall back to X11, otherwise use
 /// the compile-time native backend on Windows/macOS.
+///
+/// X11 is only chosen when there's actual evidence of a running X server
+/// (`DISPLAY` set) and no Wayland evidence - `srdwm_x11::X11Platform`
+/// only ever *connects to* an existing server (Xephyr, or the real system
+/// Xorg started separately), it never spawns one itself. Every other case,
+/// including a bare TTY with neither env var set, resolves to Wayland:
+/// `srdwm_wayland::connect` is the only backend that can run standalone
+/// there, via its udev/DRM backend.
 pub fn detect() -> PlatformKind {
     #[cfg(target_os = "windows")]
     {
@@ -43,13 +51,52 @@ pub fn detect() -> PlatformKind {
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
-            || std::env::var("XDG_SESSION_TYPE").map(|v| v == "wayland").unwrap_or(false);
-        if wayland {
-            PlatformKind::Wayland
-        } else {
-            PlatformKind::X11
-        }
+        detect_unix(
+            std::env::var_os("WAYLAND_DISPLAY").is_some(),
+            std::env::var("XDG_SESSION_TYPE").map(|v| v == "wayland").unwrap_or(false),
+            std::env::var_os("DISPLAY").is_some(),
+        )
+    }
+}
+
+/// The env-var decision logic behind [`detect`]'s unix branch, pulled out
+/// as a pure function so it's testable without mutating real process env
+/// vars (which would be racy across parallel test threads).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn detect_unix(wayland_display: bool, xdg_session_type_wayland: bool, display: bool) -> PlatformKind {
+    let wayland_evidence = wayland_display || xdg_session_type_wayland;
+    if display && !wayland_evidence {
+        PlatformKind::X11
+    } else {
+        PlatformKind::Wayland
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_set_alone_picks_x11() {
+        assert_eq!(detect_unix(false, false, true), PlatformKind::X11);
+    }
+
+    #[test]
+    fn bare_tty_with_nothing_set_picks_wayland() {
+        assert_eq!(detect_unix(false, false, false), PlatformKind::Wayland);
+    }
+
+    #[test]
+    fn wayland_display_set_picks_wayland_even_if_display_also_set() {
+        // XWayland-style setups often have both DISPLAY and WAYLAND_DISPLAY
+        // set; Wayland should win.
+        assert_eq!(detect_unix(true, false, true), PlatformKind::Wayland);
+    }
+
+    #[test]
+    fn xdg_session_type_wayland_picks_wayland() {
+        assert_eq!(detect_unix(false, true, false), PlatformKind::Wayland);
     }
 }
 

@@ -18,12 +18,12 @@
 //!   millimeters instead of the CRTC's pixel mode; here it reads the CRTC.
 //!
 //! Not implemented (documented rather than faked): XKB-level keymaps (only
-//! a hand-maintained keysym table covering common keys, see `keysyms.rs`),
-//! ICCCM `WM_HINTS`/urgency, and EWMH pager/taskbar hints beyond
+//! a hand-maintained keysym table covering common keys, shared with the
+//! Wayland backend via `srdwm_core::keysyms`), ICCCM `WM_HINTS`/urgency, and
+//! EWMH pager/taskbar hints beyond
 //! `_NET_SUPPORTED`/`_NET_CLIENT_LIST`/`_NET_WM_STATE` maximize.
 
-mod keysyms;
-
+use srdwm_core::keysyms;
 use srdwm_core::{Event, Modifiers, MouseButton, TitlebarHit, Window as CoreWindow, WindowId, TITLEBAR_HEIGHT};
 use srdwm_core::{Monitor, Rect, WindowManager};
 use srdwm_platform::{Platform, PlatformError, PlatformKind, Result as PlatformResult};

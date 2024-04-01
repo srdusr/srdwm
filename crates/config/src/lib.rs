@@ -17,7 +17,7 @@ mod value;
 pub use value::ConfigValue;
 
 use mlua::{Lua, RegistryKey, Table, Value};
-use srdwm_core::{Direction, WindowManager};
+use srdwm_core::{Direction, Rect, WindowManager, WindowMatch, WindowRule, WindowRuleActions};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,7 @@ struct SharedState {
     config_dir: PathBuf,
     log: Vec<String>,
     running: Rc<std::cell::Cell<bool>>,
+    profile_start: Option<std::time::Instant>,
 }
 
 /// Owns the Lua interpreter and the `srd` module state. Cheap to keep around
@@ -62,6 +63,7 @@ impl Engine {
             config_dir: config_dir.into(),
             log: Vec::new(),
             running: Rc::new(std::cell::Cell::new(true)),
+            profile_start: None,
         }));
         let engine = Self { lua, state };
         engine.register_srd_module()?;
@@ -138,10 +140,20 @@ impl Engine {
         srd.set("reset_all", self.fn_reset_all()?)?;
         srd.set("reset_category", self.fn_reset_category()?)?;
         srd.set("bind", self.fn_bind()?)?;
+        srd.set("rule", self.fn_rule()?)?;
         srd.set("load", self.fn_load()?)?;
         srd.set("spawn", self.fn_spawn()?)?;
         srd.set("notify", self.fn_notify()?)?;
         srd.set("quit", self.fn_quit()?)?;
+        srd.set("validate_config", self.fn_validate_config()?)?;
+
+        let debug = lua.create_table()?;
+        debug.set("config_status", self.fn_debug_config_status()?)?;
+        debug.set("validate_config", self.fn_validate_config()?)?;
+        debug.set("show_settings", self.fn_debug_show_settings()?)?;
+        debug.set("profile_start", self.fn_debug_profile_start()?)?;
+        debug.set("profile_stop", self.fn_debug_profile_stop()?)?;
+        srd.set("debug", debug)?;
 
         let window = lua.create_table()?;
         window.set("focused", self.fn_window_focused()?)?;
@@ -266,6 +278,51 @@ impl Engine {
         })?)
     }
 
+    /// `srd.rule({ title = "...", class = "..." }, { floating = true, workspace = 2,
+    /// x = .., y = .., width = .., height = .., decorated = false,
+    /// border_color = {r,g,b}, border_width = 2, maximized = true })`.
+    /// At least one matcher field is required; unmatched rules apply nothing.
+    fn fn_rule(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, (matcher, actions): (Table, Table)| {
+            let title_contains: Option<String> = matcher.get("title")?;
+            let class: Option<String> = match matcher.get("class")? {
+                Some(c) => Some(c),
+                None => matcher.get("app_id")?,
+            };
+
+            let border_color: Option<(u8, u8, u8)> = match actions.get::<_, Option<Table>>("border_color")? {
+                Some(t) => Some((t.get(1)?, t.get(2)?, t.get(3)?)),
+                None => None,
+            };
+            let geometry: Option<Rect> = {
+                let x: Option<i32> = actions.get("x")?;
+                let y: Option<i32> = actions.get("y")?;
+                let width: Option<u32> = actions.get("width")?;
+                let height: Option<u32> = actions.get("height")?;
+                match (x, y, width, height) {
+                    (Some(x), Some(y), Some(width), Some(height)) => Some(Rect::new(x, y, width, height)),
+                    _ => None,
+                }
+            };
+
+            let rule = WindowRule {
+                matcher: WindowMatch { title_contains, class },
+                actions: WindowRuleActions {
+                    floating: actions.get("floating")?,
+                    maximized: actions.get("maximized")?,
+                    workspace: actions.get("workspace")?,
+                    geometry,
+                    decorated: actions.get("decorated")?,
+                    border_color,
+                    border_width: actions.get("border_width")?,
+                },
+            };
+            state.borrow().wm.borrow_mut().add_rule(rule);
+            Ok(())
+        })?)
+    }
+
     fn fn_load(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |lua, module: String| {
@@ -316,6 +373,73 @@ impl Engine {
             }
             state.borrow_mut().log.push(format!("[{level}] {message}"));
             Ok(())
+        })?)
+    }
+
+    /// Checks the numeric/string ranges documented in `docs/DEFAULTS.md`'s
+    /// "Validation Rules" section. Returns `(ok, errors)`; `errors` is an
+    /// empty table when `ok` is true.
+    fn fn_validate_config(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |lua, ()| {
+            let s = state.borrow();
+            let errors = validate(&s);
+            let ok = errors.is_empty();
+            Ok((ok, lua.create_sequence_from(errors)?))
+        })?)
+    }
+
+    fn fn_debug_config_status(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |lua, ()| {
+            let s = state.borrow();
+            let t = lua.create_table()?;
+            t.set("keys", s.values.len())?;
+            t.set("bound_keys", s.key_bindings.len())?;
+            t.set("log_entries", s.log.len())?;
+            t.set("config_dir", s.config_dir.to_string_lossy().into_owned())?;
+            Ok(t)
+        })?)
+    }
+
+    fn fn_debug_show_settings(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |lua, ()| {
+            let s = state.borrow();
+            let mut keys: Vec<&String> = s.values.keys().collect();
+            keys.sort();
+            let t = lua.create_table()?;
+            for key in keys {
+                let v = &s.values[key];
+                log::info!("{key} = {v:?}");
+                let lua_v = match v {
+                    ConfigValue::String(s) => Value::String(lua.create_string(s)?),
+                    ConfigValue::Number(n) => Value::Number(*n),
+                    ConfigValue::Bool(b) => Value::Boolean(*b),
+                    ConfigValue::List(items) => Value::Table(lua.create_sequence_from(items.clone())?),
+                };
+                t.set(key.as_str(), lua_v)?;
+            }
+            Ok(t)
+        })?)
+    }
+
+    fn fn_debug_profile_start(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, ()| {
+            state.borrow_mut().profile_start = Some(std::time::Instant::now());
+            Ok(())
+        })?)
+    }
+
+    fn fn_debug_profile_stop(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, ()| {
+            let elapsed = state.borrow_mut().profile_start.take().map(|t| t.elapsed().as_secs_f64());
+            if let Some(secs) = elapsed {
+                log::info!("profile: {:.3}ms", secs * 1000.0);
+            }
+            Ok(elapsed)
         })?)
     }
 
@@ -544,6 +668,70 @@ fn flatten_table_into(prefix: &str, table: &Table, out: &mut HashMap<String, Con
         }
     }
     Ok(())
+}
+
+/// Checks the numeric ranges, layout-name references, and hex-color strings
+/// documented in `docs/DEFAULTS.md`'s "Validation Rules" section against the
+/// current config values. Returns a human-readable error per violation.
+fn validate(s: &SharedState) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    let mut check_range = |key: &str, min: f64, max: f64| {
+        if let Some(v) = s.values.get(key).and_then(ConfigValue::as_f64) {
+            if v < min || v > max {
+                errors.push(format!("{key} = {v} is out of range [{min}, {max}]"));
+            }
+        }
+    };
+    check_range("general.window_gap", 0.0, 100.0);
+    check_range("layout.tiling.gaps.inner", 0.0, 100.0);
+    check_range("layout.tiling.gaps.outer", 0.0, 100.0);
+    check_range("layout.dynamic.gaps.inner", 0.0, 100.0);
+    check_range("layout.dynamic.gaps.outer", 0.0, 100.0);
+    check_range("layout.floating.gaps.inner", 0.0, 100.0);
+    check_range("layout.floating.gaps.outer", 0.0, 100.0);
+    check_range("general.border_width", 0.0, 20.0);
+    check_range("theme.decorations.border.width", 0.0, 20.0);
+    check_range("general.animation_duration", 0.0, 1000.0);
+    check_range("performance.max_fps", 30.0, 240.0);
+    check_range("performance.window_cache_size", 10.0, 10000.0);
+
+    let layouts: Vec<String> = s.wm.borrow().available_layouts().iter().map(|l| l.to_string()).collect();
+    for key in ["general.default_layout", "monitor.primary_layout", "monitor.secondary_layout"] {
+        if let Some(name) = s.values.get(key).and_then(ConfigValue::as_str) {
+            if !layouts.iter().any(|l| l == name) {
+                errors.push(format!("{key} = '{name}' is not a registered layout {layouts:?}"));
+            }
+        }
+    }
+
+    let color_keys = [
+        "theme.colors.background",
+        "theme.colors.foreground",
+        "theme.colors.primary",
+        "theme.colors.secondary",
+        "theme.colors.accent",
+        "theme.colors.error",
+        "theme.colors.warning",
+        "theme.colors.success",
+        "theme.decorations.border.active_color",
+        "theme.decorations.border.inactive_color",
+        "theme.decorations.title_bar.background",
+        "theme.decorations.title_bar.foreground",
+    ];
+    for key in color_keys {
+        if let Some(v) = s.values.get(key).and_then(ConfigValue::as_str) {
+            if !is_valid_hex_color(v) {
+                errors.push(format!("{key} = '{v}' is not a valid hex color (expected '#rrggbb')"));
+            }
+        }
+    }
+
+    errors
+}
+
+fn is_valid_hex_color(s: &str) -> bool {
+    s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// The config surface documented in `docs/DEFAULTS.md`, seeded before
@@ -775,6 +963,93 @@ mod tests {
         let engine = engine_in(dir.path());
         engine.lua.load(r#"srd.load("extra")"#).exec().unwrap();
         assert_eq!(engine.get("from.extra"), Some(ConfigValue::String("yes".into())));
+    }
+
+    #[test]
+    fn validate_config_passes_on_untouched_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine_in(dir.path());
+        engine
+            .lua
+            .load(r#"local ok, errs = srd.validate_config(); assert(ok, table.concat(errs, "; "))"#)
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_config_flags_out_of_range_gap_and_bad_color() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine_in(dir.path());
+        engine
+            .lua
+            .load(
+                r#"
+                srd.set("general.window_gap", 500)
+                srd.set("theme.colors.background", "not-a-color")
+                local ok, errs = srd.validate_config()
+                assert(ok == false)
+                assert(#errs == 2, "expected 2 errors, got " .. #errs)
+                "#,
+            )
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn validate_config_flags_unregistered_layout_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine_in(dir.path());
+        engine
+            .lua
+            .load(
+                r#"
+                srd.set("general.default_layout", "nonexistent")
+                local ok, errs = srd.validate_config()
+                assert(ok == false)
+                "#,
+            )
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn debug_namespace_reports_status_and_profiles() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine_in(dir.path());
+        engine
+            .lua
+            .load(
+                r#"
+                local status = srd.debug.config_status()
+                assert(status.keys > 0)
+                srd.debug.profile_start()
+                local elapsed = srd.debug.profile_stop()
+                assert(type(elapsed) == "number")
+                local settings = srd.debug.show_settings()
+                assert(settings["general.window_gap"] == 8)
+                "#,
+            )
+            .exec()
+            .unwrap();
+    }
+
+    #[test]
+    fn srd_rule_floats_matching_window_on_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        engine
+            .lua
+            .load(r#"srd.rule({ title = "calculator" }, { floating = true })"#)
+            .exec()
+            .unwrap();
+        let id = {
+            let mut wm = wm.borrow_mut();
+            let id = wm.alloc_window_id();
+            wm.add_window(srdwm_core::Window::new(id, "Calculator"));
+            id
+        };
+        assert!(wm.borrow().is_floating(id));
     }
 
     #[test]
