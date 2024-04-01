@@ -1,0 +1,17 @@
+[package]
+name = "srdwm-wayland"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wayland backend for srdwm: a smithay-based compositor"
+
+[dependencies]
+srdwm-core.workspace = true
+srdwm-platform.workspace = true
+log.workspace = true
+thiserror.workspace = true
+
+[dependencies.smithay]
+version = "0.7"
+default-features = false
+features = ["backend_winit", "renderer_gl", "desktop", "wayland_frontend"]

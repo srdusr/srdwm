@@ -1,3 +1,7 @@
+# Rust
+/target/
+crates/*/target/
+
 # Build directories
 build/
 build-*/

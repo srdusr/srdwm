@@ -1,0 +1,16 @@
+[package]
+name = "srdwm-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "macOS backend for srdwm (Accessibility API window control + overlay decorations)"
+
+[dependencies]
+srdwm-core.workspace = true
+srdwm-platform.workspace = true
+log.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics = "0.24"
+accessibility-sys = "0.1"

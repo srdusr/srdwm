@@ -1,0 +1,15 @@
+[package]
+name = "srdwm-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lua configuration engine for srdwm (the `srd` scripting API)"
+
+[dependencies]
+srdwm-core.workspace = true
+log.workspace = true
+thiserror.workspace = true
+mlua = { version = "0.9", features = ["lua54", "vendored"] }
+
+[dev-dependencies]
+tempfile = "3"

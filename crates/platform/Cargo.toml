@@ -1,0 +1,11 @@
+[package]
+name = "srdwm-platform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Platform abstraction trait shared by all srdwm backends"
+
+[dependencies]
+srdwm-core.workspace = true
+log.workspace = true
+thiserror.workspace = true

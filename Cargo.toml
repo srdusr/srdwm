@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/srdwm",
+    "crates/core",
+    "crates/config",
+    "crates/platform",
+    "crates/x11",
+    "crates/wayland",
+    "crates/windows",
+    "crates/macos",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+authors = ["srdusr"]
+repository = "https://github.com/srdusr/srdwm"
+
+[workspace.dependencies]
+srdwm-core = { path = "crates/core" }
+srdwm-config = { path = "crates/config" }
+srdwm-platform = { path = "crates/platform" }
+srdwm-x11 = { path = "crates/x11" }
+srdwm-wayland = { path = "crates/wayland" }
+srdwm-windows = { path = "crates/windows" }
+srdwm-macos = { path = "crates/macos" }
+
+log = "0.4"
+env_logger = "0.11"
+thiserror = "2"
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,6 @@
+- Window rules (match-by-title/class -> action).
+--
+- A dedicated `srd.rule(...)` API is not implemented yet - see
+- docs/IMPLEMENTATION_STATUS.md. For now, achieve the same effect from
+- srd.bind()'d keys or by reacting to srd.window.focused() in your own
+- functions. This file is intentionally a no-op placeholder.

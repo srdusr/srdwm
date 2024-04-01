@@ -1,336 +1,129 @@
-# SRDWM Implementation Status
+# Implementation status
 
-## Overview
-This document provides a comprehensive overview of the current implementation status of SRDWM, including completed features, in-progress work, and next steps.
+This mirrors the style of the legacy C++ project's own status doc (now at
+`legacy-cpp/docs/IMPLEMENTATION_STATUS.md`), but for the Rust rewrite.
+"Verified" means: built with `cargo test --workspace` (0 warnings under
+`cargo clippy --workspace`) and, where applicable, actually run and observed
+doing the thing described - not just "the code compiles and looks right."
 
-## ✅ **Completed Features**
+## ✅ Complete and verified
 
-### 1. **Lua Configuration System**
-- **Status**: ✅ **FULLY IMPLEMENTED**
-- **Files**: 
-  - `src/config/lua_manager.h/cc` - Complete Lua integration
-  - `config/srd/*.lua` - Example configuration files
-  - `docs/DEFAULTS.md` - Complete default configuration reference
-- **Features**:
-  - Full Lua 5.4+ integration with C++
-  - Complete `srd` module API
-  - Configuration loading from `srd/*.lua` files
-  - Key binding system
-  - Layout configuration
-  - Theme management
-  - Window rules
-  - Configuration validation and reset
-  - Error handling and logging
+### Core window/workspace/layout engine (`crates/core`)
+- `WindowManager`: window/workspace/monitor state, focus cycling, directional
+  focus (`Direction::{Left,Right,Up,Down}`), drag/resize state machine,
+  hit-testing shared by every backend.
+- `MasterStackLayout`: real dwm-style master/stack tiling with configurable
+  ratio and gaps (the legacy C++ tiling layout only ever split windows into
+  equal-width columns, ignoring its own documented `master_ratio` config key).
+- `SmartPlacement`: grid placement with real per-cell occupancy tracking,
+  diagonal cascade fallback, and Windows-Snap-style edge magnetism
+  (half/quarter/maximize zones). The legacy C++ version's grid placement
+  used a `static` round-robin counter that hardcoded a 2-column layout
+  regardless of window count; its cascade never actually cascaded; its
+  snap-to-edge always returned a fixed centered rectangle.
+- 35 unit tests, deterministic (window arrangement no longer depends on
+  `HashMap` iteration order - an early version of `arrange_workspace` did,
+  and it was caught by a flaky test during this rewrite; see the fix in
+  `crates/core/src/manager.rs`).
 
-### 2. **Platform Architecture Design**
-- **Status**: ✅ **FULLY DESIGNED**
-- **Files**: 
-  - `docs/PLATFORM_IMPLEMENTATION.md` - Complete platform guide
-  - `src/platform/platform.h` - Platform abstraction interface
-  - `src/platform/platform_factory.h/cc` - Platform factory implementation
-- **Features**:
-  - Proper separation of X11 vs Wayland (no mixing!)
-  - Platform detection and selection
-  - Cross-platform abstraction layer
-  - Automatic platform detection
+### Lua config engine (`crates/config`)
+- Full `srd` API matching `docs/DEFAULTS.md`'s documented (not the legacy
+  C++'s actually-implemented) surface: `srd.set/get/reset/reset_all/reset_category`,
+  `srd.window.{focused,close,minimize,maximize,focus,set_decorations,
+  set_border_color,set_border_width,set_floating,toggle_floating,is_floating}`,
+  `srd.layout.{set,configure}`, `srd.workspace.{next,prev,switch,move_window}`,
+  `srd.theme.{set_colors,set_decorations}`, `srd.bind`, `srd.load`,
+  `srd.spawn`, `srd.notify`, `srd.quit`.
+- `srd.bind()` stores the actual Lua closure via `mlua`'s registry and
+  invokes it on dispatch (the legacy engine stored only the key-combo
+  string - keybindings could never fire).
+- `local srd = require("srd")` works (registered via `package.preload`, not
+  just as a global) - every shipped example config opens with this line,
+  and it would have failed against a naive "global-only" registration; this
+  was caught and fixed during the smoke test.
+- 10 unit tests, including one that reproduces the exact legacy bug
+  (`window:close()` on a table with no methods) and shows it now works.
 
-### 3. **Build System**
-- **Status**: ✅ **FULLY IMPLEMENTED**
-- **Files**: 
-  - `CMakeLists.txt` - Complete build configuration
-- **Features**:
-  - Platform-specific dependency management
-  - Lua integration
-  - Conditional compilation for different platforms
-  - Proper include and library paths
+### X11 backend (`crates/x11`)
+- Real reparenting WM: frame windows sized to actual client geometry (not
+  the legacy's hardcoded 800px titlebar), drawn title bar with
+  close/maximize/minimize buttons, drag-to-move, edge/corner resize --
+  all driven by the same `ResizeEdge::hit_test` the Wayland backend uses.
+- Correct other-WM detection via a *checked* `SUBSTRUCTURE_REDIRECT`
+  request (the legacy version's error handler discarded errors and always
+  reported success).
+- RandR monitor enumeration using CRTC pixel mode, not output physical
+  millimeters (the legacy version conflated the two).
+- `WM_DELETE_WINDOW`-aware close, click-to-focus via a passive button grab
+  + replay (the standard dwm/openbox pattern), global keybinding grabs
+  translated from Lua combo strings via a hand-maintained keysym table
+  (`crates/x11/src/keysyms.rs`, letters/digits/navigation/F-keys/media keys;
+  not a full xkbcommon keymap).
+- **Verified live**: run under Xephyr with the shipped example config, an
+  `xterm` client was correctly reparented (frame at the exact
+  `SmartPlacement`-computed position, client offset by exactly
+  `TITLEBAR_HEIGHT`), and the drawn title bar (background, title text,
+  minimize/maximize/close glyphs) was confirmed via screenshot.
 
-### 4. **Documentation**
-- **Status**: ✅ **COMPREHENSIVE**
-- **Files**:
-  - `docs/DEFAULTS.md` - Complete configuration reference
-  - `docs/GUI_SETTINGS.md` - GUI settings program design
-  - `docs/PLATFORM_IMPLEMENTATION.md` - Platform implementation guide
-  - `docs/IMPLEMENTATION_STATUS.md` - This status document
+### Windows and macOS backends (`crates/windows`, `crates/macos`)
+- Structured as honest stubs: real-looking `windows-rs`/Core Graphics calls
+  behind `cfg(windows)` / `cfg(target_os = "macos")`, but **never built or
+  run** - this sandbox only has the `x86_64-unknown-linux-gnu` target
+  installed. On any other target the same methods return
+  `PlatformError::Unsupported` rather than pretending to work.
+- Design intent (informed by komorebi/glazewm for Windows, yabai/AeroSpace
+  for macOS - see `docs/PRIOR_ART.md`) is documented in each crate's module
+  doc comment: keep DWM's native frame on Windows rather than fight it;
+  use the public Accessibility API plus an overlay window for decorations
+  on macOS, not private APIs.
 
-## 🔄 **In Progress**
+## 🔄 Wayland backend (`crates/wayland`) - real, more limited scope than X11
 
-### 1. **Platform-Specific Implementations**
-- **Status**: 🔄 **HEADERS CREATED, IMPLEMENTATION IN PROGRESS**
-- **Files**:
-  - `src/platform/x11_platform.h` - X11 platform header ✅
-  - `src/platform/wayland_platform.h` - Wayland platform header ✅
-  - `src/platform/windows_platform.h` - Windows platform header ✅
-  - `src/platform/macos_platform.h` - macOS platform header ✅
-- **Progress**: Headers and interfaces defined, implementation needed
+This is the one piece with essentially no working prior art to port (see
+`docs/PRIOR_ART.md`): the legacy C++ never wired a single event listener.
+What's here is a genuine from-scratch `smithay`-based compositor, not a stub:
 
-### 2. **Core Window Management**
-- **Status**: 🔄 **INTERFACES DEFINED, IMPLEMENTATION NEEDED**
-- **Files**:
-  - `src/core/window.h/cc` - Window class interface ✅
-  - `src/core/window_manager.h/cc` - Window manager interface ✅
-  - `src/layouts/layout_engine.h/cc` - Layout engine interface ✅
-- **Progress**: Basic structure defined, platform integration needed
+- ✅ Runs via smithay's winit backend (nested window), initializes EGL/GLES,
+  advertises a real Wayland socket, and was verified to start, initialize
+  rendering, and run its event loop without crashing (log-verified; a
+  full visual confirmation the way X11 got one was skipped deliberately --
+  see below).
+- ✅ xdg-shell toplevels are tracked through the *same*
+  `srdwm_core::WindowManager` the X11 backend uses - new windows get a
+  real `WindowId`, go through `SmartPlacement`/`MasterStackLayout` exactly
+  like X11 windows do.
+- ✅ xdg-decoration is negotiated to server-side mode.
+- ✅ Pointer click/drag/resize on the decoration band uses the identical
+  `hit_test` code path as X11.
+- ⚠️ Decorations are a solid-color titlebar band with **no text** - font
+  rasterization (glyph atlas, text shaping) is a substantial independent
+  piece of work, not something to fake with a placeholder.
+- ⚠️ Global keybindings use a coarse heuristic: any keypress with Super/Mod4
+  held is treated as WM-exclusive and not forwarded to the client; anything
+  else is forwarded. A precise design would thread the config's actual
+  bound-key set into the platform layer (X11 does this correctly via
+  per-combo `XGrabKey`); Wayland's compositor-sees-everything-first model
+  makes the equivalent design more involved and was left as a TODO rather
+  than rushed.
+- ❌ No DRM/udev backend (i.e. cannot run as the actual system compositor on
+  a bare TTY, only nested under an existing session) - winit backend only.
+- ❌ No XWayland integration.
 
-## ❌ **Not Yet Started**
+**Why the visual verification stopped short of a screenshot**: the winit
+window opens on the *host* compositor, and the only available display in
+this sandbox was the user's live desktop session (not an isolated nested
+server the way Xephyr was for X11). A screenshot of that would have
+captured the user's actual desktop/other work, which isn't appropriate to
+casually paste into a build log. The X11 backend's Xephyr-based
+verification is the same class of test, done on an isolated, disposable
+display instead.
 
-### 1. **Platform Implementation Files**
-- `src/platform/x11_platform.cc` - X11 implementation
-- `src/platform/wayland_platform.cc` - Wayland implementation
-- `src/platform/windows_platform.cc` - Windows implementation
-- `src/platform/macos_platform.cc` - macOS implementation
+## Not implemented anywhere yet
 
-### 2. **Smart Placement Algorithms**
-- `src/layouts/smart_placement.cc` - Smart window placement implementation
-
-### 3. **GUI Settings Program**
-- Cross-platform settings interface
-- System integration (Windows Settings, macOS Preferences, Linux Settings)
-
-### 4. **Advanced Features**
-- Window rules engine
-- Advanced theming system
-- Performance optimization
-- Accessibility features
-
-## 🚀 **Next Implementation Steps**
-
-### **Phase 1: Platform Implementation (Priority: HIGH)**
-
-#### **1.1 X11 Platform Implementation**
-```bash
-# Create X11 implementation
-touch src/platform/x11_platform.cc
-# Implement X11 event handling, window management, input handling
-```
-
-**Key Requirements**:
-- X11 event loop and event conversion
-- Window management (create, destroy, move, resize)
-- Input handling (keyboard, mouse)
-- Monitor detection and management
-- EWMH/NETWM compliance
-
-#### **1.2 Wayland Platform Implementation**
-```bash
-# Create Wayland implementation
-touch src/platform/wayland_platform.cc
-# Implement Wayland compositor using wlroots
-```
-
-**Key Requirements**:
-- wlroots backend setup
-- Wayland protocol handling (XDG Shell, Layer Shell)
-- XWayland support
-- Surface management
-- Input device handling
-
-#### **1.3 Windows Platform Implementation**
-```bash
-# Create Windows implementation
-touch src/platform/windows_platform.cc
-# Implement Win32 API integration
-```
-
-**Key Requirements**:
-- Win32 window management
-- Global hooks for input
-- DWM integration
-- Window subclassing
-
-#### **1.4 macOS Platform Implementation**
-```bash
-# Create macOS implementation
-touch src/platform/macos_platform.cc
-# Implement Core Graphics/AppKit integration
-```
-
-**Key Requirements**:
-- Core Graphics window management
-- Accessibility APIs
-- Event taps
-- AppKit integration
-
-### **Phase 2: Core Window Management (Priority: HIGH)**
-
-#### **2.1 Window Class Implementation**
-```cpp
-// Implement platform-specific window operations
-class Window {
-    // Platform-specific window handles
-    #ifdef LINUX_PLATFORM
-        Window x11_handle_;
-        struct wlr_surface* wayland_surface_;
-    #elif defined(WIN32_PLATFORM)
-        HWND win32_handle_;
-    #elif defined(MACOS_PLATFORM)
-        CGWindowID macos_window_id_;
-    #endif
-};
-```
-
-#### **2.2 Window Manager Implementation**
-```cpp
-// Implement core window management logic
-class WindowManager {
-    // Platform integration
-    std::unique_ptr<Platform> platform_;
-    
-    // Window management
-    void handle_window_created(Window* window);
-    void handle_window_destroyed(Window* window);
-    void handle_window_focused(Window* window);
-};
-```
-
-### **Phase 3: Layout System (Priority: MEDIUM)**
-
-#### **3.1 Smart Placement Implementation**
-```cpp
-// Implement Windows 11-style smart placement
-class SmartPlacement {
-    PlacementResult place_window(const Window* window, const Monitor& monitor);
-    PlacementResult place_in_grid(const Window* window, const Monitor& monitor);
-    PlacementResult snap_to_edge(const Window* window, const Monitor& monitor);
-};
-```
-
-#### **3.2 Layout Engine Implementation**
-```cpp
-// Implement layout management
-class LayoutEngine {
-    void arrange_windows_on_monitor(const Monitor& monitor);
-    void switch_layout(const std::string& layout_name);
-    void configure_layout(const std::string& layout_name, const LayoutConfig& config);
-};
-```
-
-### **Phase 4: Advanced Features (Priority: LOW)**
-
-#### **4.1 Window Rules Engine**
-```cpp
-// Implement automatic window management
-class WindowRulesEngine {
-    void apply_rules_to_window(Window* window);
-    bool matches_rule(const Window* window, const WindowRule& rule);
-    void execute_rule_action(const Window* window, const WindowRule& rule);
-};
-```
-
-#### **4.2 GUI Settings Program**
-```cpp
-// Cross-platform settings interface
-class SettingsProgram {
-    #ifdef LINUX_PLATFORM
-        void create_gtk_interface();
-    #elif defined(WIN32_PLATFORM)
-        void create_winui_interface();
-    #elif defined(MACOS_PLATFORM)
-        void create_swiftui_interface();
-    #endif
-};
-```
-
-## 🧪 **Testing Strategy**
-
-### **Unit Testing**
-```bash
-# Test each platform independently
-mkdir tests/
-touch tests/test_x11_platform.cc
-touch tests/test_wayland_platform.cc
-touch tests/test_windows_platform.cc
-touch tests/test_macos_platform.cc
-```
-
-### **Integration Testing**
-```bash
-# Test platform integration
-touch tests/test_platform_factory.cc
-touch tests/test_lua_integration.cc
-```
-
-### **Platform-Specific Testing**
-```bash
-# Test on actual platforms
-# Linux: X11 and Wayland environments
-# Windows: Windows 10/11
-# macOS: macOS 12+
-```
-
-## 📊 **Current Progress Metrics**
-
-| Component | Status | Progress | Priority |
-|-----------|--------|----------|----------|
-| Lua Configuration | ✅ Complete | 100% | HIGH |
-| Platform Architecture | ✅ Complete | 100% | HIGH |
-| Build System | ✅ Complete | 100% | HIGH |
-| Documentation | ✅ Complete | 100% | HIGH |
-| Platform Headers | 🔄 In Progress | 80% | HIGH |
-| Platform Implementation | ❌ Not Started | 0% | HIGH |
-| Core Window Management | 🔄 In Progress | 40% | HIGH |
-| Layout System | ❌ Not Started | 0% | MEDIUM |
-| Smart Placement | ❌ Not Started | 0% | MEDIUM |
-| GUI Settings | ❌ Not Started | 0% | LOW |
-
-**Overall Progress: 35%**
-
-## 🎯 **Immediate Next Steps**
-
-### **Week 1-2: Platform Implementation**
-1. **Implement X11 platform** (`src/platform/x11_platform.cc`)
-2. **Implement Wayland platform** (`src/platform/wayland_platform.cc`)
-3. **Test platform detection and initialization**
-
-### **Week 3-4: Core Integration**
-1. **Integrate platforms with window manager**
-2. **Implement basic window operations**
-3. **Test window creation and management**
-
-### **Week 5-6: Layout System**
-1. **Implement smart placement algorithms**
-2. **Create layout engine**
-3. **Test layout switching and configuration**
-
-## 🚨 **Critical Notes**
-
-### **1. Wayland vs X11 Separation**
-- **NEVER mix X11 and Wayland APIs**
-- Use wlroots for Wayland implementation
-- Handle XWayland as special case within Wayland
-- Maintain strict separation in platform implementations
-
-### **2. Platform Abstraction**
-- Keep platform-specific code isolated
-- Use common interfaces for cross-platform functionality
-- Implement platform detection automatically
-- Respect each platform's event model
-
-### **3. Testing Requirements**
-- Test each platform independently
-- Validate platform-specific features
-- Use CI/CD with multiple platform targets
-- Test on actual hardware when possible
-
-## 🔮 **Future Enhancements**
-
-### **Phase 5: Performance Optimization**
-- GPU acceleration
-- Efficient rendering
-- Memory management
-- Event batching
-
-### **Phase 6: Advanced Features**
-- Plugin system
-- Scripting engine
-- Network transparency
-- Virtual desktop support
-
-### **Phase 7: Ecosystem Integration**
-- Package managers
-- Theme repositories
-- Configuration sharing
-- Community tools
-
-This implementation approach ensures that SRDWM works correctly on each platform while respecting the fundamental differences between X11, Wayland, Windows, and macOS. The current focus should be on completing the platform implementations to establish a solid foundation for the window management system.
-
-
+- Window rules (match-by-title/class -> action). `config/srd/rules.lua` is
+  a documented placeholder.
+- `srd.debug.*` namespace, `srd.validate_config()` beyond a trivial always-true.
+- Animations (`general.animations`/`animation_duration` config keys exist
+  and are read into defaults, but nothing consumes them yet).
+- A native GUI settings app (the legacy project's `GUI_SETTINGS.md` was
+  pure design doc even in C++; not revisited here).

@@ -1,0 +1,26 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install X11/Wayland dev packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxcb1-dev libxcb-randr0-dev libxcb-keysyms1-dev \
+            libwayland-dev wayland-protocols libxkbcommon-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libinput-dev libudev-dev \
+            libgbm-dev libdrm-dev libseat-dev
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --no-deps -- -D warnings

@@ -1,0 +1,12 @@
+[package]
+name = "srdwm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Platform-independent window/workspace/layout state for srdwm"
+
+[dependencies]
+log.workspace = true
+bitflags = "2"
+
+[dev-dependencies]
