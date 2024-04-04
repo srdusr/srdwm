@@ -40,7 +40,33 @@ pub(crate) type X11Window = smithay::xwayland::xwm::X11Window;
 /// internal X11-connection source. Both are owned by the event loop after
 /// `insert_source`, not by any struct here - dropping the loop (or the
 /// `X11Wm` on disconnect) is what shuts things down.
+///
+/// Before spawning, arranges for XWayland to run with `-shm`: this
+/// compositor only ever supports `wl_shm` (see `udev.rs`'s module docs on
+/// why it's deliberately software-only, no GBM/DMA-BUF), and XWayland's
+/// default behavior of trying `glamor` first and falling back to
+/// shared-memory buffers on failure does *not* fall back to the
+/// `xwayland_shell_v1` protocol for associating X11 windows with
+/// `wl_surface`s - confirmed by tracing the actual Wayland protocol
+/// exchange with `WAYLAND_DEBUG=1`. Starting with `-shm` from the outset
+/// avoids the failed glamor attempt entirely, which keeps XWayland on the
+/// code path that does use `xwayland_shell_v1` correctly.
+///
+/// `smithay::xwayland::XWayland::spawn` builds its `Xwayland` command line
+/// internally with a fixed argument list (no way to add `-shm` directly),
+/// and can't be bypassed either: the `XWaylandClientData` type it inserts
+/// as the spawned client's data has private fields, so nothing outside
+/// smithay can construct one, and `X11Wm`/the internal surface-association
+/// commit hook both depend on the client's data specifically being that
+/// type. Instead, a tiny wrapper script shadows `Xwayland` on `PATH`
+/// (`Command::new("Xwayland")`'s lookup honors the `PATH` smithay copies
+/// from this process's own environment) and always re-execs the real
+/// binary with `-shm` prepended.
 pub(crate) fn spawn(handle: &LoopHandle<'static, CompState>, display_handle: &smithay::reexports::wayland_server::DisplayHandle) -> std::io::Result<()> {
+    if let Err(e) = ensure_shm_wrapper_on_path() {
+        log::warn!("could not set up an -shm wrapper for XWayland ({e}); XWayland windows will likely fail to render - see xwayland.rs's `spawn` docs");
+    }
+
     let (xwayland, client) = XWayland::spawn(display_handle, None, std::iter::empty::<(String, String)>(), true, std::process::Stdio::null(), std::process::Stdio::null(), |_| ())?;
 
     let handle_for_ready = handle.clone();
@@ -57,6 +83,60 @@ pub(crate) fn spawn(handle: &LoopHandle<'static, CompState>, display_handle: &sm
         })
         .map_err(|e| std::io::Error::other(format!("failed to register XWayland source: {e}")))?;
     Ok(())
+}
+
+/// Writes a small shell script named `Xwayland` to a private directory and
+/// prepends that directory to this process's own `PATH` - the next
+/// `Command::new("Xwayland")` (namely `XWayland::spawn`'s, which copies
+/// `PATH` from this process's environment into the child's) resolves to
+/// the wrapper instead of the real binary. The wrapper always re-execs the
+/// real `Xwayland` with `-shm` prepended to whatever arguments it was
+/// given, so it's transparent to everything else `spawn` sets up.
+fn ensure_shm_wrapper_on_path() -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let real_xwayland = find_on_path("Xwayland").ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Xwayland not found on PATH"))?;
+
+    let wrapper_dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir).join("srdwm-xwayland-shm-wrapper");
+    std::fs::create_dir_all(&wrapper_dir)?;
+
+    let wrapper_path = wrapper_dir.join("Xwayland");
+    let quoted = shell_single_quote(&real_xwayland.to_string_lossy());
+    std::fs::write(&wrapper_path, format!("#!/bin/sh\nexec {quoted} -shm \"$@\"\n"))?;
+    let mut perms = std::fs::metadata(&wrapper_path)?.permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&wrapper_path, perms)?;
+
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut new_path = wrapper_dir.into_os_string();
+    new_path.push(":");
+    new_path.push(old_path);
+    // SAFETY: called once, synchronously, before any XWayland process (or
+    // any other thread) is spawned.
+    unsafe { std::env::set_var("PATH", new_path) };
+    Ok(())
+}
+
+fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var).map(|dir| dir.join(name)).find(|candidate| candidate.is_file())
+}
+
+/// POSIX single-quoting: safe for any byte sequence, including embedded
+/// single quotes (`'` -> `'\''`).
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_single_quote_handles_embedded_quotes() {
+        assert_eq!(shell_single_quote("/usr/bin/Xwayland"), "'/usr/bin/Xwayland'");
+        assert_eq!(shell_single_quote("/it's/here"), r"'/it'\''s/here'");
+    }
 }
 
 fn to_core_resize_edge(edge: X11ResizeEdge) -> ResizeEdge {
@@ -112,7 +192,6 @@ impl CompState {
         let geom = self.wm.borrow().window(id).map(|w| w.geometry).unwrap_or_default();
 
         let dwindow = DWindow::new_x11_window(surface.clone());
-        let _ = surface.set_mapped(true);
         let _ = surface.configure(Rectangle::new((geom.x, geom.y + TITLEBAR_HEIGHT as i32).into(), (geom.width as i32, (geom.height - TITLEBAR_HEIGHT) as i32).into()));
 
         self.space.map_element(dwindow.clone(), (geom.x, geom.y + TITLEBAR_HEIGHT as i32), true);
@@ -168,12 +247,27 @@ impl XwmHandler for CompState {
             let id = wm.alloc_window_id();
             let mut w = CoreWindow::new(id, window.title());
             w.app_id = window.class();
-            let size = window.geometry().size;
-            w.geometry = srdwm_core::Rect::new(0, 0, size.w.max(1) as u32, size.h.max(1) as u32 + TITLEBAR_HEIGHT);
+            // Not `window.geometry()`: at `MapRequest` time this can still
+            // be whatever tiny/default size the X11 window was *created*
+            // with, before XWayland ever applies a `ConfigureRequest` --
+            // and our own `configure_request` handler is deliberately a
+            // no-op (we own layout for managed windows, matching
+            // `new_managed_window`'s xdg-shell path below, which doesn't
+            // trust the client's initial size either).
+            w.geometry = srdwm_core::Rect::new(0, 0, 800, 600 + TITLEBAR_HEIGHT);
             wm.add_window(w);
             id
         };
         self.xwayland_windows.insert(window.window_id(), id);
+        // Grant the map request *now*, unconditionally: per `X11Surface`'s
+        // docs this is what tells XWayland the window may proceed, and it
+        // does so before ever finishing our own wl_surface-dependent setup
+        // (`finish_x11_window_setup` bails out until `wl_surface()`
+        // resolves). Deferring `set_mapped` until after that check would
+        // deadlock - XWayland doesn't seem to advance the window past
+        // surface creation (no `get_xwayland_surface`/`set_serial`, no
+        // buffer attach) until the map is granted.
+        let _ = window.set_mapped(true);
         self.finish_x11_window_setup(&window);
         if !self.id_to_window.contains_key(&id) {
             self.xwayland_pending.push(window);

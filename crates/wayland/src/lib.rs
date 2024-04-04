@@ -562,6 +562,39 @@ fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Logical>, time
     }
 }
 
+/// The underlying `wl_surface` for a mapped window, regardless of whether
+/// it's a native `xdg-shell` toplevel or an XWayland `X11Surface` --
+/// `desktop::Window` exposes these as two separate accessors with no
+/// shared one.
+fn dwindow_wl_surface(w: &DWindow) -> Option<WlSurface> {
+    if let Some(top) = w.toplevel() {
+        return Some(top.wl_surface().clone());
+    }
+    w.x11_surface().and_then(|x| x.wl_surface())
+}
+
+/// Requests a client close its window, whichever kind it is.
+fn close_dwindow(w: &DWindow) {
+    if let Some(top) = w.toplevel() {
+        top.send_close();
+    } else if let Some(x11) = w.x11_surface() {
+        let _ = x11.close();
+    }
+}
+
+/// Focuses `id` in our own `WindowManager` *and* gives its surface real
+/// Wayland/X11 keyboard focus - without this, a window can be raised and
+/// tiled correctly yet never receive a single keystroke.
+fn focus_window(state: &mut CompState, id: WindowId) {
+    state.wm.borrow_mut().focus_window(id);
+    state.pending.borrow_mut().push(CoreEvent::WindowFocused(id));
+    let surface = state.id_to_window.get(&id).and_then(dwindow_wl_surface);
+    if let Some(keyboard) = state.seat.get_keyboard() {
+        let serial = SERIAL_COUNTER.next_serial();
+        keyboard.set_focus(state, surface, serial);
+    }
+}
+
 fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logical>, button: u32, pressed: bool, time: u32) {
     const BTN_LEFT: u32 = 0x110;
     let serial = SERIAL_COUNTER.next_serial();
@@ -569,13 +602,12 @@ fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logical>, button
     if pressed && button == BTN_LEFT {
         let hit = state.wm.borrow().hit_test(pos.x as i32, pos.y as i32);
         if let Some((id, hit)) = hit {
-            state.wm.borrow_mut().focus_window(id);
-            state.pending.borrow_mut().push(CoreEvent::WindowFocused(id));
+            focus_window(state, id);
             match hit {
                 TitlebarHit::Drag => state.wm.borrow_mut().start_drag(id, pos.x as i32, pos.y as i32),
                 TitlebarHit::Close => {
-                    if let Some(w) = state.id_to_window.get(&id).and_then(|w| w.toplevel()) {
-                        w.send_close();
+                    if let Some(w) = state.id_to_window.get(&id) {
+                        close_dwindow(w);
                     }
                 }
                 TitlebarHit::Maximize => {
@@ -586,7 +618,11 @@ fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logical>, button
                 TitlebarHit::Resize(edge) => state.wm.borrow_mut().start_resize(id, edge, pos.x as i32, pos.y as i32),
             }
         } else if let Some((window, _loc)) = state.space.element_under(pos) {
-            state.space.raise_element(&window.clone(), true);
+            let window = window.clone();
+            state.space.raise_element(&window, true);
+            if let Some(&id) = dwindow_wl_surface(&window).and_then(|s| state.surface_to_id.get(&s)) {
+                focus_window(state, id);
+            }
         }
     } else if !pressed {
         let mut wm = state.wm.borrow_mut();

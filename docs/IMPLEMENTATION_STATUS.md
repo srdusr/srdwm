@@ -145,37 +145,64 @@ What's here is a genuine from-scratch `smithay`-based compositor, not a stub:
   renders. No client-side visual check yet (the VM has no Wayland-native
   client installed to test against, only X11 ones - see below). No
   hotplug (connectors or GPUs) after startup.
-- 🔄 XWayland integration (`crates/wayland/src/xwayland.rs`), udev/DRM
+- ✅ XWayland integration (`crates/wayland/src/xwayland.rs`), udev/DRM
   backend only (the winit backend would need its own `calloop::EventLoop`
   added first - see the module's doc comment): spawns XWayland, starts
   `X11Wm`, and implements `XwmHandler`/`XWaylandShellHandler` to bridge
   X11-only clients into the same `WindowManager`/`Space` pipeline
   xdg-shell windows use (`CreateNotify`/`MapRequest` create a real
   `srdwm_core::Window`, matched by rules via `class()`; unmap/destroy
-  clean up the same way). **Verified working up through window creation
-  and event routing, then found a real architectural blocker**: XWayland
-  tries `glamor` (GBM-based rendering) first; since this compositor is
-  deliberately software-only (no GBM/DMA-BUF support - the whole point of
-  the dumb-buffer approach above), glamor fails, and XWayland's
-  post-failure fallback path skips the `xwayland_shell_v1` protocol
-  entirely, so `X11Surface::wl_surface()` never resolves and windows never
-  render. Confirmed by tracing the actual Wayland protocol exchange
-  (`WAYLAND_DEBUG=1` on the spawned XWayland process): it binds
-  `xwayland_shell_v1` at startup, then a second, window-creation-time
-  registry pass sees the global but never binds it, and
-  `get_xwayland_surface`/`set_serial` never appear at all. `Xwayland
-  -help` confirms a `-shm` flag exists that forces shared-memory buffers
-  from the start (matching this compositor's `wl_shm`/`ImportMem`-only
-  renderer) instead of trying and falling back from glamor - but
-  `smithay::xwayland::XWayland::spawn` builds its `Xwayland` command line
-  internally with a fixed argument list and has no way to add `-shm`.
-  Fixing this for real means either bypassing `XWayland::spawn` with a
-  custom implementation (reimplementing its X11 lock-file/socket-pair/
-  readiness-detection logic, which is intentionally private to smithay --
-  `mod x11_sockets;`, not `pub mod`) or giving the compositor real
-  GBM/DMA-BUF import support, undoing the earlier deliberate low-spec/
-  no-GPU-required design. Left as a documented gap rather than rushing a
-  low-level reimplementation with no cheap way to iterate on it.
+  clean up the same way). **Verified live end-to-end**: an `xterm`
+  launched against the spawned XWayland renders as a correctly-sized,
+  server-managed window, and typing at it (via a real synthetic
+  QEMU-level keyboard, not a shortcut) reaches the shell inside it --
+  `ls` produced a new prompt line. Getting there surfaced three real bugs,
+  each root-caused with evidence rather than guessed at:
+  - XWayland tries `glamor` (GBM-based rendering) first; since this
+    compositor is deliberately software-only, glamor fails and previously
+    left XWayland on a rendering path that never used the
+    `xwayland_shell_v1` protocol at all (confirmed via `WAYLAND_DEBUG=1`
+    tracing: the global was bound but `get_xwayland_surface`/`set_serial`
+    were never called). Fixed by shadowing `Xwayland` on `PATH` with a
+    tiny wrapper script that always re-execs the real binary with `-shm`
+    - `smithay::xwayland::XWayland::spawn` builds its own fixed argument
+    list with no way to pass this directly, and its `XWaylandClientData`
+    has private fields so the spawn call itself can't be bypassed either.
+  - Even with `-shm`, `set_mapped(true)` was only ever called from inside
+    `finish_x11_window_setup`, itself gated on `X11Surface::wl_surface()`
+    already resolving - but XWayland doesn't appear to advance a window
+    past surface creation (no buffer attach, no further protocol traffic
+    at all) until the map is granted. A real deadlock, found by tracing
+    the *same* `WAYLAND_DEBUG=1` output before and after the `-shm` fix
+    and seeing identical behavior either way. Fixed by calling
+    `set_mapped(true)` unconditionally in `map_window_request`, before
+    checking whether `wl_surface()` is available.
+  - The window then rendered as a ~1px sliver: `map_window_request` seeded
+    the initial `srdwm_core::Window` geometry from
+    `X11Surface::geometry()`, which at `MapRequest` time can still be
+    whatever tiny default the X11 window was *created* with (our own
+    `configure_request` handler is deliberately a no-op - this compositor
+    owns layout for managed windows). Fixed by using the same fixed
+    800x600 default `new_managed_window`'s xdg-shell path already uses,
+    instead of trusting the client's initial size.
+  - Typing didn't reach the window at all until a fourth, broader bug was
+    found and fixed *outside* the XWayland code: nothing in the whole
+    Wayland backend ever called `KeyboardHandle::set_focus` - clicking a
+    window only updated `srdwm_core::WindowManager`'s own focus tracking,
+    never Wayland/X11 keyboard focus. This affected xdg-shell windows too,
+    not just XWayland ones. Fixed in `lib.rs`'s `handle_pointer_button`
+    (both the decoration-click and click-through-to-content-area paths,
+    the latter of which also never focused a window at all, only raised
+    it). `TitlebarHit::Close` was also X11-surface-blind (only called
+    `ToplevelSurface::send_close()`), fixed alongside.
+  - No font is installed in the test VM at all (a gap in the VM's package
+    set, not the code), so the titlebar band renders with no title text in
+    this environment - `decoration.rs`'s font-search fallback is working
+    exactly as designed; see its own section above for where actual text
+    rendering was verified.
+  - Not implemented: selections/clipboard, XSETTINGS, RandR
+    primary-output sync, override-redirect window geometry beyond initial
+    placement (all have harmless no-op default `XwmHandler` methods).
 
 **Why the visual verification stopped short of a screenshot**: the winit
 window opens on the *host* compositor, and the only available display in
@@ -237,17 +264,16 @@ built them:
   `xterm`, which is X11-only) - the compositor/socket/render-pipeline
   side is confirmed, but no real Wayland app has been shown on-screen yet.
 - **XWayland**: `xterm` launched with `DISPLAY` pointed at the udev
-  backend's spawned XWayland connected successfully and stayed alive
-  (`CreateNotify`/`MapRequest` both reached `XwmHandler`, logged and
-  handled with no crash), but never rendered - this is the
-  glamor/`-shm` blocker documented above, root-caused via
-  `WAYLAND_DEBUG=1` protocol tracing on the XWayland process rather than
-  guessed at.
+  backend's spawned XWayland renders as a correctly-sized, decorated
+  (background-only in this VM - no font installed) window, and receives
+  real keyboard input end-to-end: a synthetic QEMU-level keypress sequence
+  (`ls` + Enter) executed inside the shell and produced a new prompt line,
+  screendump-confirmed. Getting there took four rounds of root-causing via
+  `WAYLAND_DEBUG=1` protocol tracing and fixing real bugs - see the
+  Wayland backend section above for the full account.
 
 ## Not implemented anywhere yet
 
-- XWayland actually rendering a window (blocked on the glamor/`-shm`
-  issue above; the spawn/protocol/window-tracking plumbing is real).
 - Animations (`general.animations`/`animation_duration` config keys exist
   and are read into defaults, but nothing consumes them yet).
 - A native GUI settings app (the legacy project's `GUI_SETTINGS.md` was
