@@ -309,6 +309,15 @@ delegate_xdg_decoration!(CompState);
 delegate_shm!(CompState);
 delegate_seat!(CompState);
 delegate_output!(CompState);
+// TODO: delegate_layer_shell! (wlr-layer-shell-unstable-v1) - bars,
+// launchers, notification daemons, and lock-screen UIs are layer
+// surfaces, not xdg_toplevels; none of them can run under srdwm without
+// this. See docs/IMPLEMENTATION_STATUS.md's "Not implemented anywhere
+// yet" section.
+// TODO: delegate_data_device! (wl_data_device_manager) - no clipboard/
+// drag-and-drop between Wayland clients without it.
+// TODO: session-lock (ext-session-lock-v1) - no way for a lock-screen
+// client to actually lock input/display without it.
 
 pub struct WaylandPlatform {
     display: Display<CompState>,

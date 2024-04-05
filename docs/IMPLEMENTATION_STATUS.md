@@ -274,6 +274,24 @@ built them:
 
 ## Not implemented anywhere yet
 
+- **`wlr-layer-shell-unstable-v1`** - `CompState` only delegates
+  `compositor`/`xdg_shell`/`xdg_decoration`/`shm`/`seat`/`output` (plus
+  `xwayland_shell` for XWayland). No layer-shell support means bars,
+  launchers (`wofi`, `rofi`'s layer-shell modes), notification daemons,
+  and lock-screen UIs can't run under srdwm at all - they don't create
+  `xdg_toplevel`s, they create layer surfaces. This is the single biggest
+  blocker to using srdwm-wayland as a real daily-driver session (e.g. for
+  an `ags`/`wofi`-based desktop).
+- **`wl_data_device_manager`** (clipboard/drag-and-drop) - no global at
+  all is created for it, so copy-paste between two Wayland clients
+  doesn't work under srdwm yet (tools like `wl-copy`/`cliphist` have
+  nothing to talk to).
+- **`ext-session-lock-v1`** (screen locking) - not implemented; a
+  lock-screen client (or a lid-switch/idle-triggered lock) has no
+  protocol to actually lock input/display under srdwm.
+- **Multi-monitor** for the udev/DRM backend - deliberately scoped to a
+  single connector/output for the first pass (see `udev.rs`'s module
+  docs); no hotplug, no independent per-output layout.
 - Animations (`general.animations`/`animation_duration` config keys exist
   and are read into defaults, but nothing consumes them yet).
 - A native GUI settings app (the legacy project's `GUI_SETTINGS.md` was

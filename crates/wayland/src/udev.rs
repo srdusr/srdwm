@@ -331,6 +331,9 @@ fn mode_refresh_mhz(mode: &DrmMode) -> i32 {
     }
 }
 
+// TODO: multi-monitor - returns only the first connected connector; no
+// hotplug, no independent per-output layout. See
+// docs/IMPLEMENTATION_STATUS.md's "Not implemented anywhere yet" section.
 fn find_connected_output(card: &Card) -> PlatformResult<(crtc::Handle, connector::Handle, DrmMode)> {
     let res = card.resource_handles().map_err(err)?;
     let connectors: Vec<connector::Info> = res.connectors().iter().flat_map(|&h| card.get_connector(h, true)).collect();
