@@ -31,7 +31,7 @@ use smithay::{delegate_xwayland_shell, desktop::Window as DWindow};
 
 use srdwm_core::{Event as CoreEvent, ResizeEdge, Window as CoreWindow, TITLEBAR_HEIGHT};
 
-use crate::CompState;
+use crate::state::CompState;
 
 pub(crate) type X11Window = smithay::xwayland::xwm::X11Window;
 

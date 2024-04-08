@@ -1890,6 +1890,7 @@ dependencies = [
  "srdwm-core",
  "srdwm-platform",
  "thiserror 2.0.18",
+ "wayland-protocols-wlr",
 ]
 
 [[package]]

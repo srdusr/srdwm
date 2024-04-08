@@ -12,8 +12,12 @@ Testing/
 compile_commands.json
 
 # Binaries and libraries
-srdwm
-SRDWM
+# Anchored to the repo root: an unanchored `srdwm` matches *any* path
+# component with that name, which silently excluded the whole
+# `crates/srdwm/` source crate - the binary crate the workspace lists as a
+# member, so a fresh clone could not build.
+/srdwm
+/SRDWM
 *.o
 *.obj
 *.a

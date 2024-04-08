@@ -99,6 +99,25 @@ This is the one piece with essentially no working prior art to port (see
 `docs/PRIOR_ART.md`): the legacy C++ never wired a single event listener.
 What's here is a genuine from-scratch `smithay`-based compositor, not a stub:
 
+**Module layout.** `lib.rs` had grown to ~1260 lines holding state, every
+protocol handler, input routing and rendering; it is now a 78-line shell
+(module declarations plus `connect()`), with the rest split by
+responsibility:
+
+| module | responsibility |
+| --- | --- |
+| `state.rs` | `CompState` (the `Display<D>` state everything hangs off), outputs, window bookkeeping |
+| `protocols.rs` | smithay `*Handler` impls + `delegate_*!` macros - deliberately thin |
+| `input.rs` | keyboard/pointer routing and what "focus" means |
+| `lock.rs` | session lock as one feature: state, handler *and* its render helpers |
+| `screencopy.rs` | hand-written `wlr-screencopy` (no smithay helper exists) |
+| `winit.rs` / `udev.rs` | the two backends - all they differ in is how a frame reaches a screen |
+| `decoration.rs` / `xwayland.rs` | titlebar rasterisation; XWayland bridge |
+
+`lock.rs` is grouped by *feature* rather than by kind on purpose: the
+security-relevant invariant spans state, protocol handling and rendering at
+once, so splitting it across three files would have hidden it.
+
 - ✅ Runs via smithay's winit backend (nested window), initializes EGL/GLES,
   advertises a real Wayland socket, and was verified to start, initialize
   rendering, and run its event loop without crashing (log-verified; a
@@ -203,6 +222,181 @@ What's here is a genuine from-scratch `smithay`-based compositor, not a stub:
   - Not implemented: selections/clipboard, XSETTINGS, RandR
     primary-output sync, override-redirect window geometry beyond initial
     placement (all have harmless no-op default `XwmHandler` methods).
+- ✅ **`wlr-layer-shell-unstable-v1`** (`WlrLayerShellHandler`, `delegate_layer_shell!`
+  in `lib.rs`): layer surfaces are mapped into the output's
+  `smithay::desktop::LayerMap` (`layer_map_for_output`), which `render_output`
+  renders automatically - no rendering-path changes were needed, only state
+  wiring, initial-configure-on-commit, and pointer/keyboard routing
+  (`layer_surface_under` in `lib.rs`, checked ahead of our own decorations and
+  xdg-shell windows so bars/launchers/notifications/lock UIs sit properly on
+  top; `Exclusive`-interactivity surfaces grab keyboard focus on commit,
+  `OnDemand` ones on click). Background/bottom-layer pointer routing (e.g. a
+  wallpaper daemon wanting clicks) is out of scope - nothing needed for the
+  daily-driver gate requires it.
+  **Verified live** against two real, unmodified clients (waybar 0.x, wofi
+  1.5.3) run as actual Wayland clients of a running `srdwm` (winit backend,
+  `WAYLAND_DEBUG=1` protocol tracing): waybar's Top-layer bar configured
+  correctly ("Bar configured (width: 934, height: 45) for output:
+  srdwm-wayland"); wofi's Exclusive-interactivity launcher surface was
+  created, sized, and configured with no crash. Getting there surfaced and
+  fixed three real bugs:
+  - `Output::change_current_state` was called unconditionally every render
+    frame (60/s), which - harmless with zero Wayland-native clients ever
+    connected before this - floods any client actually bound to `wl_output`
+    with duplicate `mode`/`done` events forever. Fixed by only calling it
+    (and re-`arrange()`ing the layer map) when the output size actually
+    changed.
+  - The very first `configure` sent to a newly-mapped layer surface used
+    stale geometry: `map_layer`'s own `arrange()` runs before the client's
+    `set_size`/`set_anchor`/etc. requests (and the commit applying them) have
+    even arrived, so the initial `send_configure()` was re-sending that
+    stale pre-request computation instead of recomputing from what the
+    client actually asked for (caught live: wofi's `set_size(420, 550)` was
+    silently ignored, and it configured stuck at the output/2 fallback
+    instead). Fixed by re-`arrange()`ing on every layer-surface commit
+    (`LayerMap::arrange` only ever sends a configure when something actually
+    changed, so this is a no-op on unrelated commits).
+  - The missing `zxdg_output_manager_v1` (xdg-output) global - a separate,
+    real gap of its own, see below - made wofi's own layer-shell setup code
+    call a Wayland request on a proxy that was never bound (it doesn't
+    null-check), **segfaulting the client**, not just failing gracefully.
+    Root-caused with `gdb` (crash was `wl_proxy_marshal_constructor(proxy=0x0,
+    opcode=1, ...)`, matching `zxdg_output_manager_v1.get_xdg_output`) and
+    confirmed by comparing a `WAYLAND_DEBUG=1` trace of the same `wofi`
+    binary against the user's real Hyprland session (which advertises
+    xdg-output and doesn't crash it) side by side with the trace against
+    `srdwm`.
+- ✅ **xdg-output (`zxdg_output_manager_v1`)**: added via smithay's
+  `OutputManagerState::new_with_xdg_output`, piggybacking on the existing
+  `delegate_output!`/`OutputHandler` wiring (no new handler trait needed).
+  Not itself in the original "biggest blocker" list, but found to be a hard
+  requirement in practice while fixing layer-shell above - see the wofi
+  segfault account.
+- ✅ **Clipboard**: `wl_data_device_manager`, `zwp_primary_selection_v1`,
+  and `zwlr_data_control_manager_v1`, all three sharing smithay's single
+  `SelectionHandler`. Data-control is the one that matters most for this
+  user's session: `wl-paste --watch cliphist store` (in their Hyprland
+  autostart) needs to read the selection *without* holding keyboard focus,
+  which the core data-device protocol cannot do.
+  The non-obvious wiring is that selection focus must follow keyboard focus
+  - `set_keyboard_focus` now also calls `set_data_device_focus` and
+  `set_primary_focus`, because the data-device protocols only offer the
+  selection to, and accept `set_selection` from, the focus-holding client.
+  **Verified live** against the user's own tools: `wl-copy`/`wl-paste`
+  round-tripped both clipboard and primary; `wl-paste --watch cliphist
+  store` captured three successive copies; and a real `wezterm` toplevel
+  was observed receiving `wl_data_device.data_offer` + `selection` over
+  `WAYLAND_DEBUG=1`, i.e. the core (non-data-control) path works too.
+  Drag-and-drop uses smithay's default `ClientDndGrabHandler`/
+  `ServerDndGrabHandler` behaviour and has *not* been separately tested.
+  This surfaced a real pre-existing bug, fixed here: nothing ever gave a
+  **newly-created** window Wayland focus. `WindowManager::add_window` sets
+  its own `focused` field, but no code path turned that into a
+  `KeyboardHandle::set_focus`, so a freshly-opened app received no
+  keystrokes and could not paste until it was clicked. (Same class as the
+  click-to-focus bug fixed in the XWayland pass; this was the creation
+  path.)
+- ✅ **`ext-session-lock-v1`** (screen locking): `SessionLockHandler` with
+  per-output lock surfaces. `locked` gates both rendering (only the lock
+  surface, over an opaque black clear - no windows, decorations, or layer
+  surfaces) and input (all keys go to the lock surface, and **no key is
+  treated as a WM binding**, since the shipped config binds
+  `Mod4+Return` to spawn a terminal and honouring that at a locked screen
+  would defeat the lock entirely). The lock is confirmed only *after* a
+  client-content-free frame has actually been presented, never at request
+  time, so the locker is never told "the screen is safe" while the user's
+  windows are still on screen.
+  **Verified live** with a purpose-written minimal `ext-session-lock`
+  client (no locker - hyprlock/swaylock/etc. - is installed on this
+  machine, so there was nothing else to test against; the user's
+  `~/.scripts/lock` currently falls through to `loginctl lock-session`):
+  lock → cleared frame → `locked` confirmation → lock surface configured to
+  the real output size → `unlock_and_destroy` → normal operation restored.
+  Three properties were checked by counting protocol events delivered to a
+  real `wezterm` launched at each point:
+  - unlocked: 1 `wl_keyboard.enter` (control);
+  - locked: 0 `wl_keyboard.enter`, 0 `wl_pointer.enter`;
+  - locker killed *without* unlocking: still 0 - the session correctly
+    stays locked when the screen locker crashes, as the protocol requires.
+  The locked-case count was **1, not 0, before a bug was found and fixed by
+  this exact test**: `new_managed_window` called `set_keyboard_focus`
+  unconditionally, so merely opening a window at a locked screen handed it
+  keyboard focus. The guard now lives in `set_keyboard_focus` itself, as
+  the single chokepoint every focus path goes through.
+- ✅ **`wlr-screencopy-unstable-v1`** (`crates/wayland/src/screencopy.rs`):
+  what `grim` uses, and therefore what the user's `Print` / `Alt+Print`
+  binds (`grim`, `slurp | grim -g -`) and `wf-recorder` need. smithay 0.7
+  ships **no** helper for this protocol, so the `GlobalDispatch`/`Dispatch`
+  plumbing is written out by hand against the raw `wayland-protocols-wlr`
+  server bindings (a new direct dependency, pinned to the version smithay
+  already uses so both see one set of types). Capture is deferred: a `copy`
+  request only queues the frame, and pixels are read back during the render
+  pass via `ExportMem::copy_framebuffer`.
+  **Verified live with real `grim`**: full-output capture, region capture
+  (`-g "0,0 420x110"`, confirmed by screenshotting a window and reading the
+  PNG back - correct offset, size, colours, and orientation, which is also
+  what establishes that no `y_invert` flag is needed), and an
+  out-of-bounds region (clamped, no crash). While the session is locked,
+  queued captures are rejected outright rather than served or left
+  queued - confirmed: `grim` fails fast with "failed to copy output" and
+  writes nothing.
+  One real bug was found and fixed by this testing: reading back the winit
+  backend's **EGL window surface** destroyed the GL context on the first
+  capture (`eglSwapBuffers: BAD_SURFACE` → `BAD_ALLOC` → "context has been
+  lost", taking the whole compositor down), root-caused by A/B-ing the
+  identical build with only the readback call removed. The winit path now
+  renders a second pass into an offscreen `GlesRenderbuffer` and reads
+  *that*, costing an extra scene render only on frames where a capture was
+  actually requested. The udev/pixman path is unaffected - its render
+  target is already a plain memory image, so reading it directly is safe.
+  Not implemented: `linux_dmabuf` capture (the manager is capped at
+  protocol version 2 for that reason) and cursor overlay
+  (`overlay_cursor` is accepted and ignored - this backend draws no
+  cursor of its own yet).
+- ✅ **Multi-monitor** (udev/DRM backend). Every connected connector becomes
+  a `UdevHead` with its **own** scanout buffers, damage tracker and
+  page-flip state, laid out left-to-right in a shared global coordinate
+  space; the `PixmanRenderer` is shared, since they are one GPU. A head
+  whose flip is still in flight is skipped for that pass and resumes when
+  its own page-flip event arrives (matched by CRTC), so monitors at
+  different refresh rates each run at their own pace instead of the slowest
+  gating the rest.
+  Connector→CRTC assignment never reuses a CRTC, so a machine with more
+  monitors than CRTCs drives as many as the hardware allows and logs the
+  rest. Modes are chosen by the `PREFERRED` flag rather than list order.
+  The rest of the compositor reaches outputs through
+  `CompState::{primary_output, output_at, output_for_wl}` rather than a
+  single field, which is what kept the change small: layer surfaces map to
+  the output the client names, session lock creates **one lock surface per
+  output** (and only confirms the lock once *every* output has both a
+  surface and a presented frame - otherwise a second monitor could still
+  be showing the desktop when the locker is told the session is safe),
+  screencopy captures the output the client names, and the pointer is
+  clamped to the union of all heads so it can cross between them.
+  **Verified live in the QEMU VM** with a two-output `virtio-gpu`
+  (`max_outputs=2`, second connector forced on with `video=Virtual-2:...e`,
+  default VGA removed so the GPU choice is unambiguous):
+  - srdwm logged `2 connected output(s)` and built both heads
+    (`Virtual-1 1280x800 at x=0`, `Virtual-2 ... at x=1280`), and core saw
+    `2 monitor(s)`;
+  - QMP `screendump` of **both** heads returned each one's own resolution,
+    both filled with srdwm's exact clear colour `rgb(12,12,20)`
+    (= `[0.05, 0.05, 0.08]`) - i.e. both are really being rendered and
+    scanned out, not just enumerated;
+  - a window forced by `srd.rule` to **global** x=1500 appeared on head 1 at
+    head-local x=**220** (= 1500 − 1280, the exact translation) with its
+    srdwm titlebar, while head 0 stayed completely empty (0 of 64000 sampled
+    pixels differed from the clear colour).
+  The nested winit backend remains single-output by construction (it is one
+  window on a host compositor).
+
+**Known limitation of the nested (winit) backend**: it renders through the
+host compositor's frame callbacks, so if the srdwm window is occluded or on
+another workspace, the host stops scheduling it, `eglSwapBuffers` blocks,
+and srdwm's whole main loop stalls - it stays alive but stops serving
+clients until the window is visible again. Observed repeatedly while
+testing. This affects only the nested development path; the udev/DRM
+backend drives its own page flips and is unaffected.
 
 **Why the visual verification stopped short of a screenshot**: the winit
 window opens on the *host* compositor, and the only available display in
@@ -274,24 +468,17 @@ built them:
 
 ## Not implemented anywhere yet
 
-- **`wlr-layer-shell-unstable-v1`** - `CompState` only delegates
-  `compositor`/`xdg_shell`/`xdg_decoration`/`shm`/`seat`/`output` (plus
-  `xwayland_shell` for XWayland). No layer-shell support means bars,
-  launchers (`wofi`, `rofi`'s layer-shell modes), notification daemons,
-  and lock-screen UIs can't run under srdwm at all - they don't create
-  `xdg_toplevel`s, they create layer surfaces. This is the single biggest
-  blocker to using srdwm-wayland as a real daily-driver session (e.g. for
-  an `ags`/`wofi`-based desktop).
-- **`wl_data_device_manager`** (clipboard/drag-and-drop) - no global at
-  all is created for it, so copy-paste between two Wayland clients
-  doesn't work under srdwm yet (tools like `wl-copy`/`cliphist` have
-  nothing to talk to).
-- **`ext-session-lock-v1`** (screen locking) - not implemented; a
-  lock-screen client (or a lid-switch/idle-triggered lock) has no
-  protocol to actually lock input/display under srdwm.
-- **Multi-monitor** for the udev/DRM backend - deliberately scoped to a
-  single connector/output for the first pass (see `udev.rs`'s module
-  docs); no hotplug, no independent per-output layout.
+All three protocols originally identified as blocking srdwm-wayland from
+being a real daily-driver session (bars/launchers/notifications/lock UIs,
+clipboard, screen locking) are now implemented and verified - see the
+Wayland backend section above. What is left:
+
+- **Connector hotplug** - connectors are probed once at startup, so
+  plugging a monitor in (or unplugging one) while srdwm is running is not
+  noticed. Needs a udev event source, which this backend does not register
+  yet. Multi-monitor itself *is* implemented (see above); only hotplug is
+  missing.
+- **Multi-GPU** - only the primary GPU's connectors are driven.
 - Animations (`general.animations`/`animation_duration` config keys exist
   and are read into defaults, but nothing consumes them yet).
 - A native GUI settings app (the legacy project's `GUI_SETTINGS.md` was

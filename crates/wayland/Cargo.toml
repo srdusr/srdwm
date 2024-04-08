@@ -11,6 +11,10 @@ srdwm-platform.workspace = true
 log.workspace = true
 thiserror.workspace = true
 fontdue = "0.9"
+# smithay 0.7 ships no wlr-screencopy helper, so `src/screencopy.rs`
+# implements that protocol directly against these server bindings. Pinned to
+# the same version smithay itself depends on, so both see one set of types.
+wayland-protocols-wlr = { version = "0.3.12", features = ["server"] }
 
 [dependencies.smithay]
 version = "0.7"
