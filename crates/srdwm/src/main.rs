@@ -136,6 +136,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     dirty = true;
                 }
                 Event::WindowMoved { .. } | Event::WindowResized { .. } => dirty = true,
+                // A monitor was plugged in or unplugged. Re-query the whole
+                // list rather than applying the single monitor in the event:
+                // outputs are laid out left-to-right, so adding or removing
+                // one shifts the positions of the others too.
+                Event::MonitorAdded(_) | Event::MonitorRemoved(_) => {
+                    match platform.monitors() {
+                        Ok(monitors) => {
+                            log::info!("monitor layout changed: {} monitor(s)", monitors.len());
+                            wm.borrow_mut().set_monitors(monitors);
+                        }
+                        Err(e) => log::warn!("failed to re-query monitors after hotplug: {e}"),
+                    }
+                    dirty = true;
+                }
                 _ => {}
             }
         }

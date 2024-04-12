@@ -98,8 +98,55 @@ impl WindowManager {
 
     // ---- Monitors ----------------------------------------------------
 
+    /// Replaces the monitor list, rehoming any window left stranded.
+    ///
+    /// Called at startup and again on every hotplug. Unplugging a monitor
+    /// would otherwise leave its windows pointing at a `monitor` id that no
+    /// longer exists: `arrange_workspace` skips those (it looks the monitor
+    /// up to get a rectangle), so they would stop being tiled, and a
+    /// floating window would sit at coordinates that are no longer on any
+    /// screen - unreachable, with no way to drag it back.
+    ///
+    /// Stranded windows are moved to the primary monitor and, if their
+    /// geometry falls outside it, nudged back inside.
+    ///
+    /// This keys off **geometry**, not just the `monitor` field. That field
+    /// records which monitor a window was *assigned* at creation and does
+    /// not track where the window actually is: a floating window dragged --
+    /// or placed by a rule - onto a second monitor keeps `monitor`
+    /// pointing at the first. Trusting the field alone left such a window
+    /// at coordinates that no longer existed once its real monitor was
+    /// unplugged: off-screen and unreachable, with no way to drag it back.
+    /// Found by unplugging a monitor out from under a window in the QEMU VM
+    /// and watching it vanish; the field-only check had passed its unit
+    /// tests because those set `monitor` explicitly.
     pub fn set_monitors(&mut self, monitors: Vec<Monitor>) {
         self.monitors = monitors;
+
+        let Some(primary) = self.primary_monitor().cloned() else {
+            // No monitors at all (every output unplugged): leave windows
+            // as-is rather than collapsing them onto nothing, so they are
+            // restored intact when an output comes back.
+            return;
+        };
+        let live = self.monitors.clone();
+        for window in self.windows.values_mut() {
+            let visible_on = live.iter().find(|m| m.geometry.overlaps(&window.geometry));
+            match visible_on {
+                // Still on screen: just make sure its monitor id points at a
+                // monitor that exists, so tiling keeps working.
+                Some(monitor) => {
+                    if !live.iter().any(|m| m.id == window.monitor) {
+                        window.monitor = monitor.id;
+                    }
+                }
+                // Nothing on screen shows this window any more.
+                None => {
+                    window.geometry = window.geometry.clamped_into(primary.geometry);
+                    window.monitor = primary.id;
+                }
+            }
+        }
     }
 
     pub fn monitors(&self) -> &[Monitor] {
@@ -795,5 +842,122 @@ mod tests {
         wm.remove_workspace(ws2);
         assert_ne!(wm.window(a).unwrap().workspace, ws2);
         assert!(wm.workspace(ws2).is_none());
+    }
+
+    // ---- Monitor hotplug -------------------------------------------------
+
+    fn two_monitors() -> Vec<Monitor> {
+        let mut a = Monitor::new(0, "primary", Rect::new(0, 0, 1280, 800));
+        a.primary = true;
+        let b = Monitor::new(1, "secondary", Rect::new(1280, 0, 1920, 1080));
+        vec![a, b]
+    }
+
+    #[test]
+    fn unplugging_a_monitor_rehomes_its_windows_to_the_primary() {
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "on-second-monitor");
+        w.geometry = Rect::new(1500, 200, 600, 400); // inside monitor 1 only
+        wm.add_window(w);
+        wm.window_mut(id).unwrap().monitor = 1;
+
+        // Monitor 1 goes away.
+        wm.set_monitors(vec![two_monitors().remove(0)]);
+
+        let w = wm.window(id).unwrap();
+        assert_eq!(w.monitor, 0, "window should be rehomed to the primary monitor");
+        assert!(
+            Rect::new(0, 0, 1280, 800).overlaps(&w.geometry),
+            "rehomed window should be on-screen, got {:?}",
+            w.geometry
+        );
+    }
+
+    #[test]
+    fn windows_already_on_a_surviving_monitor_are_left_alone() {
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "on-primary");
+        w.geometry = Rect::new(10, 20, 300, 200);
+        wm.add_window(w);
+        wm.window_mut(id).unwrap().monitor = 0;
+        wm.window_mut(id).unwrap().geometry = Rect::new(10, 20, 300, 200);
+
+        wm.set_monitors(vec![two_monitors().remove(0)]);
+
+        let w = wm.window(id).unwrap();
+        assert_eq!(w.monitor, 0);
+        assert_eq!(w.geometry, Rect::new(10, 20, 300, 200), "untouched window must not move");
+    }
+
+    #[test]
+    fn a_window_still_overlapping_the_primary_keeps_its_geometry() {
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "straddling");
+        wm.add_window(w.clone());
+        // Straddles the boundary, so it still overlaps the primary.
+        w.geometry = Rect::new(1200, 100, 400, 300);
+        wm.window_mut(id).unwrap().monitor = 1;
+        wm.window_mut(id).unwrap().geometry = w.geometry;
+
+        wm.set_monitors(vec![two_monitors().remove(0)]);
+
+        let got = wm.window(id).unwrap();
+        assert_eq!(got.monitor, 0, "monitor id must still be remapped");
+        assert_eq!(got.geometry, Rect::new(1200, 100, 400, 300), "already-visible geometry should be kept");
+    }
+
+    #[test]
+    fn losing_every_monitor_leaves_windows_intact_for_when_one_returns() {
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "orphan");
+        w.geometry = Rect::new(1500, 200, 600, 400);
+        wm.add_window(w);
+        wm.window_mut(id).unwrap().monitor = 1;
+        wm.window_mut(id).unwrap().geometry = Rect::new(1500, 200, 600, 400);
+
+        wm.set_monitors(Vec::new());
+
+        let got = wm.window(id).unwrap();
+        assert_eq!(got.geometry, Rect::new(1500, 200, 600, 400));
+        assert_eq!(got.monitor, 1);
+    }
+
+    #[test]
+    fn a_window_whose_monitor_field_is_stale_is_still_rescued() {
+        // Regression: `add_window` assigns `monitor` from the *primary*
+        // monitor, so a window placed on the second monitor by a rule (or
+        // dragged there) keeps `monitor == 0`. Rehoming that keyed off the
+        // field alone skipped this window entirely and left it off-screen.
+        // Reproduced live by unplugging a monitor out from under an xterm.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+
+        let id = wm.alloc_window_id();
+        let w = Window::new(id, "placed-by-rule");
+        wm.add_window(w);
+        // Geometry on monitor 1, but `monitor` still says 0 - exactly what
+        // add_window + a geometry rule produce.
+        wm.window_mut(id).unwrap().geometry = Rect::new(1500, 200, 600, 400);
+        assert_eq!(wm.window(id).unwrap().monitor, 0, "precondition: stale field");
+
+        wm.set_monitors(vec![two_monitors().remove(0)]);
+
+        let got = wm.window(id).unwrap();
+        assert!(
+            Rect::new(0, 0, 1280, 800).overlaps(&got.geometry),
+            "window must be pulled back on-screen, got {:?}",
+            got.geometry
+        );
     }
 }

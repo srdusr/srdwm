@@ -6,8 +6,8 @@
 //! - Single primary GPU, but **every** connected connector on it: each
 //!   becomes a [`UdevHead`] with its own scanout buffers, damage tracker
 //!   and page-flip state, laid out left-to-right in the global coordinate
-//!   space. Connectors are probed once at startup - no hotplug, and no
-//!   second GPU.
+//!   space. Connectors are re-probed on hotplug (see `reprobe_outputs`);
+//!   a second GPU is not supported.
 //! - Rendering is **software**, via smithay's `PixmanRenderer` compositing
 //!   into plain KMS "dumb buffers" through the legacy (non-atomic) mode-set
 //!   API (`set_crtc`/`page_flip`). This deliberately avoids the
@@ -43,9 +43,9 @@ use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::pixman::PixmanRenderer;
 use smithay::backend::renderer::Bind;
 use smithay::backend::session::{libseat::LibSeatSession, libseat::LibSeatSessionNotifier, Event as SessionEvent, Session};
-use smithay::backend::udev;
+use smithay::backend::udev::{self, UdevBackend, UdevEvent};
 use smithay::desktop::space::render_output;
-use smithay::desktop::Space;
+use smithay::desktop::{layer_map_for_output, Space};
 use smithay::input::pointer::AxisFrame;
 use smithay::input::SeatState;
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
@@ -60,7 +60,8 @@ use smithay::reexports::drm::Device as BasicDevice;
 use smithay::reexports::input::Libinput;
 use smithay::reexports::pixman::{FormatCode, Image};
 use smithay::reexports::rustix;
-use smithay::reexports::wayland_server::{Client, Display, ListeningSocket};
+use smithay::reexports::wayland_server::backend::GlobalId;
+use smithay::reexports::wayland_server::{Client, Display, DisplayHandle, ListeningSocket};
 use smithay::utils::{Logical, Point, Transform};
 use smithay::wayland::compositor::CompositorState;
 use smithay::wayland::selection::data_device::DataDeviceState;
@@ -103,7 +104,13 @@ pub(crate) struct DrmBuffer {
 /// here but on [`UdevState`], since all heads on one GPU share it.
 pub(crate) struct UdevHead {
     pub(crate) crtc: crtc::Handle,
+    /// Which connector this head drives - the key hotplug diffs against.
+    pub(crate) connector: connector::Handle,
     pub(crate) output: Output,
+    /// The `wl_output` global, kept so it can be destroyed when the monitor
+    /// is unplugged; leaving it advertised would show clients a screen that
+    /// no longer exists.
+    pub(crate) global: GlobalId,
     pub(crate) damage_tracker: OutputDamageTracker,
     pub(crate) buffers: [DrmBuffer; 2],
     pub(crate) front: usize,
@@ -275,7 +282,126 @@ impl CompState {
     }
 }
 
+impl CompState {
+    /// Re-probes connectors after a hotplug and reconciles the head list.
+    ///
+    /// Connectors that vanished have their head torn down (global removed,
+    /// output unmapped, DRM buffers freed); newly connected ones are brought
+    /// up exactly as they would have been at startup. Every head is then
+    /// repositioned left-to-right, because removing a monitor shifts the
+    /// ones after it.
+    pub(crate) fn reprobe_outputs(&mut self) {
+        let Some(udev) = self.udev.as_ref() else { return };
+        let card = udev.card.clone();
+
+        let probes = match probe_connected(&card) {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("udev: hotplug re-probe failed: {e}");
+                return;
+            }
+        };
+        let present: Vec<connector::Handle> = probes.iter().map(|p| p.connector).collect();
+        let existing: Vec<connector::Handle> = udev.heads.iter().map(|h| h.connector).collect();
+
+        let gone: Vec<connector::Handle> = existing.iter().copied().filter(|c| !present.contains(c)).collect();
+        let added: Vec<usize> = probes
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !existing.contains(&p.connector))
+            .map(|(i, _)| i)
+            .collect();
+        if gone.is_empty() && added.is_empty() {
+            return; // a "changed" event that didn't change the connector set
+        }
+        log::info!("udev: hotplug - {} output(s) removed, {} added", gone.len(), added.len());
+
+        // ---- removals ----
+        for connector in &gone {
+            let Some(udev) = self.udev.as_mut() else { return };
+            let Some(index) = udev.heads.iter().position(|h| h.connector == *connector) else { continue };
+            let head = udev.heads.remove(index);
+            log::info!("udev: output {} disconnected", head.output.name());
+            self.dh.remove_global::<CompState>(head.global.clone());
+            self.space.unmap_output(&head.output);
+            self.outputs.retain(|e| e.output != head.output);
+            // A lock surface for a monitor that no longer exists would keep
+            // `confirm_lock_if_presented` waiting forever otherwise.
+            self.lock.surfaces.remove(&head.output.name());
+            self.lock.presented.remove(&head.output.name());
+            head.release(&card);
+            self.pending.borrow_mut().push(CoreEvent::MonitorRemoved(index as u32));
+        }
+
+        // ---- additions ----
+        for i in added {
+            let probe = &probes[i];
+            let used: Vec<crtc::Handle> =
+                self.udev.as_ref().map(|u| u.heads.iter().map(|h| h.crtc).collect()).unwrap_or_default();
+            let Some(crtc) = pick_crtc(&card, probe, &used) else {
+                log::warn!("udev: no free CRTC for newly connected {}; not driving it", probe.name);
+                continue;
+            };
+            // Placed at 0 for now; the re-layout below assigns real offsets.
+            match bring_up_head(&card, &self.dh.clone(), probe, crtc, 0) {
+                Ok((head, entry)) => {
+                    log::info!("udev: output {} connected ({}x{})", probe.name, head.size.0, head.size.1);
+                    let monitor_id = self.outputs.len() as u32;
+                    let geometry = srdwm_core::Rect::new(0, 0, head.size.0 as u32, head.size.1 as u32);
+                    if let Some(udev) = self.udev.as_mut() {
+                        udev.heads.push(head);
+                    }
+                    self.outputs.push(entry);
+                    self.pending
+                        .borrow_mut()
+                        .push(CoreEvent::MonitorAdded(srdwm_core::Monitor::new(monitor_id, probe.name.clone(), geometry)));
+                }
+                Err(e) => log::warn!("udev: failed to bring up {}: {e}", probe.name),
+            }
+        }
+
+        self.relayout_outputs();
+    }
+
+    /// Repositions every head left-to-right and republishes the new
+    /// positions to the output globals, the `Space`, and the layer maps.
+    fn relayout_outputs(&mut self) {
+        let Some(udev) = self.udev.as_mut() else { return };
+        let mut x = 0;
+        let mut placed: Vec<(Output, Point<i32, Logical>)> = Vec::new();
+        for head in &mut udev.heads {
+            head.location = (x, 0).into();
+            head.output.change_current_state(None, None, None, Some((x, 0).into()));
+            placed.push((head.output.clone(), head.location));
+            x += head.size.0;
+        }
+        for (output, location) in placed {
+            if let Some(entry) = self.outputs.iter_mut().find(|e| e.output == output) {
+                entry.location = location;
+            }
+            self.space.map_output(&output, (location.x, location.y));
+            // Bars are anchored to their output, so their geometry has to be
+            // recomputed against the moved output rectangle.
+            layer_map_for_output(&output).arrange();
+        }
+    }
+}
+
 impl UdevHead {
+    /// Frees the DRM resources this head owns. Dropping the Rust structs
+    /// alone would leak the kernel-side framebuffers and dumb buffers,
+    /// which matters when a monitor is plugged and unplugged repeatedly.
+    fn release(self, card: &Card) {
+        for buffer in self.buffers {
+            if let Err(e) = card.destroy_framebuffer(buffer.fb) {
+                log::warn!("udev: destroy_framebuffer failed: {e}");
+            }
+            if let Err(e) = card.destroy_dumb_buffer(buffer.dumb) {
+                log::warn!("udev: destroy_dumb_buffer failed: {e}");
+            }
+        }
+    }
+
     /// Copies the just-rendered pixman image into buffer `back`'s dumb
     /// buffer (software rendering writes into its own owned image, not the
     /// scanout memory directly, to avoid tying that image's lifetime to an
@@ -328,7 +454,7 @@ impl UdevPlatform {
         let card = Rc::new(Card(fd));
 
         // Every connected connector becomes a head, laid out left-to-right.
-        let connected = find_connected_outputs(&card)?;
+        let connected = probe_connected(&card)?;
         log::info!("udev: {} connected output(s)", connected.len());
 
         let renderer = PixmanRenderer::new().map_err(err)?;
@@ -337,46 +463,21 @@ impl UdevPlatform {
 
         let mut heads: Vec<UdevHead> = Vec::new();
         let mut output_entries: Vec<crate::state::OutputEntry> = Vec::new();
+        let mut used_crtcs: Vec<crtc::Handle> = Vec::new();
         let mut x_offset = 0;
-        for (index, probe) in connected.iter().enumerate() {
-            let (width, height) = probe.mode.size();
-            let (width, height) = (width as i32, height as i32);
-
-            let buffers = [make_drm_buffer(&card, width, height)?, make_drm_buffer(&card, width, height)?];
-            card.set_crtc(probe.crtc, Some(buffers[0].fb), (0, 0), &[probe.connector], Some(probe.mode))
-                .map_err(err)?;
-
-            // Named after the real connector (eDP-1, HDMI-A-1, ...) so
-            // clients and the user can tell monitors apart; `wl_output.name`
-            // is what a bar's per-monitor config keys off.
-            let output = Output::new(
-                probe.name.clone(),
-                PhysicalProperties { size: (0, 0).into(), subpixel: Subpixel::Unknown, make: "srdwm".into(), model: "drm".into() },
-            );
-            output.change_current_state(
-                Some(OutputMode { size: (width, height).into(), refresh: mode_refresh_mhz(&probe.mode) }),
-                Some(Transform::Normal),
-                None,
-                Some((x_offset, 0).into()),
-            );
-            output.set_preferred(OutputMode { size: (width, height).into(), refresh: mode_refresh_mhz(&probe.mode) });
-            output.create_global::<CompState>(&display_handle);
-
-            let location: Point<i32, Logical> = (x_offset, 0).into();
-            heads.push(UdevHead {
-                crtc: probe.crtc,
-                output: output.clone(),
-                damage_tracker: OutputDamageTracker::from_output(&output),
-                buffers,
-                front: 0,
-                flip_pending: false,
-                location,
-                size: (width, height),
-            });
-            output_entries.push(crate::state::OutputEntry { output, location });
-            log::info!("udev: head {index}: {} {width}x{height} at x={x_offset}", probe.name);
-            x_offset += width;
+        for probe in &connected {
+            let Some(crtc) = pick_crtc(&card, probe, &used_crtcs) else {
+                log::warn!("udev: no free CRTC left for connector {}; not driving it", probe.name);
+                continue;
+            };
+            let (head, entry) = bring_up_head(&card, &display_handle, probe, crtc, x_offset)?;
+            log::info!("udev: head {}: {} {}x{} at x={x_offset}", heads.len(), probe.name, head.size.0, head.size.1);
+            used_crtcs.push(crtc);
+            x_offset += head.size.0;
+            heads.push(head);
+            output_entries.push(entry);
         }
+
         let Some(first) = heads.first() else {
             return Err(PlatformError::Other("udev: no usable outputs".into()));
         };
@@ -461,6 +562,9 @@ impl UdevPlatform {
         register_drm_fd(&handle, &card)?;
         register_libinput(&handle, &session, &seat_name)?;
         register_session_notifier(&handle, notifier)?;
+        if let Err(e) = register_udev_monitor(&handle, &seat_name) {
+            log::warn!("udev: connector hotplug unavailable ({e}); monitors are fixed at startup");
+        }
         if let Err(e) = crate::xwayland::spawn(&handle, &display_handle) {
             log::warn!("XWayland unavailable ({e}); X11-only clients will not run");
         }
@@ -486,70 +590,111 @@ fn mode_refresh_mhz(mode: &DrmMode) -> i32 {
     }
 }
 
-/// A connector we intend to drive, paired with the CRTC that will scan it
-/// out. Produced once at startup by [`find_connected_outputs`].
-struct OutputProbe {
+/// Brings one connector up: allocates its scanout buffers, sets the mode,
+/// and creates the `wl_output` global. Shared by startup and hotplug so a
+/// monitor plugged in later is set up exactly like one present at boot.
+fn bring_up_head(
+    card: &Card,
+    dh: &DisplayHandle,
+    probe: &ConnectorProbe,
     crtc: crtc::Handle,
+    x_offset: i32,
+) -> PlatformResult<(UdevHead, crate::state::OutputEntry)> {
+    let (width, height) = probe.mode.size();
+    let (width, height) = (width as i32, height as i32);
+
+    let buffers = [make_drm_buffer(card, width, height)?, make_drm_buffer(card, width, height)?];
+    card.set_crtc(crtc, Some(buffers[0].fb), (0, 0), &[probe.connector], Some(probe.mode)).map_err(err)?;
+
+    // Named after the real connector (eDP-1, HDMI-A-1, ...) so clients and
+    // the user can tell monitors apart; `wl_output.name` is what a bar's
+    // per-monitor config keys off.
+    let output = Output::new(
+        probe.name.clone(),
+        PhysicalProperties { size: (0, 0).into(), subpixel: Subpixel::Unknown, make: "srdwm".into(), model: "drm".into() },
+    );
+    let mode = OutputMode { size: (width, height).into(), refresh: mode_refresh_mhz(&probe.mode) };
+    output.change_current_state(Some(mode), Some(Transform::Normal), None, Some((x_offset, 0).into()));
+    output.set_preferred(mode);
+    let global = output.create_global::<CompState>(dh);
+
+    let location: Point<i32, Logical> = (x_offset, 0).into();
+    let head = UdevHead {
+        crtc,
+        connector: probe.connector,
+        output: output.clone(),
+        global,
+        damage_tracker: OutputDamageTracker::from_output(&output),
+        buffers,
+        front: 0,
+        flip_pending: false,
+        location,
+        size: (width, height),
+    };
+    Ok((head, crate::state::OutputEntry { output, location }))
+}
+
+/// A connected connector and the mode we intend to drive it at. CRTC
+/// assignment is deliberately separate ([`pick_crtc`]) so a hotplug re-probe
+/// can leave surviving heads on the CRTCs they already hold.
+struct ConnectorProbe {
     connector: connector::Handle,
+    info: connector::Info,
     mode: DrmMode,
     /// Connector name as the kernel reports it (`eDP-1`, `HDMI-A-1`, ...).
     name: String,
 }
 
-/// Every connected connector, each assigned a distinct CRTC.
+/// Every connector currently reporting `Connected`, with its preferred mode.
 ///
-/// CRTCs are a finite hardware resource and cannot be shared, so a CRTC
-/// already claimed by an earlier connector is skipped - a machine with more
-/// connected monitors than CRTCs drives as many as the hardware allows and
-/// logs the rest rather than failing outright.
-///
-/// Still no hotplug: connectors are probed once at startup. Plugging a
-/// monitor in later needs a udev event handler, which this backend does not
-/// register yet (see `docs/IMPLEMENTATION_STATUS.md`).
-fn find_connected_outputs(card: &Card) -> PlatformResult<Vec<OutputProbe>> {
+/// Forces a fresh probe (`get_connector(.., true)`) rather than trusting
+/// cached state - on a hotplug the cached status is exactly what has gone
+/// stale.
+fn probe_connected(card: &Card) -> PlatformResult<Vec<ConnectorProbe>> {
     let res = card.resource_handles().map_err(err)?;
-    let connectors: Vec<connector::Info> = res.connectors().iter().flat_map(|&h| card.get_connector(h, true)).collect();
-
-    let mut used: Vec<crtc::Handle> = Vec::new();
     let mut probes = Vec::new();
-    for con in connectors.iter().filter(|c| c.state() == connector::State::Connected) {
-        let name = format!("{:?}-{}", con.interface(), con.interface_id());
+    for handle in res.connectors() {
+        let Ok(info) = card.get_connector(*handle, true) else { continue };
+        if info.state() != connector::State::Connected {
+            continue;
+        }
+        let name = format!("{:?}-{}", info.interface(), info.interface_id());
         // Prefer the mode the display advertises as PREFERRED (its native
         // resolution) rather than whatever happens to be listed first --
         // the list order is not guaranteed, and picking wrong means running
-        // a monitor at the wrong resolution. Falls back to the first mode
-        // for connectors that flag none.
-        let Some(&mode) = con
+        // a monitor at the wrong resolution.
+        let Some(&mode) = info
             .modes()
             .iter()
             .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
-            .or_else(|| con.modes().first())
+            .or_else(|| info.modes().first())
         else {
             log::warn!("udev: connector {name} is connected but reports no modes; skipping");
             continue;
         };
-        // Prefer the CRTC already driving this connector, else any free one
-        // the encoder can reach.
-        let candidates: Vec<crtc::Handle> = con
-            .current_encoder()
-            .and_then(|enc| card.get_encoder(enc).ok())
-            .map(|enc| res.filter_crtcs(enc.possible_crtcs()))
-            .unwrap_or_default()
-            .into_iter()
-            .chain(res.crtcs().iter().copied())
-            .collect();
-        let Some(crtc) = candidates.into_iter().find(|c| !used.contains(c)) else {
-            log::warn!("udev: no free CRTC left for connector {name}; not driving it");
-            continue;
-        };
-        used.push(crtc);
-        probes.push(OutputProbe { crtc, connector: con.handle(), mode, name });
-    }
-
-    if probes.is_empty() {
-        return Err(PlatformError::Other("udev: no connected connector found".into()));
+        probes.push(ConnectorProbe { connector: *handle, info, mode, name });
     }
     Ok(probes)
+}
+
+/// Picks a CRTC for `probe` that is not in `used`.
+///
+/// CRTCs are a finite hardware resource and cannot be shared, so a machine
+/// with more connected monitors than CRTCs drives as many as the hardware
+/// allows and logs the rest rather than failing outright.
+fn pick_crtc(card: &Card, probe: &ConnectorProbe, used: &[crtc::Handle]) -> Option<crtc::Handle> {
+    let res = card.resource_handles().ok()?;
+    // Prefer the CRTC already driving this connector, else any free one the
+    // encoder can reach, else anything free at all.
+    probe
+        .info
+        .current_encoder()
+        .and_then(|enc| card.get_encoder(enc).ok())
+        .map(|enc| res.filter_crtcs(enc.possible_crtcs()))
+        .unwrap_or_default()
+        .into_iter()
+        .chain(res.crtcs().iter().copied())
+        .find(|c| !used.contains(c))
 }
 
 fn make_drm_buffer(card: &Card, width: i32, height: i32) -> PlatformResult<DrmBuffer> {
@@ -640,6 +785,30 @@ fn register_session_notifier(handle: &LoopHandle<'static, CompState>, notifier: 
             }
         })
         .map_err(|e| PlatformError::Other(format!("failed to register session notifier: {e}")))?;
+    Ok(())
+}
+
+/// Watches udev for DRM device changes. The kernel emits a `change` uevent
+/// on the card when a connector is plugged or unplugged, which smithay
+/// surfaces as [`UdevEvent::Changed`] - that is the hotplug signal.
+///
+/// `Added`/`Removed` refer to whole GPUs appearing or disappearing, which
+/// this backend does not support (it binds one primary GPU at startup), so
+/// they are logged and ignored rather than silently dropped.
+fn register_udev_monitor(handle: &LoopHandle<'static, CompState>, seat_name: &str) -> PlatformResult<()> {
+    let backend = UdevBackend::new(seat_name).map_err(err)?;
+    handle
+        .insert_source(backend, move |event, _, data: &mut CompState| match event {
+            UdevEvent::Changed { .. } => {
+                data.reprobe_outputs();
+                data.render_udev_frame();
+            }
+            UdevEvent::Added { path, .. } => {
+                log::info!("udev: new GPU {} appeared; multi-GPU is not supported, ignoring", path.display())
+            }
+            UdevEvent::Removed { .. } => log::info!("udev: a GPU was removed; multi-GPU is not supported, ignoring"),
+        })
+        .map_err(|e| PlatformError::Other(format!("failed to register udev monitor: {e}")))?;
     Ok(())
 }
 

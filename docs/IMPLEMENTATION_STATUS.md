@@ -389,6 +389,53 @@ once, so splitting it across three files would have hidden it.
     pixels differed from the clear colour).
   The nested winit backend remains single-output by construction (it is one
   window on a host compositor).
+- ✅ **Connector hotplug**. A `UdevBackend` event source watches for the
+  kernel's `change` uevent on the DRM device; `CompState::reprobe_outputs`
+  then re-probes connectors (forcing a fresh probe - on a hotplug the
+  cached status is exactly what has gone stale) and reconciles the head
+  list. Vanished connectors have their head torn down: `wl_output` global
+  removed, output unmapped from the `Space`, DRM framebuffers and dumb
+  buffers explicitly freed (dropping the Rust structs alone leaks the
+  kernel-side objects, which matters when a cable is plugged repeatedly),
+  and any lock surface for that output dropped - otherwise
+  `confirm_lock_if_presented` would wait forever for a monitor that no
+  longer exists. New connectors are brought up through the same
+  `bring_up_head` path used at startup. Every head is then repositioned
+  left-to-right, since removing one shifts the rest, and the layer maps are
+  re-arranged so bars follow their moved output.
+  `WindowManager::set_monitors` rehomes windows left stranded, and
+  `main.rs` re-queries the whole monitor list on `MonitorAdded`/
+  `MonitorRemoved` rather than applying the single monitor in the event
+  (positions of the others change too).
+  **Verified live in the QEMU VM**, booting with one connector and toggling
+  the second at runtime:
+  - plug in → `hotplug - 0 output(s) removed, 1 added`,
+    `output Virtual-2 connected (1024x768)`, `monitor layout changed:
+    2 monitor(s)`, and a screendump of the new head showed it really
+    rendering at its own resolution;
+  - unplug → `1 output(s) removed, 0 added`, back to 1 monitor, compositor
+    healthy;
+  - **window rescue**: an xterm placed by rule at global x=1500 (on the
+    second monitor) was still visible after that monitor was unplugged --
+    it reappeared on the remaining head at x=680, exactly
+    `min(1500, 1280-600)`, keeping its 600x400 size.
+  Caveat on method: writing to `/sys/class/drm/<connector>/status` changes
+  the connector but emits **no uevent** on this kernel, so the uevent the
+  kernel would send on real hardware is synthesized with `udevadm trigger
+  --subsystem-match=drm --action=change`. The reaction path - re-probe,
+  diff, bring up/tear down, re-layout, rehome - is genuinely exercised;
+  only the initial signal is injected.
+
+  This turned up a real bug that the unit tests had **missed**: rehoming
+  originally keyed off `Window::monitor`, but that field records the
+  monitor a window was *assigned* at creation, not where it actually is --
+  `add_window` always sets it from the primary monitor, so a window placed
+  on the second monitor by a rule (or dragged there) still reads
+  `monitor == 0`. The field-only check saw a valid id, skipped the window,
+  and left it at coordinates that no longer existed: invisible and
+  unreachable. Caught by unplugging a monitor out from under a real xterm
+  and watching it vanish from both heads. `set_monitors` now keys off
+  geometry, with a regression test that fails against the old logic.
 
 **Known limitation of the nested (winit) backend**: it renders through the
 host compositor's frame callbacks, so if the srdwm window is occluded or on
@@ -473,12 +520,8 @@ being a real daily-driver session (bars/launchers/notifications/lock UIs,
 clipboard, screen locking) are now implemented and verified - see the
 Wayland backend section above. What is left:
 
-- **Connector hotplug** - connectors are probed once at startup, so
-  plugging a monitor in (or unplugging one) while srdwm is running is not
-  noticed. Needs a udev event source, which this backend does not register
-  yet. Multi-monitor itself *is* implemented (see above); only hotplug is
-  missing.
-- **Multi-GPU** - only the primary GPU's connectors are driven.
+- **Multi-GPU** - only the primary GPU's connectors are driven. A GPU
+  appearing or disappearing is logged and ignored.
 - Animations (`general.animations`/`animation_duration` config keys exist
   and are read into defaults, but nothing consumes them yet).
 - A native GUI settings app (the legacy project's `GUI_SETTINGS.md` was

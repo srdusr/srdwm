@@ -42,6 +42,23 @@ impl Rect {
     pub fn center(&self) -> (i32, i32) {
         (self.x + self.width as i32 / 2, self.y + self.height as i32 / 2)
     }
+
+    /// Moves this rect so it lies inside `bounds`, shrinking it only if it
+    /// is genuinely larger than `bounds`.
+    ///
+    /// Used when a monitor is unplugged and its windows have to be rehomed:
+    /// a window at coordinates that no longer exist would otherwise be
+    /// off-screen and unreachable. Position is adjusted in preference to
+    /// size so a window keeps the dimensions the user gave it.
+    pub fn clamped_into(&self, bounds: Rect) -> Rect {
+        let width = self.width.min(bounds.width);
+        let height = self.height.min(bounds.height);
+        // `max(bounds.x)` after `min` so that a bounds smaller than the rect
+        // still yields the bounds' own origin rather than a negative offset.
+        let x = (self.x).min(bounds.right() - width as i32).max(bounds.x);
+        let y = (self.y).min(bounds.bottom() - height as i32).max(bounds.y);
+        Rect { x, y, width, height }
+    }
 }
 
 #[cfg(test)]
