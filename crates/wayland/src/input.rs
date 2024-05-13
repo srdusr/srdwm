@@ -20,6 +20,11 @@ use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
 
 use srdwm_core::{Event as CoreEvent, Modifiers, TitlebarHit, WindowId};
 
+/// Modifier that turns a drag anywhere in a window into move/resize.
+/// Matches the `SUPER` the shipped and ported configs use for
+/// `bindm ... movewindow` / `resizewindow`.
+const DRAG_MODIFIER: Modifiers = Modifiers::SUPER;
+
 use crate::state::CompState;
 
 pub(crate) fn last_pointer_pos(state: &CompState) -> Point<f64, Logical> {
@@ -134,6 +139,7 @@ pub(crate) fn focus_window(state: &mut CompState, id: WindowId) {
 
 pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logical>, button: u32, pressed: bool, time: u32) {
     const BTN_LEFT: u32 = 0x110;
+    const BTN_RIGHT: u32 = 0x111;
     let serial = SERIAL_COUNTER.next_serial();
 
     // Locked: forward the click to the lock surface (it may have a button or
@@ -144,6 +150,33 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
             pointer.button(state, &ButtonEvent { serial, time, button, state: button_state });
         }
         return;
+    }
+
+    // Modifier+drag: with the modifier held, dragging *anywhere* in a window
+    // moves it (left button) or resizes it from the nearest corner (right
+    // button) - the `bindm SUPER, mouse:272/273` gesture. Without this a
+    // window can only be moved by its titlebar, which is useless for
+    // windows that have none (fullscreen, CSD apps, layer surfaces).
+    //
+    // Checked before the titlebar hit-test so the modifier wins over the
+    // decoration: holding the modifier and grabbing the titlebar should
+    // still move, not press a titlebar button.
+    if pressed && (button == BTN_LEFT || button == BTN_RIGHT) {
+        let mods = state.seat.get_keyboard().map(|k| core_modifiers_from_xkb(&k.modifier_state()));
+        if mods.is_some_and(|m| m.contains(DRAG_MODIFIER)) {
+            let target = state.wm.borrow().window_at(pos.x as i32, pos.y as i32);
+            if let Some(id) = target {
+                focus_window(state, id);
+                let mut wm = state.wm.borrow_mut();
+                if button == BTN_LEFT {
+                    wm.start_drag(id, pos.x as i32, pos.y as i32);
+                } else {
+                    let edge = wm.nearest_corner(id, pos.x as i32, pos.y as i32);
+                    wm.start_resize(id, edge, pos.x as i32, pos.y as i32);
+                }
+                return;
+            }
+        }
     }
 
     if pressed && button == BTN_LEFT {
@@ -274,4 +307,38 @@ pub(crate) fn core_modifiers_from_xkb(mods: &smithay::input::keyboard::Modifiers
         m |= Modifiers::SUPER;
     }
     m
+}
+
+/// Modifier+scroll cycles workspaces, consuming the event.
+///
+/// Returns `true` if it handled the scroll, in which case the caller must
+/// *not* also forward it to the client. Generic over the input backend for
+/// the same reason the keyboard handler is: both backends deliver scroll
+/// through smithay's `PointerAxisEvent` trait.
+pub(crate) fn handle_workspace_scroll<B, E>(state: &mut CompState, event: &E) -> bool
+where
+    B: smithay::backend::input::InputBackend,
+    E: smithay::backend::input::PointerAxisEvent<B>,
+{
+    use smithay::backend::input::Axis;
+
+    if state.lock.locked {
+        return false;
+    }
+    let mods = state.seat.get_keyboard().map(|k| core_modifiers_from_xkb(&k.modifier_state()));
+    if !mods.is_some_and(|m| m.contains(DRAG_MODIFIER)) {
+        return false;
+    }
+    let Some(v) = event.amount(Axis::Vertical).filter(|v| *v != 0.0) else { return false };
+
+    let mut wm = state.wm.borrow_mut();
+    let ids: Vec<_> = wm.workspaces().iter().map(|w| w.id).collect();
+    if ids.is_empty() {
+        return false;
+    }
+    let current = ids.iter().position(|&id| id == wm.current_workspace()).unwrap_or(0);
+    // Scrolling down (positive) advances, matching `workspace, e+1`.
+    let next = if v > 0.0 { (current + 1) % ids.len() } else { (current + ids.len() - 1) % ids.len() };
+    wm.switch_workspace(ids[next]);
+    true
 }

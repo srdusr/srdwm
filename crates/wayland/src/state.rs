@@ -120,6 +120,13 @@ pub(crate) struct CompState {
     /// content is never rendered and input never reaches normal clients --
     /// see `SessionLockHandler` below.
     pub(crate) lock: SessionLock,
+    /// What the pointer should look like, as set by the focused client (or
+    /// the default when no client has said). See `cursor.rs` for why this
+    /// has to be drawn by us on the DRM backend.
+    pub(crate) cursor_status: smithay::input::pointer::CursorImageStatus,
+    /// Bitmap for the built-in arrow, built once at startup rather than
+    /// per frame.
+    pub(crate) cursor_buffer: MemoryRenderBuffer,
     pub(crate) wm: Rc<RefCell<WindowManager>>,
     pub(crate) surface_to_id: HashMap<WlSurface, WindowId>,
     pub(crate) id_to_window: HashMap<WindowId, DWindow>,

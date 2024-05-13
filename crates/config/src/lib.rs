@@ -27,6 +27,11 @@ struct SharedState {
     wm: Rc<RefCell<WindowManager>>,
     values: HashMap<String, ConfigValue>,
     key_bindings: HashMap<String, RegistryKey>,
+    /// Handlers for non-key events (currently the lid switch), registered
+    /// via `srd.on(...)`. Kept separate from `key_bindings` because the
+    /// backends use that map to decide which *keypresses* to withhold from
+    /// clients - a pseudo-entry there would be grabbed as if it were a key.
+    event_handlers: HashMap<String, RegistryKey>,
     config_dir: PathBuf,
     log: Vec<String>,
     running: Rc<std::cell::Cell<bool>>,
@@ -60,6 +65,7 @@ impl Engine {
             wm,
             values: default_config(),
             key_bindings: HashMap::new(),
+            event_handlers: HashMap::new(),
             config_dir: config_dir.into(),
             log: Vec::new(),
             running: Rc::new(std::cell::Cell::new(true)),
@@ -110,6 +116,24 @@ impl Engine {
 
     /// Runs the Lua function bound to `combo` (e.g. `"Mod4+Return"`), if any.
     /// Returns `true` if a binding existed and ran without erroring.
+    /// Runs the `srd.on(name, ...)` handler for a non-key event, if any.
+    /// Returns false when nothing is registered, so callers can log it.
+    pub fn dispatch_event(&self, name: &str) -> bool {
+        let func = {
+            let state = self.state.borrow();
+            state.event_handlers.get(name).and_then(|key| self.lua.registry_value::<mlua::Function>(key).ok())
+        };
+        match func {
+            Some(f) => {
+                if let Err(e) = f.call::<_, ()>(()) {
+                    log::error!("event handler '{name}' errored: {e}");
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn dispatch_keybinding(&self, combo: &str) -> bool {
         let func = {
             let state = self.state.borrow();
@@ -140,6 +164,7 @@ impl Engine {
         srd.set("reset_all", self.fn_reset_all()?)?;
         srd.set("reset_category", self.fn_reset_category()?)?;
         srd.set("bind", self.fn_bind()?)?;
+        srd.set("on", self.fn_on()?)?;
         srd.set("rule", self.fn_rule()?)?;
         srd.set("load", self.fn_load()?)?;
         srd.set("spawn", self.fn_spawn()?)?;
@@ -160,7 +185,11 @@ impl Engine {
         window.set("close", self.fn_window_action(WindowAction::Close)?)?;
         window.set("minimize", self.fn_window_action(WindowAction::Minimize)?)?;
         window.set("maximize", self.fn_window_action(WindowAction::Maximize)?)?;
+        window.set("fullscreen", self.fn_window_action(WindowAction::Fullscreen)?)?;
         window.set("focus", self.fn_window_focus_direction()?)?;
+        window.set("move", self.fn_window_move_direction()?)?;
+        window.set("next", self.fn_window_cycle(true)?)?;
+        window.set("prev", self.fn_window_cycle(false)?)?;
         window.set("set_decorations", self.fn_window_set_decorations()?)?;
         window.set("set_border_color", self.fn_window_set_border_color()?)?;
         window.set("set_border_width", self.fn_window_set_border_width()?)?;
@@ -265,6 +294,24 @@ impl Engine {
             for (k, v) in defaults.into_iter().filter(|(k, _)| k.starts_with(&prefix)) {
                 s.values.insert(k, v);
             }
+            Ok(())
+        })?)
+    }
+
+    /// `srd.on("lid_closed", function() ... end)` - registers a handler for
+    /// a non-key event. Currently `"lid_closed"` and `"lid_open"`.
+    fn fn_on(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |lua, (name, f): (String, mlua::Function)| {
+            const KNOWN: [&str; 2] = ["lid_closed", "lid_open"];
+            if !KNOWN.contains(&name.as_str()) {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "srd.on: unknown event '{name}' (known: {})",
+                    KNOWN.join(", ")
+                )));
+            }
+            let key = lua.create_registry_value(f)?;
+            state.borrow_mut().event_handlers.insert(name, key);
             Ok(())
         })?)
     }
@@ -475,8 +522,42 @@ impl Engine {
                     WindowAction::Close => wm.close_window(id),
                     WindowAction::Minimize => wm.minimize_window(id),
                     WindowAction::Maximize => wm.toggle_maximize(id),
+                    WindowAction::Fullscreen => wm.toggle_fullscreen(id),
                     WindowAction::ToggleFloating => wm.toggle_floating(id),
                 }
+            }
+            Ok(())
+        })?)
+    }
+
+    /// `srd.window.move("left")` - swap the focused window with its
+    /// neighbour in that direction (Hyprland's `movewindow l/r/u/d`).
+    fn fn_window_move_direction(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, direction: String| {
+            let dir = parse_direction(&direction, "srd.window.move")?;
+            let wm = state.borrow().wm.clone();
+            wm.borrow_mut().move_window_direction(dir);
+            Ok(())
+        })?)
+    }
+
+    /// `srd.window.next()` / `srd.window.prev()` - cycle focus through the
+    /// windows on the current workspace (Hyprland's `cyclenext`).
+    fn fn_window_cycle(&self, forward: bool) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, ()| {
+            let wm = state.borrow().wm.clone();
+            let mut wm = wm.borrow_mut();
+            if forward {
+                wm.focus_next();
+            } else {
+                wm.focus_previous();
+            }
+            // Bring it to the top, matching the `bringactivetotop` the
+            // Hyprland binding pairs with `cyclenext`.
+            if let Some(id) = wm.focused_id() {
+                wm.raise_window(id);
             }
             Ok(())
         })?)
@@ -485,13 +566,7 @@ impl Engine {
     fn fn_window_focus_direction(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |_, direction: String| {
-            let dir = match direction.as_str() {
-                "left" => Direction::Left,
-                "right" => Direction::Right,
-                "up" => Direction::Up,
-                "down" => Direction::Down,
-                other => return Err(mlua::Error::RuntimeError(format!("srd.window.focus: unknown direction '{other}'"))),
-            };
+            let dir = parse_direction(&direction, "srd.window.focus")?;
             let wm = state.borrow().wm.clone();
             wm.borrow_mut().focus_direction(dir);
             Ok(())
@@ -643,11 +718,24 @@ impl Engine {
     }
 }
 
+/// Shared by `srd.window.focus` and `srd.window.move` so both accept
+/// exactly the same direction names and report the same error.
+fn parse_direction(name: &str, caller: &str) -> mlua::Result<Direction> {
+    match name {
+        "left" => Ok(Direction::Left),
+        "right" => Ok(Direction::Right),
+        "up" => Ok(Direction::Up),
+        "down" => Ok(Direction::Down),
+        other => Err(mlua::Error::RuntimeError(format!("{caller}: unknown direction '{other}'"))),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum WindowAction {
     Close,
     Minimize,
     Maximize,
+    Fullscreen,
     ToggleFloating,
 }
 

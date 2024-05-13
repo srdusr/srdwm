@@ -130,6 +130,8 @@ impl WaylandPlatform {
             _screencopy_state: screencopy::ScreencopyState::new::<CompState>(&dh),
             screencopy_pending: Vec::new(),
             lock: SessionLock::default(),
+            cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
+            cursor_buffer: crate::cursor::make_buffer(),
             wm: wm.clone(),
             surface_to_id: HashMap::new(),
             id_to_window: HashMap::new(),

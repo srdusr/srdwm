@@ -60,4 +60,11 @@ pub enum Event {
     MouseMotion { x: i32, y: i32 },
     MonitorAdded(Monitor),
     MonitorRemoved(MonitorId),
+    /// The laptop lid was closed or opened. Emitted by the udev backend from
+    /// libinput switch events; `closed` is true when the lid is shut.
+    ///
+    /// Exposed to config as `srd.on_lid("closed"/"open", fn)` so a session
+    /// can lock and suspend, which is otherwise impossible: a laptop that
+    /// does nothing on lid-close is a real problem, not a nicety.
+    LidSwitch { closed: bool },
 }

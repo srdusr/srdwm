@@ -36,6 +36,7 @@
 //! - xdg-decoration is forced to server-side mode (`Mode::ServerSide`) so
 //!   well-behaved clients don't also draw their own client-side titlebar.
 
+mod cursor;
 mod decoration;
 mod input;
 mod lock;

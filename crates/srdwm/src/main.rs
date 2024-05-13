@@ -136,6 +136,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     dirty = true;
                 }
                 Event::WindowMoved { .. } | Event::WindowResized { .. } => dirty = true,
+                // Laptop lid. The handler is a plain Lua function, so the
+                // config decides what to do (lock, suspend, nothing).
+                Event::LidSwitch { closed } => {
+                    let name = if closed { "lid_closed" } else { "lid_open" };
+                    if !engine.dispatch_event(name) {
+                        log::debug!("no handler registered for '{name}'");
+                    }
+                }
                 // A monitor was plugged in or unplugged. Re-query the whole
                 // list rather than applying the single monitor in the event:
                 // outputs are laid out left-to-right, so adding or removing

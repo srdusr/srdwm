@@ -131,7 +131,12 @@ impl SeatHandler for CompState {
     }
 
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>) {}
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    /// Clients set their own cursor (an I-beam over text, a hand over a
+    /// link). Recorded here and drawn by the render paths - on a bare TTY
+    /// nothing else would draw it. See `cursor.rs`.
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.cursor_status = image;
+    }
 }
 
 impl WlrLayerShellHandler for CompState {

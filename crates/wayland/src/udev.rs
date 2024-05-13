@@ -159,6 +159,9 @@ impl CompState {
         // Drained before the `&mut self.udev` borrow below, so screencopy can
         // be serviced with the renderer that borrow owns.
         let mut captures = std::mem::take(&mut self.screencopy_pending);
+        // Same reason: the cursor needs the renderer that borrow owns.
+        let cursor_status = self.cursor_status.clone();
+        let cursor_buffer = self.cursor_buffer.clone();
 
         // Which heads are eligible, and what each needs, gathered before the
         // mutable borrow of `self.udev`.
@@ -196,6 +199,19 @@ impl CompState {
 
             let mut custom_elements: Vec<MemoryRenderBufferRenderElement<PixmanRenderer>> = Vec::new();
             if !locked {
+                // Cursor first: `render_output` draws custom elements
+                // front-to-back, so the earliest element is topmost. On a
+                // bare TTY nothing else draws a pointer - see `cursor.rs`.
+                let pointer_pos = udev.pointer_pos;
+                let hsize = udev.heads[index].size;
+                custom_elements.extend(crate::cursor::render_elements(
+                    &cursor_status,
+                    &cursor_buffer,
+                    &mut udev.renderer,
+                    pointer_pos,
+                    origin,
+                    hsize,
+                ));
                 for (geom, deco) in &decorations {
                     let pos = ((geom.x - origin.x) as f64, (geom.y - origin.y) as f64);
                     match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, deco, None, None, None, Kind::Unspecified) {
@@ -538,6 +554,8 @@ impl UdevPlatform {
             _screencopy_state: crate::screencopy::ScreencopyState::new::<CompState>(&display_handle),
             screencopy_pending: Vec::new(),
             lock: Default::default(),
+            cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
+            cursor_buffer: crate::cursor::make_buffer(),
             wm: wm.clone(),
             surface_to_id: HashMap::new(),
             id_to_window: HashMap::new(),
@@ -832,10 +850,30 @@ fn handle_libinput_event(state: &mut CompState, event: InputEvent<LibinputInputB
             let pressed = event.state() == BackendButtonState::Pressed;
             handle_pointer_button(state, pos, button, pressed, event.time_msec());
         }
+        // Laptop lid. libinput reports this as a switch toggle; without
+        // handling it, closing the lid does nothing at all - no lock, no
+        // suspend - which is a genuine problem on a laptop rather than a
+        // missing nicety.
+        InputEvent::SwitchToggle { event } => {
+            // Fully qualified: libinput's own `Switch` is also in scope here.
+            use smithay::backend::input::{SwitchState, SwitchToggleEvent};
+            if matches!(event.switch(), Some(smithay::reexports::input::event::switch::Switch::Lid)) {
+                let closed = event.state() == SwitchState::On;
+                log::info!("lid {}", if closed { "closed" } else { "opened" });
+                state.pending.borrow_mut().push(CoreEvent::LidSwitch { closed });
+            }
+        }
         InputEvent::PointerAxis { event } => {
-            // Scroll: forwarded to the focused client via the pointer axis
-            // frame, no WM-level handling (matches the winit backend, which
-            // doesn't handle scroll either).
+            // Modifier+scroll switches workspace instead of reaching the
+            // client - the `bind = SUPER, mouse_down/up, workspace, e+1/e-1`
+            // gesture. Checked first so the client never sees these events;
+            // forwarding them too would scroll the window under the cursor
+            // as a side effect of changing workspace.
+            if crate::input::handle_workspace_scroll(state, &event) {
+                return;
+            }
+            // Otherwise: forwarded to the focused client via the pointer axis
+            // frame, no WM-level handling.
             let Some(pointer) = state.seat.get_pointer() else { return };
             let source = event.source();
             let mut frame = AxisFrame::new(event.time_msec()).source(source);

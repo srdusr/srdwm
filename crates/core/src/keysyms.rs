@@ -22,11 +22,23 @@ pub fn keysym_to_name(keysym: u32) -> Option<String> {
         0xff50 => "Home".to_string(),
         0xff57 => "End".to_string(),
         0xffbe..=0xffc9 => format!("F{}", keysym - 0xffbe + 1),
-        0x1008ff13 => "XF86AudioRaiseVolume".to_string(),
-        0x1008ff11 => "XF86AudioLowerVolume".to_string(),
-        0x1008ff12 => "XF86AudioMute".to_string(),
+        // Laptop/media keys. Values taken from the system's own
+        // <X11/XF86keysym.h>, not guessed - a wrong constant here fails
+        // silently, as an unrecognised keysym simply never matches a
+        // binding.
         0x1008ff02 => "XF86MonBrightnessUp".to_string(),
         0x1008ff03 => "XF86MonBrightnessDown".to_string(),
+        0x1008ff11 => "XF86AudioLowerVolume".to_string(),
+        0x1008ff12 => "XF86AudioMute".to_string(),
+        0x1008ff13 => "XF86AudioRaiseVolume".to_string(),
+        0x1008ff14 => "XF86AudioPlay".to_string(),
+        0x1008ff15 => "XF86AudioStop".to_string(),
+        0x1008ff16 => "XF86AudioPrev".to_string(),
+        0x1008ff17 => "XF86AudioNext".to_string(),
+        0x1008ff2a => "XF86PowerOff".to_string(),
+        0x1008ff2d => "XF86ScreenSaver".to_string(),
+        0x1008ff32 => "XF86AudioMedia".to_string(),
+        0x1008ffb2 => "XF86AudioMicMute".to_string(),
         _ => return None,
     })
 }
@@ -49,11 +61,22 @@ pub fn name_to_keysym(name: &str) -> Option<u32> {
         "next" | "pagedown" => return Some(0xff56),
         "home" => return Some(0xff50),
         "end" => return Some(0xff57),
-        "xf86audioraisevolume" => return Some(0x1008ff13),
-        "xf86audiolowervolume" => return Some(0x1008ff11),
-        "xf86audiomute" => return Some(0x1008ff12),
+        // Must stay in sync with `keysym_to_name` above: the X11 backend
+        // resolves names through here to pass to `XGrabKey`, so a key
+        // missing from *this* direction can be pressed but never grabbed.
         "xf86monbrightnessup" => return Some(0x1008ff02),
         "xf86monbrightnessdown" => return Some(0x1008ff03),
+        "xf86audiolowervolume" => return Some(0x1008ff11),
+        "xf86audiomute" => return Some(0x1008ff12),
+        "xf86audioraisevolume" => return Some(0x1008ff13),
+        "xf86audioplay" => return Some(0x1008ff14),
+        "xf86audiostop" => return Some(0x1008ff15),
+        "xf86audioprev" => return Some(0x1008ff16),
+        "xf86audionext" => return Some(0x1008ff17),
+        "xf86poweroff" => return Some(0x1008ff2a),
+        "xf86screensaver" => return Some(0x1008ff2d),
+        "xf86audiomedia" => return Some(0x1008ff32),
+        "xf86audiomicmute" => return Some(0x1008ffb2),
         _ => {}
     }
     if name.len() == 1 {
@@ -107,6 +130,32 @@ mod tests {
         for name in ["Return", "Escape", "Tab", "Left", "Right", "Up", "Down", "F1", "F12"] {
             let ks = name_to_keysym(name).unwrap();
             assert_eq!(keysym_to_name(ks), Some(name.to_string()));
+        }
+    }
+
+    #[test]
+    fn every_media_key_roundtrips_in_both_directions() {
+        // The two tables are hand-maintained and independent, so a key can
+        // easily be added to one and forgotten in the other - which fails
+        // silently (the binding just never fires, or never gets grabbed).
+        // Covers every XF86 key the shipped/ported configs actually bind.
+        for name in [
+            "XF86MonBrightnessUp",
+            "XF86MonBrightnessDown",
+            "XF86AudioRaiseVolume",
+            "XF86AudioLowerVolume",
+            "XF86AudioMute",
+            "XF86AudioMicMute",
+            "XF86AudioPlay",
+            "XF86AudioStop",
+            "XF86AudioPrev",
+            "XF86AudioNext",
+            "XF86AudioMedia",
+            "XF86PowerOff",
+            "XF86ScreenSaver",
+        ] {
+            let ks = name_to_keysym(name).unwrap_or_else(|| panic!("{name} missing from name_to_keysym"));
+            assert_eq!(keysym_to_name(ks), Some(name.to_string()), "{name} missing from keysym_to_name");
         }
     }
 }

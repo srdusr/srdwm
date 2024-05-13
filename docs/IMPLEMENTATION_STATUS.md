@@ -513,6 +513,29 @@ built them:
   `WAYLAND_DEBUG=1` protocol tracing and fixing real bugs - see the
   Wayland backend section above for the full account.
 
+- ✅ **Mouse cursor** (`crates/wayland/src/cursor.rs`). Previously **nothing
+  drew a pointer at all** - invisible mouse on a bare TTY. It hid because
+  the nested backend runs inside another compositor, which draws a cursor
+  over srdwm's window; only the DRM backend is affected, and only when run
+  as a real session. A built-in arrow (a reviewable ASCII bitmap, no XCursor
+  theme dependency, same reasoning as `decoration.rs`'s font fallback) is
+  now composited above everything on the output the pointer is on.
+  `CursorImageStatus::Hidden` is honoured. **Not** yet done: rendering a
+  client's own cursor surface or a named shape, so an app asking for an
+  I-beam still gets the arrow.
+  **Verified in the QEMU VM**: screendump of a bare-TTY session shows a
+  recognisable arrow at the pointer position - 113 white fill + 58 black
+  outline pixels at screen centre, where the pointer starts.
+- ✅ **Lid switch**: libinput switch events are handled and surfaced to
+  config as `srd.on("lid_closed"/"lid_open", fn)`, so a session can lock and
+  suspend on lid close. Previously there was no switch handling at all.
+- ✅ **Fullscreen** (`srd.window.fullscreen()`), **directional window move**
+  (`srd.window.move("left")`, swaps with the neighbour), **focus cycling**
+  (`srd.window.next()`/`prev()`), **modifier+drag move/resize anywhere in a
+  window**, **modifier+scroll workspace switching**, and 8 more `XF86`
+  media/power keysyms. All were needed to port a real Hyprland config and
+  none existed before.
+
 ## Not implemented anywhere yet
 
 All three protocols originally identified as blocking srdwm-wayland from

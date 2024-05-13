@@ -296,7 +296,15 @@ impl WindowManager {
     /// Vim-style directional focus: picks the nearest window whose center
     /// lies in `dir` relative to the focused window's center, on the same
     /// workspace. Returns the newly focused window, if any.
-    pub fn focus_direction(&mut self, dir: Direction) -> Option<WindowId> {
+    /// Nearest window to the focused one in `dir`, by a distance biased
+    /// toward the requested axis so a window that's mostly to the left
+    /// (small |dy|) beats a diagonally-placed one - matching how
+    /// i3/sway-style directional focus feels.
+    ///
+    /// Shared by [`Self::focus_direction`] and [`Self::move_window_direction`]
+    /// so "the window to the left" means the same thing whether you're
+    /// focusing it or swapping with it.
+    pub fn neighbour_in(&self, dir: Direction) -> Option<WindowId> {
         let (fx, fy, fid) = {
             let focused = self.focused_window()?;
             let (fx, fy) = focused.geometry.center();
@@ -316,9 +324,6 @@ impl WindowManager {
             if !matches {
                 continue;
             }
-            // Distance biased toward the requested axis so a window that's
-            // mostly to the left (small |dy|) beats one that's diagonally
-            // placed, matching how i3/sway-style directional focus feels.
             let (primary, secondary) = match dir {
                 Direction::Left | Direction::Right => (dx, dy),
                 Direction::Up | Direction::Down => (dy, dx),
@@ -328,11 +333,59 @@ impl WindowManager {
                 best = Some((w.id, dist));
             }
         }
-        let target = best.map(|(id, _)| id);
+        best.map(|(id, _)| id)
+    }
+
+    pub fn focus_direction(&mut self, dir: Direction) -> Option<WindowId> {
+        let target = self.neighbour_in(dir);
         if let Some(id) = target {
             self.focus_window(id);
         }
         target
+    }
+
+    /// Moves the focused window in `dir` by swapping places with its
+    /// neighbour there - the `movewindow l/r/u/d` gesture.
+    ///
+    /// Swapping (rather than nudging by a fixed step) is what makes this
+    /// useful in both of srdwm's modes: under tiling it reorders the layout,
+    /// and in dynamic/floating mode two windows trade positions, which is
+    /// predictable either way. With no neighbour in that direction the
+    /// window is pushed to the corresponding edge of its monitor instead, so
+    /// the key still does something sensible.
+    pub fn move_window_direction(&mut self, dir: Direction) -> Option<WindowId> {
+        let focused = self.focused_id()?;
+        match self.neighbour_in(dir) {
+            Some(other) => {
+                let a = self.windows.get(&focused)?.geometry;
+                let b = self.windows.get(&other)?.geometry;
+                if let Some(w) = self.windows.get_mut(&focused) {
+                    w.geometry = b;
+                }
+                if let Some(w) = self.windows.get_mut(&other) {
+                    w.geometry = a;
+                }
+                // Keep stacking order in step so a tiling layout, which
+                // assigns slots from `order`, actually reflects the swap.
+                let (ia, ib) = (
+                    self.order.iter().position(|&id| id == focused)?,
+                    self.order.iter().position(|&id| id == other)?,
+                );
+                self.order.swap(ia, ib);
+                Some(other)
+            }
+            None => {
+                let mon = self.windows.get(&focused).and_then(|w| self.monitor_for(w.monitor))?.geometry;
+                let w = self.windows.get_mut(&focused)?;
+                match dir {
+                    Direction::Left => w.geometry.x = mon.x,
+                    Direction::Right => w.geometry.x = mon.right() - w.geometry.width as i32,
+                    Direction::Up => w.geometry.y = mon.y,
+                    Direction::Down => w.geometry.y = mon.bottom() - w.geometry.height as i32,
+                }
+                None
+            }
+        }
     }
 
     // ---- Window operations ----------------------------------------------
@@ -369,6 +422,40 @@ impl WindowManager {
             w.geometry = geom;
             w.maximized = true;
         }
+    }
+
+    /// Fullscreen: the window covers its whole monitor with no decoration.
+    ///
+    /// Distinct from [`Self::toggle_maximize`], which keeps the titlebar (and
+    /// is what a maximise button does). Both share `restore_geometry`, so
+    /// they are mutually exclusive - toggling one off restores whatever the
+    /// window's geometry was before *either* was applied, and entering
+    /// fullscreen from a maximised window doesn't lose the original size.
+    pub fn toggle_fullscreen(&mut self, id: WindowId) {
+        let monitor_geom = self.windows.get(&id).and_then(|w| self.monitor_for(w.monitor)).map(|m| m.geometry);
+        let Some(w) = self.windows.get_mut(&id) else { return };
+        if w.fullscreen {
+            if let Some(restore) = w.restore_geometry.take() {
+                w.geometry = restore;
+            }
+            w.fullscreen = false;
+            w.decorated = true;
+        } else if let Some(geom) = monitor_geom {
+            // Only remember the pre-fullscreen geometry if we aren't already
+            // maximised, otherwise the monitor rect would overwrite the real
+            // restore point and the window could never get its size back.
+            if !w.maximized {
+                w.restore_geometry = Some(w.geometry);
+            }
+            w.maximized = false;
+            w.geometry = geom;
+            w.fullscreen = true;
+            w.decorated = false;
+        }
+    }
+
+    pub fn is_fullscreen(&self, id: WindowId) -> bool {
+        self.windows.get(&id).map(|w| w.fullscreen).unwrap_or(false)
     }
 
     pub fn toggle_floating(&mut self, id: WindowId) {
@@ -409,6 +496,32 @@ impl WindowManager {
             }
         }
         None
+    }
+
+    /// Topmost non-minimised window containing a point, ignoring
+    /// decorations. Used for modifier+drag, where the grab applies anywhere
+    /// in the window rather than only on the titlebar (`hit_test`).
+    pub fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
+        self.order
+            .iter()
+            .rev()
+            .filter_map(|id| self.windows.get(id))
+            .find(|w| !w.minimized && w.geometry.contains_point(x, y))
+            .map(|w| w.id)
+    }
+
+    /// The corner of `id` nearest a point, for modifier+right-drag resize:
+    /// grabbing the closest corner is what makes the gesture feel like it
+    /// pulls the edge you aimed at (matching Hyprland's `resizewindow`).
+    pub fn nearest_corner(&self, id: WindowId, x: i32, y: i32) -> ResizeEdge {
+        let Some(w) = self.windows.get(&id) else { return ResizeEdge::BottomRight };
+        let (cx, cy) = w.geometry.center();
+        match (x < cx, y < cy) {
+            (true, true) => ResizeEdge::TopLeft,
+            (false, true) => ResizeEdge::TopRight,
+            (true, false) => ResizeEdge::BottomLeft,
+            (false, false) => ResizeEdge::BottomRight,
+        }
     }
 
     // ---- Drag / resize ------------------------------------------------------
@@ -566,7 +679,9 @@ impl WindowManager {
         let mut by_monitor: HashMap<MonitorId, Vec<WindowId>> = HashMap::new();
         for &id in &self.order {
             let Some(w) = self.windows.get(&id) else { continue };
-            if w.workspace == workspace && !w.minimized && !w.floating {
+            // Fullscreen windows own their whole monitor, so tiling must
+            // leave them alone, exactly as it does floating ones.
+            if w.workspace == workspace && !w.minimized && !w.floating && !w.fullscreen {
                 by_monitor.entry(w.monitor).or_default().push(id);
             }
         }
@@ -958,6 +1073,147 @@ mod tests {
             Rect::new(0, 0, 1280, 800).overlaps(&got.geometry),
             "window must be pulled back on-screen, got {:?}",
             got.geometry
+        );
+    }
+
+    // ---- Fullscreen ------------------------------------------------------
+
+    #[test]
+    fn fullscreen_covers_the_monitor_and_restores_the_original_geometry() {
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "app");
+        w.geometry = Rect::new(100, 100, 400, 300);
+        wm.add_window(w);
+        wm.window_mut(id).unwrap().geometry = Rect::new(100, 100, 400, 300);
+
+        wm.toggle_fullscreen(id);
+        let got = wm.window(id).unwrap();
+        assert!(got.fullscreen);
+        assert_eq!(got.geometry, Rect::new(0, 0, 1280, 800), "should cover the whole monitor");
+        assert!(!got.decorated, "fullscreen must drop the titlebar");
+
+        wm.toggle_fullscreen(id);
+        let got = wm.window(id).unwrap();
+        assert!(!got.fullscreen);
+        assert_eq!(got.geometry, Rect::new(100, 100, 400, 300));
+        assert!(got.decorated);
+    }
+
+    #[test]
+    fn fullscreen_from_maximized_still_restores_the_pre_maximize_size() {
+        // Both share `restore_geometry`; entering fullscreen from a
+        // maximised window must not overwrite it with the monitor rect, or
+        // the window could never get its real size back.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "app");
+        w.geometry = Rect::new(50, 60, 300, 200);
+        wm.add_window(w);
+        wm.window_mut(id).unwrap().geometry = Rect::new(50, 60, 300, 200);
+
+        wm.toggle_maximize(id);
+        wm.toggle_fullscreen(id);
+        assert!(wm.is_fullscreen(id));
+        assert!(!wm.window(id).unwrap().maximized, "the two states are mutually exclusive");
+
+        wm.toggle_fullscreen(id);
+        assert_eq!(
+            wm.window(id).unwrap().geometry,
+            Rect::new(50, 60, 300, 200),
+            "must restore the size from before maximise, not the monitor rect"
+        );
+    }
+
+    #[test]
+    fn tiling_leaves_fullscreen_windows_alone() {
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        wm.set_layout(wm.current_workspace(), "tiling");
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "tiled"));
+        let b = wm.alloc_window_id();
+        wm.add_window(Window::new(b, "full"));
+        wm.toggle_fullscreen(b);
+
+        let changes = wm.arrange_workspace(wm.current_workspace());
+        assert!(
+            !changes.iter().any(|(id, _)| *id == b),
+            "a fullscreen window must not be re-tiled"
+        );
+        assert_eq!(wm.window(b).unwrap().geometry, Rect::new(0, 0, 1280, 800));
+    }
+
+    // ---- Directional move ------------------------------------------------
+
+    #[test]
+    fn moving_a_window_swaps_it_with_its_neighbour() {
+        let mut wm = wm_with_monitor();
+        let left = wm.alloc_window_id();
+        let mut a = Window::new(left, "left");
+        a.geometry = Rect::new(0, 0, 400, 400);
+        wm.add_window(a);
+        wm.window_mut(left).unwrap().geometry = Rect::new(0, 0, 400, 400);
+
+        let right = wm.alloc_window_id();
+        let mut b = Window::new(right, "right");
+        b.geometry = Rect::new(600, 0, 400, 400);
+        wm.add_window(b);
+        wm.window_mut(right).unwrap().geometry = Rect::new(600, 0, 400, 400);
+
+        wm.focus_window(left);
+        let swapped = wm.move_window_direction(Direction::Right);
+
+        assert_eq!(swapped, Some(right));
+        assert_eq!(wm.window(left).unwrap().geometry, Rect::new(600, 0, 400, 400));
+        assert_eq!(wm.window(right).unwrap().geometry, Rect::new(0, 0, 400, 400));
+    }
+
+    #[test]
+    fn moving_with_no_neighbour_pushes_to_the_monitor_edge() {
+        let mut wm = wm_with_monitor();
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "only");
+        w.geometry = Rect::new(500, 300, 200, 150);
+        wm.add_window(w);
+        wm.window_mut(id).unwrap().geometry = Rect::new(500, 300, 200, 150);
+        wm.focus_window(id);
+
+        assert_eq!(wm.move_window_direction(Direction::Left), None);
+        assert_eq!(wm.window(id).unwrap().geometry.x, 0, "should hug the left edge");
+
+        wm.move_window_direction(Direction::Down);
+        let g = wm.window(id).unwrap().geometry;
+        let mon = wm.primary_monitor().unwrap().geometry;
+        assert_eq!(g.bottom(), mon.bottom(), "should hug the bottom edge");
+    }
+
+    #[test]
+    fn swapping_also_reorders_the_stack_so_tiling_follows() {
+        // Under tiling the layout assigns slots from `order`, so a swap that
+        // only exchanged geometry would be undone by the next arrange.
+        let mut wm = wm_with_monitor();
+        wm.set_layout(wm.current_workspace(), "tiling");
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let b = wm.alloc_window_id();
+        wm.add_window(Window::new(b, "b"));
+        wm.arrange_workspace(wm.current_workspace());
+
+        // Snapshot *after* focusing: `focus_window` raises, which reorders
+        // on its own and would otherwise mask what the move did.
+        wm.focus_window(a);
+        let order_before: Vec<_> = wm.stacking_order().map(|w| w.id).collect();
+        wm.move_window_direction(Direction::Right);
+        let order_after: Vec<_> = wm.stacking_order().map(|w| w.id).collect();
+
+        assert_ne!(order_before, order_after, "stacking order must reflect the swap");
+        assert_eq!(
+            order_after,
+            order_before.iter().rev().copied().collect::<Vec<_>>(),
+            "the two windows should have traded places in the stack"
         );
     }
 }
