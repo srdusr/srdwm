@@ -114,5 +114,5 @@ returns `nil` for a documented key), then `Engine::load_init()` executes
 rest - `srd.load(name)` reads and executes `config_dir/{name}.lua` in the
 same Lua state, so later files can see earlier `srd.bind()`/`srd.set()`
 calls. Config directory resolution order: `$SRDWM_CONFIG_PATH`, then
-`$XDG_CONFIG_HOME/srdwm/srd`, then `~/.config/srdwm/srd` (matching
+`$XDG_CONFIG_HOME/srd`, then `~/.config/srd` (matching
 `docs/DEFAULTS.md`'s documented location).

@@ -206,7 +206,17 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
         if let Some((id, hit)) = hit {
             focus_window(state, id);
             match hit {
-                TitlebarHit::Drag => state.wm.borrow_mut().start_drag(id, pos.x as i32, pos.y as i32),
+                TitlebarHit::Drag => {
+                    // Double-click the titlebar to maximise, as every other
+                    // desktop does - one of the few window operations that
+                    // otherwise needs the keyboard or a precise button hit.
+                    if state.is_double_click(id, time) {
+                        state.wm.borrow_mut().toggle_maximize(id);
+                        state.sync_geometry(id);
+                    } else {
+                        state.wm.borrow_mut().start_drag(id, pos.x as i32, pos.y as i32)
+                    }
+                }
                 TitlebarHit::Close => {
                     if let Some(w) = state.id_to_window.get(&id) {
                         close_dwindow(w);
@@ -223,6 +233,8 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
             if let Some((window, _loc)) = state.space.element_under(pos) {
                 let window = window.clone();
                 state.space.raise_element(&window, true);
+                // Clicking a normal window must not bury a pinned one.
+                state.raise_pinned();
                 if let Some(&id) = dwindow_wl_surface(&window).and_then(|s| state.surface_to_id.get(&s)) {
                     focus_window(state, id);
                 }
@@ -276,10 +288,16 @@ pub(crate) fn handle_keyboard_key_event<B: smithay::backend::input::InputBackend
             }
         });
 
-    if key_state == BackendKeyState::Pressed {
-        if let Some((key_name, modifiers)) = matched {
-            state.pending.borrow_mut().push(CoreEvent::KeyPress { key_name, modifiers });
+    match key_state {
+        BackendKeyState::Pressed => {
+            if let Some((key_name, modifiers)) = matched {
+                state.begin_repeat(keycode, &key_name, modifiers);
+                state.pending.borrow_mut().push(CoreEvent::KeyPress { key_name, modifiers });
+            }
         }
+        // Any release ends a repeat of *that* key; releasing an unrelated
+        // key must not stop it.
+        BackendKeyState::Released => state.end_repeat(keycode),
     }
     // Unmatched keys were already forwarded to the focused client by
     // `FilterResult::Forward` inside the closure above.

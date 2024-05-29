@@ -64,7 +64,7 @@ impl WaylandPlatform {
     /// strings (see `srdwm_core::key_combo_string`) - the same set the X11
     /// backend grabs individually via `XGrabKey`. Only a keypress matching
     /// one of these is withheld from the focused client.
-    pub fn connect(wm: Rc<RefCell<WindowManager>>, bound_keys: &[String]) -> PlatformResult<Self> {
+    pub fn connect(wm: Rc<RefCell<WindowManager>>, bound_keys: &[String], repeat_keys: &[String]) -> PlatformResult<Self> {
         let display: Display<CompState> = Display::new().map_err(err)?;
         let dh = display.handle();
 
@@ -132,12 +132,15 @@ impl WaylandPlatform {
             lock: SessionLock::default(),
             cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
             cursor_buffer: crate::cursor::make_buffer(),
+            last_titlebar_click: None,
             wm: wm.clone(),
             surface_to_id: HashMap::new(),
             id_to_window: HashMap::new(),
             decorations: HashMap::new(),
             pending: pending.clone(),
             bound_keys: Rc::new(bound_keys.iter().cloned().collect()),
+            repeat_keys: Rc::new(repeat_keys.iter().cloned().collect()),
+            repeat: None,
             start_time: Instant::now(),
             udev: None,
             xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<CompState>(&dh),
@@ -212,11 +215,11 @@ impl WaylandPlatform {
             return Ok(());
         }
 
-        let mut custom_elements: Vec<MemoryRenderBufferRenderElement<GlesRenderer>> = Vec::new();
+        let mut custom_elements: Vec<crate::elements::OverlayElement<GlesRenderer>> = Vec::new();
         for (&id, deco) in self.state.decorations.iter() {
             let Some(geom) = self.wm.borrow().window(id).map(|w| w.geometry) else { continue };
             match MemoryRenderBufferRenderElement::from_buffer(renderer, (geom.x as f64, geom.y as f64), deco, None, None, None, Kind::Unspecified) {
-                Ok(elem) => custom_elements.push(elem),
+                Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
                 Err(e) => log::warn!("failed to import titlebar buffer for window {id}: {e}"),
             }
         }
@@ -274,11 +277,11 @@ impl WaylandPlatform {
             renderer.create_buffer(Fourcc::Abgr8888, (size.w, size.h).into()).map_err(err)?;
         let mut framebuffer = renderer.bind(&mut target).map_err(err)?;
 
-        let mut custom_elements: Vec<MemoryRenderBufferRenderElement<GlesRenderer>> = Vec::new();
+        let mut custom_elements: Vec<crate::elements::OverlayElement<GlesRenderer>> = Vec::new();
         for (&id, deco) in self.state.decorations.iter() {
             let Some(geom) = self.wm.borrow().window(id).map(|w| w.geometry) else { continue };
             if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(renderer, (geom.x as f64, geom.y as f64), deco, None, None, None, Kind::Unspecified) {
-                custom_elements.push(elem);
+                custom_elements.push(crate::elements::OverlayElement::Memory(elem));
             }
         }
 
@@ -334,6 +337,8 @@ impl Platform for WaylandPlatform {
         if closed {
             return Err(PlatformError::Other("compositor window closed".into()));
         }
+        // Held bindings that repeat - see `CompState::tick_repeat`.
+        self.state.tick_repeat();
         self.display.dispatch_clients(&mut self.state).map_err(err)?;
         self.display.flush_clients().map_err(err)?;
         self.render_frame()?;

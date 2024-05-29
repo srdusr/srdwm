@@ -6,7 +6,7 @@ This mirrors the style of the legacy C++ project's own status doc (now at
 `cargo clippy --workspace`) and, where applicable, actually run and observed
 doing the thing described - not just "the code compiles and looks right."
 
-## ✅ Complete and verified
+## Complete and verified
 
 ### Core window/workspace/layout engine (`crates/core`)
 - `WindowManager`: window/workspace/monitor state, focus cycling, directional
@@ -93,7 +93,7 @@ doing the thing described - not just "the code compiles and looks right."
   use the public Accessibility API plus an overlay window for decorations
   on macOS, not private APIs.
 
-## 🔄 Wayland backend (`crates/wayland`) - real, more limited scope than X11
+## Wayland backend (`crates/wayland`) - real, more limited scope than X11
 
 This is the one piece with essentially no working prior art to port (see
 `docs/PRIOR_ART.md`): the legacy C++ never wired a single event listener.
@@ -118,30 +118,30 @@ responsibility:
 security-relevant invariant spans state, protocol handling and rendering at
 once, so splitting it across three files would have hidden it.
 
-- ✅ Runs via smithay's winit backend (nested window), initializes EGL/GLES,
+- Runs via smithay's winit backend (nested window), initializes EGL/GLES,
   advertises a real Wayland socket, and was verified to start, initialize
   rendering, and run its event loop without crashing (log-verified; a
   full visual confirmation the way X11 got one was skipped deliberately --
   see below).
-- ✅ xdg-shell toplevels are tracked through the *same*
+- xdg-shell toplevels are tracked through the *same*
   `srdwm_core::WindowManager` the X11 backend uses - new windows get a
   real `WindowId`, go through `SmartPlacement`/`MasterStackLayout` exactly
   like X11 windows do.
-- ✅ xdg-decoration is negotiated to server-side mode.
-- ✅ Pointer click/drag/resize on the decoration band uses the identical
+- xdg-decoration is negotiated to server-side mode.
+- Pointer click/drag/resize on the decoration band uses the identical
   `hit_test` code path as X11.
-- ✅ Decorations render actual title text (`crates/wayland/src/decoration.rs`):
+- Decorations render actual title text (`crates/wayland/src/decoration.rs`):
   glyphs rasterized via `fontdue` against whatever monospace font is found
   under `/usr/share/fonts` etc. (falls back to solid-color-only, same as
   before, if none is found), uploaded per-frame through smithay's
   `MemoryRenderBuffer`. Pure `(width, height, text) -> Vec<u8>` function,
   unit-tested without any GL/display context.
-- ✅ Global keybindings are matched precisely: `WaylandPlatform::connect`
+- Global keybindings are matched precisely: `WaylandPlatform::connect`
   takes the config's actual bound-key combo strings (same format/shared
   `srdwm_core::keysyms` table the X11 backend's `XGrabKey` calls use) and
   only a matching keypress is withheld from the focused client - no more
   "any Super-held key is ours" heuristic.
-- ✅ DRM/udev backend (`crates/wayland/src/udev.rs`): runs as the real
+- DRM/udev backend (`crates/wayland/src/udev.rs`): runs as the real
   compositor on a bare TTY, no host session to nest under. Single primary
   GPU, first connected connector, its first-listed mode, real `libseat`
   session/seat handling (VT-switch pause/resume, no raw root-only
@@ -164,7 +164,7 @@ once, so splitting it across three files would have hidden it.
   renders. No client-side visual check yet (the VM has no Wayland-native
   client installed to test against, only X11 ones - see below). No
   hotplug (connectors or GPUs) after startup.
-- ✅ XWayland integration (`crates/wayland/src/xwayland.rs`), udev/DRM
+- XWayland integration (`crates/wayland/src/xwayland.rs`), udev/DRM
   backend only (the winit backend would need its own `calloop::EventLoop`
   added first - see the module's doc comment): spawns XWayland, starts
   `X11Wm`, and implements `XwmHandler`/`XWaylandShellHandler` to bridge
@@ -222,7 +222,7 @@ once, so splitting it across three files would have hidden it.
   - Not implemented: selections/clipboard, XSETTINGS, RandR
     primary-output sync, override-redirect window geometry beyond initial
     placement (all have harmless no-op default `XwmHandler` methods).
-- ✅ **`wlr-layer-shell-unstable-v1`** (`WlrLayerShellHandler`, `delegate_layer_shell!`
+- **`wlr-layer-shell-unstable-v1`** (`WlrLayerShellHandler`, `delegate_layer_shell!`
   in `lib.rs`): layer surfaces are mapped into the output's
   `smithay::desktop::LayerMap` (`layer_map_for_output`), which `render_output`
   renders automatically - no rendering-path changes were needed, only state
@@ -266,13 +266,13 @@ once, so splitting it across three files would have hidden it.
     binary against the user's real Hyprland session (which advertises
     xdg-output and doesn't crash it) side by side with the trace against
     `srdwm`.
-- ✅ **xdg-output (`zxdg_output_manager_v1`)**: added via smithay's
+- **xdg-output (`zxdg_output_manager_v1`)**: added via smithay's
   `OutputManagerState::new_with_xdg_output`, piggybacking on the existing
   `delegate_output!`/`OutputHandler` wiring (no new handler trait needed).
   Not itself in the original "biggest blocker" list, but found to be a hard
   requirement in practice while fixing layer-shell above - see the wofi
   segfault account.
-- ✅ **Clipboard**: `wl_data_device_manager`, `zwp_primary_selection_v1`,
+- **Clipboard**: `wl_data_device_manager`, `zwp_primary_selection_v1`,
   and `zwlr_data_control_manager_v1`, all three sharing smithay's single
   `SelectionHandler`. Data-control is the one that matters most for this
   user's session: `wl-paste --watch cliphist store` (in their Hyprland
@@ -296,7 +296,7 @@ once, so splitting it across three files would have hidden it.
   keystrokes and could not paste until it was clicked. (Same class as the
   click-to-focus bug fixed in the XWayland pass; this was the creation
   path.)
-- ✅ **`ext-session-lock-v1`** (screen locking): `SessionLockHandler` with
+- **`ext-session-lock-v1`** (screen locking): `SessionLockHandler` with
   per-output lock surfaces. `locked` gates both rendering (only the lock
   surface, over an opaque black clear - no windows, decorations, or layer
   surfaces) and input (all keys go to the lock surface, and **no key is
@@ -310,8 +310,8 @@ once, so splitting it across three files would have hidden it.
   client (no locker - hyprlock/swaylock/etc. - is installed on this
   machine, so there was nothing else to test against; the user's
   `~/.scripts/lock` currently falls through to `loginctl lock-session`):
-  lock → cleared frame → `locked` confirmation → lock surface configured to
-  the real output size → `unlock_and_destroy` → normal operation restored.
+  lock cleared frame `locked` confirmation lock surface configured to
+  the real output size `unlock_and_destroy` normal operation restored.
   Three properties were checked by counting protocol events delivered to a
   real `wezterm` launched at each point:
   - unlocked: 1 `wl_keyboard.enter` (control);
@@ -323,7 +323,7 @@ once, so splitting it across three files would have hidden it.
   unconditionally, so merely opening a window at a locked screen handed it
   keyboard focus. The guard now lives in `set_keyboard_focus` itself, as
   the single chokepoint every focus path goes through.
-- ✅ **`wlr-screencopy-unstable-v1`** (`crates/wayland/src/screencopy.rs`):
+- **`wlr-screencopy-unstable-v1`** (`crates/wayland/src/screencopy.rs`):
   what `grim` uses, and therefore what the user's `Print` / `Alt+Print`
   binds (`grim`, `slurp | grim -g -`) and `wf-recorder` need. smithay 0.7
   ships **no** helper for this protocol, so the `GlobalDispatch`/`Dispatch`
@@ -342,7 +342,7 @@ once, so splitting it across three files would have hidden it.
   writes nothing.
   One real bug was found and fixed by this testing: reading back the winit
   backend's **EGL window surface** destroyed the GL context on the first
-  capture (`eglSwapBuffers: BAD_SURFACE` → `BAD_ALLOC` → "context has been
+  capture (`eglSwapBuffers: BAD_SURFACE` `BAD_ALLOC` "context has been
   lost", taking the whole compositor down), root-caused by A/B-ing the
   identical build with only the readback call removed. The winit path now
   renders a second pass into an offscreen `GlesRenderbuffer` and reads
@@ -353,7 +353,7 @@ once, so splitting it across three files would have hidden it.
   protocol version 2 for that reason) and cursor overlay
   (`overlay_cursor` is accepted and ignored - this backend draws no
   cursor of its own yet).
-- ✅ **Multi-monitor** (udev/DRM backend). Every connected connector becomes
+- **Multi-monitor** (udev/DRM backend). Every connected connector becomes
   a `UdevHead` with its **own** scanout buffers, damage tracker and
   page-flip state, laid out left-to-right in a shared global coordinate
   space; the `PixmanRenderer` is shared, since they are one GPU. A head
@@ -361,7 +361,7 @@ once, so splitting it across three files would have hidden it.
   its own page-flip event arrives (matched by CRTC), so monitors at
   different refresh rates each run at their own pace instead of the slowest
   gating the rest.
-  Connector→CRTC assignment never reuses a CRTC, so a machine with more
+  ConnectorCRTC assignment never reuses a CRTC, so a machine with more
   monitors than CRTCs drives as many as the hardware allows and logs the
   rest. Modes are chosen by the `PREFERRED` flag rather than list order.
   The rest of the compositor reaches outputs through
@@ -384,12 +384,12 @@ once, so splitting it across three files would have hidden it.
     (= `[0.05, 0.05, 0.08]`) - i.e. both are really being rendered and
     scanned out, not just enumerated;
   - a window forced by `srd.rule` to **global** x=1500 appeared on head 1 at
-    head-local x=**220** (= 1500 − 1280, the exact translation) with its
+    head-local x=**220** (= 1500 1280, the exact translation) with its
     srdwm titlebar, while head 0 stayed completely empty (0 of 64000 sampled
     pixels differed from the clear colour).
   The nested winit backend remains single-output by construction (it is one
   window on a host compositor).
-- ✅ **Connector hotplug**. A `UdevBackend` event source watches for the
+- **Connector hotplug**. A `UdevBackend` event source watches for the
   kernel's `change` uevent on the DRM device; `CompState::reprobe_outputs`
   then re-probes connectors (forcing a fresh probe - on a hotplug the
   cached status is exactly what has gone stale) and reconciles the head
@@ -409,11 +409,11 @@ once, so splitting it across three files would have hidden it.
   (positions of the others change too).
   **Verified live in the QEMU VM**, booting with one connector and toggling
   the second at runtime:
-  - plug in → `hotplug - 0 output(s) removed, 1 added`,
+  - plug in `hotplug - 0 output(s) removed, 1 added`,
     `output Virtual-2 connected (1024x768)`, `monitor layout changed:
     2 monitor(s)`, and a screendump of the new head showed it really
     rendering at its own resolution;
-  - unplug → `1 output(s) removed, 0 added`, back to 1 monitor, compositor
+  - unplug `1 output(s) removed, 0 added`, back to 1 monitor, compositor
     healthy;
   - **window rescue**: an xterm placed by rule at global x=1500 (on the
     second monitor) was still visible after that monitor was unplugged --
@@ -513,7 +513,7 @@ built them:
   `WAYLAND_DEBUG=1` protocol tracing and fixing real bugs - see the
   Wayland backend section above for the full account.
 
-- ✅ **Mouse cursor** (`crates/wayland/src/cursor.rs`). Previously **nothing
+- **Mouse cursor** (`crates/wayland/src/cursor.rs`). Previously **nothing
   drew a pointer at all** - invisible mouse on a bare TTY. It hid because
   the nested backend runs inside another compositor, which draws a cursor
   over srdwm's window; only the DRM backend is affected, and only when run
@@ -526,15 +526,41 @@ built them:
   **Verified in the QEMU VM**: screendump of a bare-TTY session shows a
   recognisable arrow at the pointer position - 113 white fill + 58 black
   outline pixels at screen centre, where the pointer starts.
-- ✅ **Lid switch**: libinput switch events are handled and surfaced to
+- **Lid switch**: libinput switch events are handled and surfaced to
   config as `srd.on("lid_closed"/"lid_open", fn)`, so a session can lock and
   suspend on lid close. Previously there was no switch handling at all.
-- ✅ **Fullscreen** (`srd.window.fullscreen()`), **directional window move**
+- **Fullscreen** (`srd.window.fullscreen()`), **directional window move**
   (`srd.window.move("left")`, swaps with the neighbour), **focus cycling**
   (`srd.window.next()`/`prev()`), **modifier+drag move/resize anywhere in a
   window**, **modifier+scroll workspace switching**, and 8 more `XF86`
   media/power keysyms. All were needed to port a real Hyprland config and
   none existed before.
+
+- **Cursor shapes**: a client's own cursor surface is now rendered with
+  its declared hotspot, so an I-beam over text or a hand over a link shows
+  the app's image rather than srdwm's arrow. The built-in arrow remains the
+  fallback for when no client has set one (over decorations and the
+  desktop). Named shapes (`CursorIcon::Text` etc.) still fall back to the
+  arrow; most toolkits set a surface, so this is rarely visible.
+- **Key repeat for bindings** (`srd.bind_repeat`, Hyprland's `binde`).
+  Held volume/brightness keys and switcher cycling now repeat at the seat's
+  own rate (200ms delay, 25/s). Driven from the poll loop rather than a
+  timer source, because the winit backend has no `calloop` loop of its own
+  and `poll_events` already runs continuously in both.
+- **Always-on-top / pin** (`srd.window.toggle_pin`, and `pinned = true`
+  as a window rule - their picture-in-picture and HUD rules use it).
+  `Window::always_on_top` was another declared-but-never-read field.
+  Enforced in `WindowManager`'s stacking order rather than at render time,
+  so every consumer of `stacking_order` gets it and none can forget it.
+- **Mouse-only window management** works without touching the keyboard:
+  drag the titlebar to move, drag any edge or corner to resize, the
+  titlebar buttons to close/maximise/minimise, click to focus, drag to a
+  screen edge to snap (half/quarter/maximise), and **double-click the
+  titlebar to maximise**. The resize grab band was widened from 6px to
+  10px - a hairline border is genuinely hard to hit with a mouse, which is
+  why Hyprland ships `extend_border_grab_area`.
+- **Config path** is now `~/.config/srd` (or `$XDG_CONFIG_HOME/srd`),
+  not `~/.config/srdwm/srd` - the extra level said the same thing twice.
 
 ## Not implemented anywhere yet
 

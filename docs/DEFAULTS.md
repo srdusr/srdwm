@@ -253,7 +253,7 @@ srd.set("platform.macos.accessibility_enabled", true)  -- Default: true
 ## Configuration File Locations
 
 ### Linux
-- **Config**: `~/.config/srdwm/srd/`
+- **Config**: `~/.config/srd/`
 - **Themes**: `~/.config/srdwm/themes/`
 - **Scripts**: `~/.config/srdwm/scripts/`
 - **Cache**: `~/.cache/srdwm/`
@@ -267,7 +267,7 @@ srd.set("platform.macos.accessibility_enabled", true)  -- Default: true
 - **Logs**: `%LOCALAPPDATA%\srdwm\logs\`
 
 ### macOS
-- **Config**: `~/Library/Application Support/srdwm/srd/`
+- **Config**: `~/Library/Application Support/srdwm/`
 - **Themes**: `~/Library/Application Support/srdwm/themes/`
 - **Scripts**: `~/Library/Application Support/srdwm/scripts/`
 - **Cache**: `~/Library/Caches/srdwm/`

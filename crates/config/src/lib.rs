@@ -27,6 +27,9 @@ struct SharedState {
     wm: Rc<RefCell<WindowManager>>,
     values: HashMap<String, ConfigValue>,
     key_bindings: HashMap<String, RegistryKey>,
+    /// Combos registered with `srd.bind_repeat`, which fire repeatedly while
+    /// held (Hyprland's `binde`). A subset of `key_bindings`.
+    repeat_keys: std::collections::HashSet<String>,
     /// Handlers for non-key events (currently the lid switch), registered
     /// via `srd.on(...)`. Kept separate from `key_bindings` because the
     /// backends use that map to decide which *keypresses* to withhold from
@@ -65,6 +68,7 @@ impl Engine {
             wm,
             values: default_config(),
             key_bindings: HashMap::new(),
+            repeat_keys: std::collections::HashSet::new(),
             event_handlers: HashMap::new(),
             config_dir: config_dir.into(),
             log: Vec::new(),
@@ -154,6 +158,11 @@ impl Engine {
         self.state.borrow().key_bindings.keys().cloned().collect()
     }
 
+    /// Combos that should auto-repeat while held.
+    pub fn repeat_keys(&self) -> Vec<String> {
+        self.state.borrow().repeat_keys.iter().cloned().collect()
+    }
+
     fn register_srd_module(&self) -> Result<()> {
         let lua = &self.lua;
         let srd = lua.create_table()?;
@@ -164,6 +173,7 @@ impl Engine {
         srd.set("reset_all", self.fn_reset_all()?)?;
         srd.set("reset_category", self.fn_reset_category()?)?;
         srd.set("bind", self.fn_bind()?)?;
+        srd.set("bind_repeat", self.fn_bind_repeat()?)?;
         srd.set("on", self.fn_on()?)?;
         srd.set("rule", self.fn_rule()?)?;
         srd.set("load", self.fn_load()?)?;
@@ -186,6 +196,7 @@ impl Engine {
         window.set("minimize", self.fn_window_action(WindowAction::Minimize)?)?;
         window.set("maximize", self.fn_window_action(WindowAction::Maximize)?)?;
         window.set("fullscreen", self.fn_window_action(WindowAction::Fullscreen)?)?;
+        window.set("toggle_pin", self.fn_window_action(WindowAction::TogglePin)?)?;
         window.set("focus", self.fn_window_focus_direction()?)?;
         window.set("move", self.fn_window_move_direction()?)?;
         window.set("next", self.fn_window_cycle(true)?)?;
@@ -316,6 +327,20 @@ impl Engine {
         })?)
     }
 
+    /// `srd.bind_repeat(combo, fn)` - like `srd.bind`, but keeps firing
+    /// while the key is held (Hyprland's `binde`). For volume, brightness
+    /// and window-switcher cycling, where one step per press is unusable.
+    fn fn_bind_repeat(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |lua, (combo, f): (String, mlua::Function)| {
+            let key = lua.create_registry_value(f)?;
+            let mut s = state.borrow_mut();
+            s.repeat_keys.insert(combo.clone());
+            s.key_bindings.insert(combo, key);
+            Ok(())
+        })?)
+    }
+
     fn fn_bind(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |lua, (combo, f): (String, mlua::Function)| {
@@ -363,6 +388,7 @@ impl Engine {
                     decorated: actions.get("decorated")?,
                     border_color,
                     border_width: actions.get("border_width")?,
+                    pinned: actions.get("pinned")?,
                 },
             };
             state.borrow().wm.borrow_mut().add_rule(rule);
@@ -524,6 +550,7 @@ impl Engine {
                     WindowAction::Maximize => wm.toggle_maximize(id),
                     WindowAction::Fullscreen => wm.toggle_fullscreen(id),
                     WindowAction::ToggleFloating => wm.toggle_floating(id),
+                    WindowAction::TogglePin => wm.toggle_always_on_top(id),
                 }
             }
             Ok(())
@@ -737,6 +764,7 @@ enum WindowAction {
     Maximize,
     Fullscreen,
     ToggleFloating,
+    TogglePin,
 }
 
 /// Recursively flattens a Lua table into dotted config keys, e.g.
@@ -1147,5 +1175,47 @@ mod tests {
         let engine = engine_in(dir.path());
         engine.load_init().unwrap();
         assert_eq!(engine.get("general.window_gap"), Some(ConfigValue::Number(4.0)));
+    }
+
+    #[test]
+    fn bind_repeat_registers_the_binding_and_marks_it_repeating() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine_in(dir.path());
+        engine
+            .lua
+            .load(r#"
+                srd.bind("Mod4+a", function() end)
+                srd.bind_repeat("XF86AudioRaiseVolume", function() end)
+            "#)
+            .exec()
+            .unwrap();
+
+        let bound = engine.bound_keys();
+        // A repeating bind is still a normal binding - it must be grabbed
+        // and dispatched like any other, or it would never fire at all.
+        assert!(bound.contains(&"Mod4+a".to_string()));
+        assert!(bound.contains(&"XF86AudioRaiseVolume".to_string()));
+
+        let repeat = engine.repeat_keys();
+        assert_eq!(repeat, vec!["XF86AudioRaiseVolume".to_string()]);
+        assert!(!repeat.contains(&"Mod4+a".to_string()), "a plain bind must not repeat");
+    }
+
+    #[test]
+    fn bind_repeat_dispatches_like_a_normal_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine_in(dir.path());
+        engine
+            .lua
+            .load(r#"
+                fired = 0
+                srd.bind_repeat("Mod4+z", function() fired = fired + 1 end)
+            "#)
+            .exec()
+            .unwrap();
+        assert!(engine.dispatch_keybinding("Mod4+z"));
+        assert!(engine.dispatch_keybinding("Mod4+z"));
+        let fired: i64 = engine.lua.globals().get("fired").unwrap();
+        assert_eq!(fired, 2);
     }
 }

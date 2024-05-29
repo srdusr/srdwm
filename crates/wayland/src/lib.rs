@@ -38,6 +38,7 @@
 
 mod cursor;
 mod decoration;
+mod elements;
 mod input;
 mod lock;
 mod protocols;
@@ -67,13 +68,13 @@ pub(crate) fn err(e: impl std::fmt::Display) -> PlatformError {
 /// nested-vs-native. Falls back to winit if udev initialization fails for
 /// any reason (no seat access, no DRM device, ...), logging why rather than
 /// failing outright.
-pub fn connect(wm: Rc<RefCell<WindowManager>>, bound_keys: &[String]) -> PlatformResult<Box<dyn Platform>> {
+pub fn connect(wm: Rc<RefCell<WindowManager>>, bound_keys: &[String], repeat_keys: &[String]) -> PlatformResult<Box<dyn Platform>> {
     let no_host_display = std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none();
     if no_host_display {
-        match udev::UdevPlatform::connect(wm.clone(), bound_keys) {
+        match udev::UdevPlatform::connect(wm.clone(), bound_keys, repeat_keys) {
             Ok(platform) => return Ok(Box::new(platform)),
             Err(e) => log::warn!("udev/DRM backend unavailable ({e}); falling back to nested winit backend"),
         }
     }
-    Ok(Box::new(WaylandPlatform::connect(wm, bound_keys)?))
+    Ok(Box::new(WaylandPlatform::connect(wm, bound_keys, repeat_keys)?))
 }

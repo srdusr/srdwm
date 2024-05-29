@@ -5,15 +5,19 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
+/// Where the Lua config lives: `$SRDWM_CONFIG_PATH`, else
+/// `$XDG_CONFIG_HOME/srd`, else `~/.config/srd`.
+///
+/// Just `srd`, not `srdwm/srd` - the extra level said the same thing twice.
 fn config_dir() -> PathBuf {
     if let Ok(p) = std::env::var("SRDWM_CONFIG_PATH") {
         return PathBuf::from(p);
     }
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("srdwm/srd");
+        return PathBuf::from(xdg).join("srd");
     }
     if let Ok(home) = std::env::var("HOME") {
-        return PathBuf::from(home).join(".config/srdwm/srd");
+        return PathBuf::from(home).join(".config/srd");
     }
     PathBuf::from("config/srd")
 }
@@ -92,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PlatformKind::Wayland => {
             let combos = engine.bound_keys();
             log::info!("{} keybinding(s) will be intercepted from clients", combos.len());
-            srdwm_wayland::connect(wm.clone(), &combos)?
+            srdwm_wayland::connect(wm.clone(), &combos, &engine.repeat_keys())?
         }
         #[cfg(windows)]
         PlatformKind::Windows => Box::new(srdwm_windows::WindowsPlatform::new()?),

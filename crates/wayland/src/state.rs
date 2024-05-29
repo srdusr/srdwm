@@ -14,7 +14,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -127,12 +127,18 @@ pub(crate) struct CompState {
     /// Bitmap for the built-in arrow, built once at startup rather than
     /// per frame.
     pub(crate) cursor_buffer: MemoryRenderBuffer,
+    /// Last titlebar press, for double-click detection.
+    pub(crate) last_titlebar_click: Option<(WindowId, u32)>,
     pub(crate) wm: Rc<RefCell<WindowManager>>,
     pub(crate) surface_to_id: HashMap<WlSurface, WindowId>,
     pub(crate) id_to_window: HashMap<WindowId, DWindow>,
     pub(crate) decorations: HashMap<WindowId, MemoryRenderBuffer>,
     pub(crate) pending: Rc<RefCell<Vec<CoreEvent>>>,
     pub(crate) bound_keys: Rc<HashSet<String>>,
+    /// Combos that repeat while held (`srd.bind_repeat`).
+    pub(crate) repeat_keys: Rc<HashSet<String>>,
+    /// The binding currently held down and repeating, if any.
+    pub(crate) repeat: Option<RepeatState>,
     pub(crate) start_time: Instant,
     /// `Some` only for the udev/DRM backend; see `udev.rs` module docs for
     /// why its runtime state lives here rather than on a separate struct.
@@ -145,6 +151,61 @@ pub(crate) struct CompState {
     /// Mapped X11 windows still waiting for XWayland to associate a
     /// `wl_surface` - see `xwayland.rs` and `commit()` above.
     pub(crate) xwayland_pending: Vec<smithay::xwayland::X11Surface>,
+}
+
+/// A held keybinding that is firing repeatedly.
+///
+/// Driven from the poll loop rather than a timer source: the winit backend
+/// has no `calloop` loop of its own, and `poll_events` already runs
+/// continuously in both backends, so this works the same in each.
+pub(crate) struct RepeatState {
+    /// Which physical key is held - repeat stops when *this* key is
+    /// released, not when any key is.
+    pub(crate) keycode: smithay::input::keyboard::Keycode,
+    pub(crate) key_name: String,
+    pub(crate) modifiers: srdwm_core::Modifiers,
+    pub(crate) next_fire: Instant,
+}
+
+/// Matches the seat's own repeat settings (`add_keyboard(.., 200, 25)`), so
+/// held bindings feel the same as held keys in a text field.
+const REPEAT_DELAY: Duration = Duration::from_millis(200);
+const REPEAT_INTERVAL: Duration = Duration::from_millis(1000 / 25);
+
+impl CompState {
+    /// Starts repeating `combo` if it was registered with `srd.bind_repeat`.
+    pub(crate) fn begin_repeat(&mut self, keycode: smithay::input::keyboard::Keycode, key_name: &str, modifiers: srdwm_core::Modifiers) {
+        let combo = srdwm_core::key_combo_string(modifiers, key_name);
+        if !self.repeat_keys.contains(&combo) {
+            return;
+        }
+        self.repeat = Some(RepeatState {
+            keycode,
+            key_name: key_name.to_string(),
+            modifiers,
+            next_fire: Instant::now() + REPEAT_DELAY,
+        });
+    }
+
+    /// Stops repeating when the held key is released.
+    pub(crate) fn end_repeat(&mut self, keycode: smithay::input::keyboard::Keycode) {
+        if self.repeat.as_ref().is_some_and(|r| r.keycode == keycode) {
+            self.repeat = None;
+        }
+    }
+
+    /// Emits another `KeyPress` if the held binding is due. Called once per
+    /// poll from both backends.
+    pub(crate) fn tick_repeat(&mut self) {
+        let Some(repeat) = self.repeat.as_mut() else { return };
+        let now = Instant::now();
+        if now < repeat.next_fire {
+            return;
+        }
+        repeat.next_fire = now + REPEAT_INTERVAL;
+        let (key_name, modifiers) = (repeat.key_name.clone(), repeat.modifiers);
+        self.pending.borrow_mut().push(CoreEvent::KeyPress { key_name, modifiers });
+    }
 }
 
 /// Titlebar background is the same regardless of focus (matching the X11
@@ -219,6 +280,8 @@ impl CompState {
         // real Wayland keyboard/selection focus. (Same class of bug as the
         // click-to-focus one fixed earlier; this is the creation path.)
         self.set_keyboard_focus(Some(surface));
+        // A newly-mapped window goes on top, but not over a pinned one.
+        self.raise_pinned();
         self.pending.borrow_mut().push(CoreEvent::WindowCreated(id));
     }
 
@@ -337,6 +400,35 @@ impl CompState {
         set_primary_focus(&self.dh.clone(), &self.seat.clone(), client);
         let serial = SERIAL_COUNTER.next_serial();
         keyboard.set_focus(self, surface, serial);
+    }
+
+    /// True when this titlebar press is the second of a double-click on the
+    /// same window. Threshold is the usual 400ms.
+    pub(crate) fn is_double_click(&mut self, id: WindowId, time: u32) -> bool {
+        const DOUBLE_CLICK_MS: u32 = 400;
+        let doubled = match self.last_titlebar_click {
+            Some((last_id, last_time)) => last_id == id && time.saturating_sub(last_time) <= DOUBLE_CLICK_MS,
+            None => false,
+        };
+        // Reset after a double, so a third click starts a fresh pair rather
+        // than counting as another double.
+        self.last_titlebar_click = if doubled { None } else { Some((id, time)) };
+        doubled
+    }
+
+    /// Re-raises always-on-top windows in the `Space`.
+    ///
+    /// `WindowManager` keeps pinned windows last in its own stacking order,
+    /// but the `Space` has an order of its own that decides what actually
+    /// draws on top - so pinning is only real once it is pushed here.
+    /// Called after anything that raises a window.
+    pub(crate) fn raise_pinned(&mut self) {
+        let pinned: Vec<WindowId> = self.wm.borrow().stacking_order().filter(|w| w.always_on_top).map(|w| w.id).collect();
+        for id in pinned {
+            if let Some(w) = self.id_to_window.get(&id).cloned() {
+                self.space.raise_element(&w, false);
+            }
+        }
     }
 
     pub(crate) fn sync_geometry(&mut self, id: WindowId) {

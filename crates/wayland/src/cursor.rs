@@ -7,13 +7,19 @@
 //! can move it, click with it, and drag windows with it, but you cannot see
 //! where it is. That makes the udev backend unusable as a real session.
 //!
-//! **Scope, stated plainly:** this draws one built-in arrow, always. It
-//! honours `CursorImageStatus::Hidden` (so a client that hides the pointer
-//! still gets its way), but it does *not* yet render a client's own cursor
-//! surface or a named shape - an app asking for an I-beam or a resize arrow
-//! still sees this arrow. That is a real limitation, and a visible one over
-//! text fields; it is also strictly better than the previous behaviour of
-//! drawing nothing at all.
+//! Two sources, in priority order:
+//!
+//! 1. **The client's own cursor surface** (`CursorImageStatus::Surface`) --
+//!    a terminal's I-beam, a browser's hand, an app's resize arrows. Drawn
+//!    from its surface tree, offset by the hotspot the client declared.
+//! 2. **A built-in arrow**, for when no client has set an image (over
+//!    srdwm's own decorations and the desktop) or asked for a named shape
+//!    we have no art for.
+//!
+//! `CursorImageStatus::Hidden` is honoured, so a client that hides the
+//! pointer still gets its way. Named shapes (`CursorIcon::Text` etc.) fall
+//! back to the arrow rather than being drawn as the requested shape - most
+//! toolkits set a surface rather than a name, so this is rarely visible.
 //!
 //! The built-in arrow is deliberate rather than loading an XCursor theme:
 //! theme loading pulls in a dependency, needs a theme to actually be
@@ -21,7 +27,10 @@
 //! is always present beats a prettier one that sometimes isn't there - the
 //! same reasoning as `decoration.rs`'s font fallback.
 
+use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::utils::{Logical, Point};
+
+use crate::elements::OverlayElement;
 
 /// Side length of the built-in cursor bitmap, in pixels.
 pub(crate) const CURSOR_SIZE: i32 = 24;
@@ -85,6 +94,10 @@ pub(crate) fn arrow_bitmap() -> Vec<u8> {
 }
 
 
+/// One cursor render element, whatever the source.
+///
+/// Client cursor surfaces and the built-in bitmap are different element
+/// types, so they're unified here rather than forcing both through one.
 /// Render elements for the pointer, to be drawn above everything else.
 ///
 /// `pos` is in the global space and `origin` is the output's origin, since
@@ -99,14 +112,17 @@ pub(crate) fn render_elements<R>(
     pos: Point<f64, Logical>,
     origin: Point<i32, Logical>,
     size: (i32, i32),
-) -> Vec<smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<R>>
+) -> Vec<OverlayElement<R>>
 where
-    R: smithay::backend::renderer::Renderer + smithay::backend::renderer::ImportMem,
+    R: smithay::backend::renderer::Renderer
+        + smithay::backend::renderer::ImportAll
+        + smithay::backend::renderer::ImportMem,
     R::TextureId: Clone + Send + 'static,
 {
-    use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
+    use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
     use smithay::backend::renderer::element::Kind;
-    use smithay::input::pointer::CursorImageStatus;
+    use smithay::input::pointer::{CursorImageStatus, CursorImageSurfaceData};
+    use smithay::wayland::compositor::with_states;
 
     if matches!(status, CursorImageStatus::Hidden) {
         return Vec::new();
@@ -117,16 +133,33 @@ where
         return Vec::new();
     }
 
-    // Built-in arrow: hotspot is the tip, so no offset.
+    if let CursorImageStatus::Surface(surface) = status {
+        // The client picked an image. Its hotspot is the point *inside* that
+        // image which tracks the pointer, so the surface is drawn offset by
+        // it - without this the image sits down-right of where clicks land.
+        let hotspot = with_states(surface, |states| {
+            states
+                .data_map
+                .get::<CursorImageSurfaceData>()
+                .map(|d| d.lock().unwrap().hotspot)
+                .unwrap_or_default()
+        });
+        let at = (local.0 - hotspot.x, local.1 - hotspot.y);
+        return render_elements_from_surface_tree(renderer, surface, at, 1.0, 1.0, Kind::Cursor);
+    }
+
+    // No client image (or a named shape we don't have art for): the
+    // built-in arrow, whose hotspot is its tip, so no offset.
     let at = (local.0 as f64, local.1 as f64);
     match MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Cursor) {
-        Ok(e) => vec![e],
+        Ok(e) => vec![OverlayElement::Memory(e)],
         Err(e) => {
             log::warn!("cursor: failed to import bitmap: {e}");
             Vec::new()
         }
     }
 }
+
 
 /// The built-in arrow as an uploadable buffer. Built once at startup rather
 /// than per frame - the bitmap never changes.

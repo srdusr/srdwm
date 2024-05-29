@@ -50,8 +50,15 @@ impl Window {
 /// The height, in pixels, of the drawn title bar. Shared between backends so
 /// hit-testing and rendering agree on the same band.
 pub const TITLEBAR_HEIGHT: u32 = 30;
-/// Width of a resize grab margin along each window edge.
-pub const RESIZE_MARGIN: i32 = 6;
+/// Width of the resize grab band along each window edge.
+///
+/// 10px rather than a hairline: this is grabbed with a mouse, and a border
+/// only a couple of pixels wide is genuinely hard to hit - which is why
+/// Hyprland ships `extend_border_grab_area` and why every desktop widens
+/// this beyond the visible border. The band is inside the window, so it
+/// costs a few pixels of client edge; that is the right trade for making
+/// resize reliably grabbable without a keyboard.
+pub const RESIZE_MARGIN: i32 = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeEdge {

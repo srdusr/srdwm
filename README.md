@@ -61,8 +61,8 @@ DISPLAY=:99 SRDWM_CONFIG_PATH="$PWD/config/srd" cargo run -p srdwm
 
 ## Configuration
 
-Config lives at `$SRDWM_CONFIG_PATH`, or `$XDG_CONFIG_HOME/srdwm/srd`, or
-`~/.config/srdwm/srd`. [`config/srd/`](config/srd/) in this repo is a
+Config lives at `$SRDWM_CONFIG_PATH`, or `$XDG_CONFIG_HOME/srd`, or
+`~/.config/srd`. [`config/srd/`](config/srd/) in this repo is a
 complete working example (`init.lua` loads `keybindings.lua`, `layouts.lua`,
 `themes.lua`, `monitors.lua`, `rules.lua`, `startup.lua`). Full API and
 default values: [`docs/DEFAULTS.md`](docs/DEFAULTS.md).

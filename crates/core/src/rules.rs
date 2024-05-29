@@ -47,6 +47,8 @@ pub struct WindowRuleActions {
     pub decorated: Option<bool>,
     pub border_color: Option<(u8, u8, u8)>,
     pub border_width: Option<u32>,
+    /// Always-on-top (Hyprland's `pin`).
+    pub pinned: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]

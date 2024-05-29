@@ -197,7 +197,7 @@ impl CompState {
             let head = &mut udev.heads[index];
             let back = 1 - head.front;
 
-            let mut custom_elements: Vec<MemoryRenderBufferRenderElement<PixmanRenderer>> = Vec::new();
+            let mut custom_elements: Vec<crate::elements::OverlayElement<PixmanRenderer>> = Vec::new();
             if !locked {
                 // Cursor first: `render_output` draws custom elements
                 // front-to-back, so the earliest element is topmost. On a
@@ -215,7 +215,7 @@ impl CompState {
                 for (geom, deco) in &decorations {
                     let pos = ((geom.x - origin.x) as f64, (geom.y - origin.y) as f64);
                     match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, deco, None, None, None, Kind::Unspecified) {
-                        Ok(elem) => custom_elements.push(elem),
+                        Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
                         Err(e) => log::warn!("udev: failed to import titlebar buffer: {e}"),
                     }
                 }
@@ -451,7 +451,7 @@ pub struct UdevPlatform {
 }
 
 impl UdevPlatform {
-    pub fn connect(wm: Rc<RefCell<WindowManager>>, bound_keys: &[String]) -> PlatformResult<Self> {
+    pub fn connect(wm: Rc<RefCell<WindowManager>>, bound_keys: &[String], repeat_keys: &[String]) -> PlatformResult<Self> {
         let event_loop: EventLoop<'static, CompState> = EventLoop::try_new().map_err(err)?;
 
         let (session, notifier) = LibSeatSession::new().map_err(err)?;
@@ -556,12 +556,15 @@ impl UdevPlatform {
             lock: Default::default(),
             cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
             cursor_buffer: crate::cursor::make_buffer(),
+            last_titlebar_click: None,
             wm: wm.clone(),
             surface_to_id: HashMap::new(),
             id_to_window: HashMap::new(),
             decorations: HashMap::new(),
             pending: pending.clone(),
             bound_keys: Rc::new(bound_keys.iter().cloned().collect::<HashSet<_>>()),
+            repeat_keys: Rc::new(repeat_keys.iter().cloned().collect::<HashSet<_>>()),
+            repeat: None,
             start_time: Instant::now(),
             udev: Some(udev_state),
             xwayland_shell_state: smithay::wayland::xwayland_shell::XWaylandShellState::new::<CompState>(&display_handle),
@@ -897,6 +900,8 @@ impl Platform for UdevPlatform {
     fn poll_events(&mut self) -> PlatformResult<Vec<CoreEvent>> {
         self.accept_clients()?;
         self.event_loop.dispatch(Some(Duration::from_millis(16)), &mut self.state).map_err(err)?;
+        // Held bindings that repeat - see `CompState::tick_repeat`.
+        self.state.tick_repeat();
         self.display.dispatch_clients(&mut self.state).map_err(err)?;
         self.display.flush_clients().map_err(err)?;
         self.state.render_udev_frame();

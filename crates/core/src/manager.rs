@@ -192,6 +192,9 @@ impl WindowManager {
             if let Some(width) = a.border_width {
                 window.border_width = width;
             }
+            if let Some(pinned) = a.pinned {
+                window.always_on_top = pinned;
+            }
         }
 
         if let Some(monitor) = self.primary_monitor() {
@@ -211,6 +214,8 @@ impl WindowManager {
         self.windows.insert(id, window);
         self.order.push(id);
         self.focused = Some(id);
+        // A new window goes on top, but must not cover a pinned one.
+        self.restack_pinned();
         if maximize {
             self.toggle_maximize(id);
         }
@@ -251,6 +256,39 @@ impl WindowManager {
             let id = self.order.remove(pos);
             self.order.push(id);
         }
+        self.restack_pinned();
+    }
+
+    /// Toggles "always on top" for a window (Hyprland's `pin`), used for
+    /// picture-in-picture and small HUD overlays that must stay visible
+    /// while you work in something else.
+    pub fn toggle_always_on_top(&mut self, id: WindowId) {
+        if let Some(w) = self.windows.get_mut(&id) {
+            w.always_on_top = !w.always_on_top;
+        }
+        self.restack_pinned();
+    }
+
+    pub fn is_always_on_top(&self, id: WindowId) -> bool {
+        self.windows.get(&id).map(|w| w.always_on_top).unwrap_or(false)
+    }
+
+    /// Moves every always-on-top window to the top of the stack, keeping
+    /// their relative order.
+    ///
+    /// `order` is the stacking order (last = topmost), so pinning is not a
+    /// property the renderer checks - it is maintained here, which means
+    /// every existing consumer of `stacking_order` gets it for free and
+    /// cannot forget to honour it.
+    fn restack_pinned(&mut self) {
+        if !self.windows.values().any(|w| w.always_on_top) {
+            return;
+        }
+        let (pinned, rest): (Vec<_>, Vec<_>) = self
+            .order
+            .iter()
+            .partition(|id| self.windows.get(id).is_some_and(|w| w.always_on_top));
+        self.order = rest.into_iter().chain(pinned).collect();
     }
 
     // ---- Focus ----------------------------------------------------------
@@ -1215,5 +1253,56 @@ mod tests {
             order_before.iter().rev().copied().collect::<Vec<_>>(),
             "the two windows should have traded places in the stack"
         );
+    }
+
+    // ---- Always on top ---------------------------------------------------
+
+    #[test]
+    fn pinned_windows_stay_above_newly_raised_ones() {
+        let mut wm = wm_with_monitor();
+        let pinned = wm.alloc_window_id();
+        wm.add_window(Window::new(pinned, "pip"));
+        let other = wm.alloc_window_id();
+        wm.add_window(Window::new(other, "normal"));
+
+        wm.toggle_always_on_top(pinned);
+        assert!(wm.is_always_on_top(pinned));
+        assert_eq!(wm.stacking_order().last().map(|w| w.id), Some(pinned));
+
+        // Raising a normal window must not bury the pinned one.
+        wm.raise_window(other);
+        assert_eq!(
+            wm.stacking_order().last().map(|w| w.id),
+            Some(pinned),
+            "pinned window must remain topmost after another is raised"
+        );
+    }
+
+    #[test]
+    fn a_new_window_does_not_cover_a_pinned_one() {
+        let mut wm = wm_with_monitor();
+        let pinned = wm.alloc_window_id();
+        wm.add_window(Window::new(pinned, "pip"));
+        wm.toggle_always_on_top(pinned);
+
+        let fresh = wm.alloc_window_id();
+        wm.add_window(Window::new(fresh, "just opened"));
+
+        assert_eq!(wm.stacking_order().last().map(|w| w.id), Some(pinned));
+    }
+
+    #[test]
+    fn unpinning_lets_a_window_fall_back_into_the_normal_stack() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let b = wm.alloc_window_id();
+        wm.add_window(Window::new(b, "b"));
+
+        wm.toggle_always_on_top(a);
+        assert_eq!(wm.stacking_order().last().map(|w| w.id), Some(a));
+        wm.toggle_always_on_top(a);
+        wm.raise_window(b);
+        assert_eq!(wm.stacking_order().last().map(|w| w.id), Some(b));
     }
 }
