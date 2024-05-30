@@ -636,7 +636,25 @@ impl WlrLayerShellHandler for CompState {
             let mut map = layer_map_for_output(&output);
             let found = map.layers().find(|l| l.layer_surface() == &surface).cloned();
             if let Some(layer) = found {
+                // Same zone-change recompute `ensure_layer_initial_configure`
+                // already does on every commit that changes a layer's
+                // exclusive zone (state.rs) - but this is the *only* place
+                // that ever runs for a surface that goes away without one
+                // last commit. `unmap_layer` alone doesn't trigger it:
+                // reported live (by the AGS peer session) as a bar unmapping
+                // for fullscreen yet `srd monitors` still reporting the
+                // bar's old reserved_top for as long as fullscreen lasted --
+                // harmless there only because fullscreen targets
+                // `full_geometry`, which ignores the reservation anyway, but
+                // wrong for anything that reads `usable`/`geometry` while a
+                // bar is unmapped without exiting cleanly (a crash, not just
+                // AGS's cooperative fullscreen hide).
+                let zone_before = map.non_exclusive_zone();
                 map.unmap_layer(&layer);
+                let zone_after = map.non_exclusive_zone();
+                if zone_after != zone_before {
+                    self.pending.borrow_mut().push(srdwm_core::Event::MonitorAdded(srdwm_core::Monitor::new(0, "", srdwm_core::Rect::new(0, 0, 0, 0))));
+                }
                 break;
             }
         }
