@@ -8,5 +8,6 @@ description = "Platform-independent window/workspace/layout state for srdwm"
 [dependencies]
 log.workspace = true
 bitflags = "2"
+regex = "1"
 
 [dev-dependencies]

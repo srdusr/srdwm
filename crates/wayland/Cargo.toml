@@ -15,6 +15,24 @@ fontdue = "0.9"
 # implements that protocol directly against these server bindings. Pinned to
 # the same version smithay itself depends on, so both see one set of types.
 wayland-protocols-wlr = { version = "0.3.12", features = ["server"] }
+# `ext-workspace-v1` (`src/workspace.rs`): staging-tree protocol, not
+# wlr-specific - lives in the plain `wayland-protocols` crate instead, and
+# (like the wlr protocol above) has no smithay helper to delegate to.
+wayland-protocols = { version = "0.32.13", features = ["server", "staging"] }
+serde.workspace = true
+serde_json.workspace = true
+# `gamma_control.rs`: `zwlr_gamma_control_v1.set_gamma` hands over a raw
+# gamma table as a memory-mapped fd, not a value on the wire - already a
+# transitive dependency (smithay's own shm handling uses it), just not
+# previously used directly by this crate.
+memmap2 = "0.9"
+# `gtk_shell_protocol.rs`: `gtk_shell1`/`gtk_surface1` is a GTK-private
+# protocol with no published `wayland-protocols-*` crate (unlike the wlr/
+# staging ones above) - generated at compile time from a vendored copy of
+# GTK's own XML instead. Pinned to the version `wayland-server` above
+# actually resolves to, so both see the same wire types.
+wayland-scanner = "0.31.10"
+wayland-backend = { version = "0.3.15", features = ["server_system"] }
 
 [dependencies.smithay]
 version = "0.7"

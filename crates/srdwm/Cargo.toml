@@ -16,6 +16,14 @@ srdwm-config.workspace = true
 log.workspace = true
 env_logger.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# SIGTERM/SIGINT handling only - see `main.rs`'s `install_signal_handlers`
+# doc comment. Real POSIX signals exist on both Linux and macOS, unlike
+# Windows, hence `cfg(unix)` here rather than the narrower
+# `cfg(all(unix, not(target_os = "macos")))` the two lines below use for
+# the Wayland/X11-specific backends.
+libc = "0.2"
+
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 srdwm-x11.workspace = true
 srdwm-wayland.workspace = true

@@ -112,6 +112,19 @@ impl SessionLockHandler for CompState {
         self.lock.surfaces.clear();
         self.lock.presented.clear();
         self.lock.pending_confirm = None;
+        // udev backend only: the lock scene was rendered through the same
+        // per-head damage tracker as the normal desktop (see
+        // `render_udev_frame`), always with a forced full redraw, so its
+        // element-state history now reflects the lock surface rather than
+        // whatever was on screen before locking. Reset each head's buffer
+        // ages so the next normal-scene render is a full redraw too,
+        // instead of asking the tracker to diff the desktop against a
+        // now-irrelevant lock-scene history.
+        if let Some(udev) = self.udev.as_mut() {
+            for head in &mut udev.heads {
+                head.ages = [0, 0];
+            }
+        }
         // Hand focus back to whatever srdwm considers the focused window.
         let surface = self
             .wm

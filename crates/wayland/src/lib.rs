@@ -36,16 +36,25 @@
 //! - xdg-decoration is forced to server-side mode (`Mode::ServerSide`) so
 //!   well-behaved clients don't also draw their own client-side titlebar.
 
+mod context_menu;
 mod cursor;
 mod decoration;
 mod elements;
+mod foreign_toplevel;
+mod gamma_control;
+mod gtk_shell;
+mod gtk_shell_protocol;
 mod input;
 mod lock;
+mod output_management;
+mod output_power;
 mod protocols;
 mod screencopy;
 mod state;
 mod udev;
 mod winit;
+mod workspace;
+mod xkb_config;
 mod xwayland;
 
 use std::cell::RefCell;

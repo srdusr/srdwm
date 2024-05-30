@@ -1,0 +1,17 @@
+[package]
+name = "srd-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Control CLI for srdwm's Wayland backend: query/dispatch over its IPC socket"
+
+[[bin]]
+name = "srd"
+path = "src/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+# Only for `detect()`, so this CLI picks the same WAYLAND_DISPLAY-vs-DISPLAY
+# socket-naming key the compositor itself just used to decide which backend
+# to run - see `socket_path()`'s doc comment. Deliberately still no JSON
+# dependency of its own; that stays server-side.
+srdwm-platform.workspace = true

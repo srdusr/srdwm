@@ -92,7 +92,7 @@ srd.layout.configure("tiling", {
 ### Dynamic Layout (`layout.dynamic.*`)
 ```lua
 srd.layout.configure("dynamic", {
-    snap_threshold = 50,                                -- Default: 50
+    snap_threshold = 20,                                -- Default: 20
     grid_size = 6,                                      -- Default: 6
     cascade_offset = 30,                                -- Default: 30
     smart_placement = true,                             -- Default: true

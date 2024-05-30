@@ -96,6 +96,27 @@ impl Engine {
         self.exec_file(&path)
     }
 
+    /// Re-executes `init.lua` from scratch: clears keybindings, event
+    /// handlers and the repeat-key set first, so a binding or handler
+    /// removed from the edited config doesn't linger from the previous
+    /// load. `values` (`srd.set` keys) are deliberately left alone --
+    /// `platform.backend`/`platform.os` are published once by `main.rs`
+    /// before the *first* `load_init` and nothing in Lua ever re-sets them,
+    /// so clearing `values` here would silently break every
+    /// `if srd.get("platform.backend") == ...` branch in the reloaded
+    /// config.
+    ///
+    /// Does *not* re-grab/re-register the reloaded key set with the
+    /// platform backend - `main.rs` reads `bound_keys()` once, before
+    /// connecting, to build the X11 `XGrabKey` list / Wayland intercept
+    /// set. A binding whose *combo* is unchanged from startup picks up a
+    /// reload immediately; a config that adds a brand new combo needs a
+    /// real restart before the backend will ever hand that keypress to
+    /// srdwm instead of the focused client.
+    pub fn reload(&self) -> Result<()> {
+        do_reload(&self.lua, &self.state)
+    }
+
     pub fn exec_file(&self, path: &Path) -> Result<()> {
         let src = std::fs::read_to_string(path).map_err(|source| ConfigError::Io { path: path.to_path_buf(), source })?;
         self.lua.load(&src).set_name(path.to_string_lossy().as_ref()).exec()?;
@@ -116,6 +137,17 @@ impl Engine {
 
     pub fn get_f64(&self, key: &str, default: f64) -> f64 {
         self.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
+    }
+
+    /// Sets a config value from Rust rather than Lua - used by `main.rs`
+    /// to publish facts the *host* determined (which backend was picked,
+    /// which OS this is) before `load_init` runs `init.lua`, so config
+    /// files can read them back via `srd.get(key)` and branch on them
+    /// (`if srd.get("platform.backend") == "wayland" then ... end`).
+    /// Writing straight into `values` is the same thing `srd.set` does from
+    /// the Lua side, just without going through the interpreter.
+    pub fn set_string(&self, key: &str, value: impl Into<String>) {
+        self.state.borrow_mut().values.insert(key.to_string(), ConfigValue::String(value.into()));
     }
 
     /// Runs the Lua function bound to `combo` (e.g. `"Mod4+Return"`), if any.
@@ -180,6 +212,7 @@ impl Engine {
         srd.set("spawn", self.fn_spawn()?)?;
         srd.set("notify", self.fn_notify()?)?;
         srd.set("quit", self.fn_quit()?)?;
+        srd.set("reload", self.fn_reload()?)?;
         srd.set("validate_config", self.fn_validate_config()?)?;
 
         let debug = lua.create_table()?;
@@ -207,6 +240,16 @@ impl Engine {
         window.set("set_floating", self.fn_window_set_floating()?)?;
         window.set("toggle_floating", self.fn_window_action(WindowAction::ToggleFloating)?)?;
         window.set("is_floating", self.fn_window_is_floating()?)?;
+        // `srd.window.scratchpad()` moves the *focused* window into the
+        // scratchpad pool, hiding it (sway's `move scratchpad`).
+        // `srd.window.scratchpad_show()` toggles pool visibility and takes
+        // no target of its own - deliberately not routed through
+        // `fn_window_action`'s focused-window gate, since showing a hidden
+        // scratchpad window has to work even when nothing is currently
+        // focused (an empty workspace, or focus on a different monitor).
+        // See `WindowManager::scratchpad_show`'s doc comment.
+        window.set("scratchpad", self.fn_window_action(WindowAction::ScratchpadAdd)?)?;
+        window.set("scratchpad_show", self.fn_scratchpad_show()?)?;
         srd.set("window", window)?;
 
         let layout = lua.create_table()?;
@@ -310,11 +353,18 @@ impl Engine {
     }
 
     /// `srd.on("lid_closed", function() ... end)` - registers a handler for
-    /// a non-key event. Currently `"lid_closed"` and `"lid_open"`.
+    /// a non-key event. `"ready"` fires once, after the platform backend has
+    /// connected (real Wayland/X11 display available, `WAYLAND_DISPLAY`/
+    /// `DISPLAY` set for anything `srd.spawn`ed from the handler to inherit)
+    /// - see `main.rs`. Config that starts background processes (a bar,
+    /// wallpaper daemon, clipboard watcher) belongs in a `"ready"` handler,
+    /// not at a config file's top level: top-level code runs during
+    /// `load_init`, which is *before* the platform connects, so anything
+    /// spawned there inherits no display socket to connect to at all.
     fn fn_on(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |lua, (name, f): (String, mlua::Function)| {
-            const KNOWN: [&str; 2] = ["lid_closed", "lid_open"];
+            const KNOWN: [&str; 3] = ["lid_closed", "lid_open", "ready"];
             if !KNOWN.contains(&name.as_str()) {
                 return Err(mlua::Error::RuntimeError(format!(
                     "srd.on: unknown event '{name}' (known: {})",
@@ -333,6 +383,7 @@ impl Engine {
     fn fn_bind_repeat(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |lua, (combo, f): (String, mlua::Function)| {
+            let combo = srdwm_core::canonicalize_key_combo(&combo);
             let key = lua.create_registry_value(f)?;
             let mut s = state.borrow_mut();
             s.repeat_keys.insert(combo.clone());
@@ -344,16 +395,35 @@ impl Engine {
     fn fn_bind(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |lua, (combo, f): (String, mlua::Function)| {
+            // `key_bindings` is keyed by whatever string dispatch builds
+            // from a real keypress (`srdwm_core::key_combo_string`, fixed
+            // Ctrl/Shift/Alt/Mod4 order) - storing the config's own
+            // literal string here (usually written Super-first,
+            // "Mod4+Shift+x") meant multi-modifier bindings could never be
+            // found at dispatch time even though the raw key was correctly
+            // grabbed/intercepted. See `parse_key_combo`'s doc comment.
+            let combo = srdwm_core::canonicalize_key_combo(&combo);
             let key = lua.create_registry_value(f)?;
             state.borrow_mut().key_bindings.insert(combo, key);
             Ok(())
         })?)
     }
 
-    /// `srd.rule({ title = "...", class = "..." }, { floating = true, workspace = 2,
-    /// x = .., y = .., width = .., height = .., decorated = false,
-    /// border_color = {r,g,b}, border_width = 2, maximized = true })`.
-    /// At least one matcher field is required; unmatched rules apply nothing.
+    /// `srd.rule({ title = "...", class = "...", title_regex = "...",
+    /// class_regex = "...", instance = "..." }, { floating = true,
+    /// workspace = 2, x = .., y = .., width = .., height = ..,
+    /// decorated = false, border_color = {r,g,b}, border_width = 2,
+    /// maximized = true })`. At least one matcher field is required;
+    /// unmatched rules apply nothing.
+    ///
+    /// `title`/`class` are plain substring/exact match, cheap and cover
+    /// most rules with no regex syntax to get right. `title_regex`/
+    /// `class_regex` (Rust `regex` crate syntax, case-sensitive unless the
+    /// pattern starts with `(?i)`) and `instance` (X11 `WM_CLASS`'s
+    /// instance half, matched exactly - see `srdwm_core::WindowMatch`'s
+    /// doc comment) exist for the cases that need more precision, e.g.
+    /// disambiguating a specific dialog by title while leaving an app's
+    /// main window alone. Every field given is ANDed together.
     fn fn_rule(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |_, (matcher, actions): (Table, Table)| {
@@ -361,6 +431,15 @@ impl Engine {
             let class: Option<String> = match matcher.get("class")? {
                 Some(c) => Some(c),
                 None => matcher.get("app_id")?,
+            };
+            let instance: Option<String> = matcher.get("instance")?;
+            let title_regex = match matcher.get::<_, Option<String>>("title_regex")? {
+                Some(pat) => Some(srdwm_core::Regex::new(&pat).map_err(|e| mlua::Error::RuntimeError(format!("srd.rule: invalid title_regex '{pat}': {e}")))?),
+                None => None,
+            };
+            let class_regex = match matcher.get::<_, Option<String>>("class_regex")? {
+                Some(pat) => Some(srdwm_core::Regex::new(&pat).map_err(|e| mlua::Error::RuntimeError(format!("srd.rule: invalid class_regex '{pat}': {e}")))?),
+                None => None,
             };
 
             let border_color: Option<(u8, u8, u8)> = match actions.get::<_, Option<Table>>("border_color")? {
@@ -379,7 +458,7 @@ impl Engine {
             };
 
             let rule = WindowRule {
-                matcher: WindowMatch { title_contains, class },
+                matcher: WindowMatch { title_contains, class, title_regex, class_regex, instance },
                 actions: WindowRuleActions {
                     floating: actions.get("floating")?,
                     maximized: actions.get("maximized")?,
@@ -425,6 +504,21 @@ impl Engine {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |_, ()| {
             state.borrow().running.set(false);
+            Ok(())
+        })?)
+    }
+
+    fn fn_reload(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        // `create_function`'s closure is handed the `&Lua` it's being
+        // called from as its first argument - used directly here instead
+        // of capturing a cloned handle, since `mlua::Lua` isn't `Clone` in
+        // this version.
+        Ok(self.lua.create_function(move |lua, ()| {
+            match do_reload(lua, &state) {
+                Ok(()) => log::info!("srd.reload: config reloaded"),
+                Err(e) => log::error!("srd.reload: {e}"),
+            }
             Ok(())
         })?)
     }
@@ -534,6 +628,7 @@ impl Engine {
             t.set("floating", w.floating)?;
             t.set("maximized", w.maximized)?;
             t.set("minimized", w.minimized)?;
+            t.set("scratchpad", w.scratchpad)?;
             Ok(Value::Table(t))
         })?)
     }
@@ -551,8 +646,18 @@ impl Engine {
                     WindowAction::Fullscreen => wm.toggle_fullscreen(id),
                     WindowAction::ToggleFloating => wm.toggle_floating(id),
                     WindowAction::TogglePin => wm.toggle_always_on_top(id),
+                    WindowAction::ScratchpadAdd => wm.scratchpad_add(id),
                 }
             }
+            Ok(())
+        })?)
+    }
+
+    fn fn_scratchpad_show(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, ()| {
+            let wm = state.borrow().wm.clone();
+            wm.borrow_mut().scratchpad_show();
             Ok(())
         })?)
     }
@@ -745,6 +850,24 @@ impl Engine {
     }
 }
 
+/// Shared between [`Engine::reload`] and `srd.reload()`'s Lua closure --
+/// the closure can't capture `&Engine` itself (it isn't `Clone`/`Rc`, and
+/// `mlua::Lua::create_function` needs a `'static` closure), so both go
+/// through cloned `Lua`/state handles instead of one calling the other.
+fn do_reload(lua: &Lua, state: &Rc<RefCell<SharedState>>) -> Result<()> {
+    let config_dir = {
+        let mut s = state.borrow_mut();
+        s.key_bindings.clear();
+        s.event_handlers.clear();
+        s.repeat_keys.clear();
+        s.config_dir.clone()
+    };
+    let path = config_dir.join("init.lua");
+    let src = std::fs::read_to_string(&path).map_err(|source| ConfigError::Io { path: path.clone(), source })?;
+    lua.load(&src).set_name(path.to_string_lossy().as_ref()).exec()?;
+    Ok(())
+}
+
 /// Shared by `srd.window.focus` and `srd.window.move` so both accept
 /// exactly the same direction names and report the same error.
 fn parse_direction(name: &str, caller: &str) -> mlua::Result<Direction> {
@@ -765,6 +888,7 @@ enum WindowAction {
     Fullscreen,
     ToggleFloating,
     TogglePin,
+    ScratchpadAdd,
 }
 
 /// Recursively flattens a Lua table into dotted config keys, e.g.
@@ -914,7 +1038,7 @@ fn default_config() -> HashMap<String, ConfigValue> {
     set("layout.tiling.behavior.auto_balance", Bool(true));
     set("layout.tiling.behavior.preserve_ratio", Bool(true));
 
-    set("layout.dynamic.snap_threshold", Number(50.0));
+    set("layout.dynamic.snap_threshold", Number(20.0));
     set("layout.dynamic.grid_size", Number(6.0));
     set("layout.dynamic.cascade_offset", Number(30.0));
     set("layout.dynamic.smart_placement", Bool(true));
@@ -1166,6 +1290,74 @@ mod tests {
             id
         };
         assert!(wm.borrow().is_floating(id));
+    }
+
+    #[test]
+    fn srd_window_scratchpad_hides_the_focused_window_and_show_brings_it_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let id = {
+            let mut wm = wm.borrow_mut();
+            let id = wm.alloc_window_id();
+            wm.add_window(Window::new(id, "term"));
+            id
+        };
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        engine.lua.load(r#"srd.window.scratchpad()"#).exec().unwrap();
+        assert!(wm.borrow().window(id).unwrap().minimized);
+        assert!(wm.borrow().window(id).unwrap().scratchpad);
+        engine.lua.load(r#"srd.window.scratchpad_show()"#).exec().unwrap();
+        assert!(!wm.borrow().window(id).unwrap().minimized);
+        assert_eq!(wm.borrow().focused_id(), Some(id));
+    }
+
+    #[test]
+    fn srd_rule_title_regex_matches_a_specific_dialog_not_the_main_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        engine.lua.load(r#"srd.rule({ title_regex = "^Save File$" }, { floating = true })"#).exec().unwrap();
+        let dialog = {
+            let mut wm = wm.borrow_mut();
+            let id = wm.alloc_window_id();
+            wm.add_window(srdwm_core::Window::new(id, "Save File"));
+            id
+        };
+        let main = {
+            let mut wm = wm.borrow_mut();
+            let id = wm.alloc_window_id();
+            wm.add_window(srdwm_core::Window::new(id, "Save File - GIMP"));
+            id
+        };
+        assert!(wm.borrow().is_floating(dialog));
+        assert!(!wm.borrow().is_floating(main));
+    }
+
+    #[test]
+    fn srd_rule_instance_matches_independently_of_class() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        engine.lua.load(r#"srd.rule({ instance = "firefox" }, { pinned = true })"#).exec().unwrap();
+        let id = {
+            let mut wm = wm.borrow_mut();
+            let id = wm.alloc_window_id();
+            let mut w = srdwm_core::Window::new(id, "Mozilla Firefox");
+            w.app_id = "Navigator".into();
+            w.instance = "firefox".into();
+            wm.add_window(w);
+            id
+        };
+        assert!(wm.borrow().window(id).unwrap().always_on_top);
+    }
+
+    #[test]
+    fn srd_rule_rejects_an_invalid_regex_with_a_lua_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        let result = engine.lua.load(r#"srd.rule({ title_regex = "(unclosed" }, { floating = true })"#).exec();
+        assert!(result.is_err());
     }
 
     #[test]

@@ -11,3 +11,7 @@ srdwm-platform.workspace = true
 log.workspace = true
 thiserror.workspace = true
 x11rb = { version = "0.13", features = ["randr", "resource_manager"] }
+# Only for `poll(2)` on the X11 connection's own fd in `poll_events` - see
+# that method's doc comment on why a bounded wait replaced the previous
+# indefinite `wait_for_event()` block.
+libc = "0.2"

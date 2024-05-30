@@ -21,13 +21,33 @@ pub const MIN_WINDOW_HEIGHT: u32 = 150;
 pub struct PlacementConfig {
     pub grid_margin: u32,
     pub cascade_offset: i32,
+    /// How close (in logical pixels) a dragged window's edge has to end up
+    /// to a monitor edge on release before `snap_zone` triggers a
+    /// half/quarter/maximize. A single edge match with no corner match
+    /// (e.g. top-only) maximizes the *whole* window - see `snap_zone`'s
+    /// `(false, false, true, false) => area` arm - so this value directly
+    /// controls how easy it is to accidentally full-maximize a window while
+    /// just repositioning it near the top of the screen, not only how
+    /// generous the corner/half-snap zones are.
     pub snap_threshold: i32,
     pub max_grid: u32,
 }
 
 impl Default for PlacementConfig {
     fn default() -> Self {
-        Self { grid_margin: 10, cascade_offset: 30, snap_threshold: 50, max_grid: 4 }
+        // `snap_threshold` was 50, then 20 - both live-tested and reported
+        // as still snapping from an ordinary "move it near an edge" drag,
+        // not just a deliberate release-at-the-edge one. `update_drag`'s
+        // clamp used to also cap a dragged window's reach to the
+        // exclusive-zone-shrunk usable area rather than the monitor's true
+        // edge (see `Monitor::full_geometry`), which made this worse than
+        // the number alone suggests: the window could get within 20px of
+        // `snap_zone`'s comparison edge well before the cursor was
+        // anywhere near the real screen edge. 8 keeps snapping reachable
+        // (a window's own edge, not the cursor, is what's measured) while
+        // requiring it to actually be at the edge, not just closer to it
+        // than to the middle of the screen.
+        Self { grid_margin: 10, cascade_offset: 30, snap_threshold: 8, max_grid: 4 }
     }
 }
 

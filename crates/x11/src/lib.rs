@@ -29,6 +29,7 @@ use srdwm_core::{Monitor, Rect, WindowManager};
 use srdwm_platform::{Platform, PlatformError, PlatformKind, Result as PlatformResult};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::os::unix::io::AsRawFd;
 use std::rc::Rc;
 use x11rb::connection::Connection;
 use x11rb::protocol::randr::ConnectionExt as _;
@@ -67,6 +68,35 @@ fn err(e: impl std::fmt::Display) -> PlatformError {
     PlatformError::Other(e.to_string())
 }
 
+/// Finds which of `ModMask::M1`..`M5` a keycode is bound to, given a
+/// `GetModifierMappingReply`'s flattened `keycodes` list (8 fixed slots --
+/// Shift, Lock, Control, Mod1..Mod5 - each `keycodes_per_modifier` long,
+/// zero-padded). Only scans the Mod1..Mod5 slots (indices 3..8): Shift/
+/// Lock/Control are never where Num Lock lands in practice, and this is
+/// only ever called looking for it. Returns an empty mask if the keycode
+/// isn't bound to any modifier at all (a keyboard with no Num Lock key, or
+/// a keycode of `0` from a lookup that found nothing).
+fn modmask_for_keycode_in_mod_slots(keycode: u8, keycodes_per_modifier: usize, keycodes: &[u8]) -> ModMask {
+    if keycode == 0 || keycodes_per_modifier == 0 {
+        return ModMask::from(0u16);
+    }
+    (3..8usize)
+        .find(|&slot| {
+            let start = slot * keycodes_per_modifier;
+            keycodes.get(start..start + keycodes_per_modifier).is_some_and(|ks| ks.contains(&keycode))
+        })
+        .map(|slot| ModMask::from(1u16 << slot))
+        .unwrap_or(ModMask::from(0u16))
+}
+
+/// Packs an RGB triple into the `0x00RRGGBB` pixel value X11's
+/// `border_pixel`/GC `foreground` etc. expect on a TrueColor visual --
+/// matching the format the hardcoded titlebar colour constants in
+/// `redraw_decoration` already use.
+fn rgb_to_pixel((r, g, b): (u8, u8, u8)) -> u32 {
+    ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+}
+
 pub struct X11Platform {
     conn: RustConnection,
     root: XWindow,
@@ -80,6 +110,17 @@ pub struct X11Platform {
     max_keycode: u8,
     keysyms_per_keycode: u8,
     keyboard_mapping: Vec<u32>,
+    /// Whichever of `ModMask::M1`..`M5` the server has Num Lock bound to --
+    /// see `grab_keybindings`'s doc comment for why this needs grabbing
+    /// alongside every binding, not just the modifiers a config actually
+    /// asked for.
+    numlock_mask: ModMask,
+    /// `srd`'s control socket - see `srdwm_platform::IpcServer`'s module
+    /// doc comment. `None` if binding it failed (a stale socket from a
+    /// still-running instance, an unwritable runtime dir): the compositor
+    /// itself still starts either way, matching how the Wayland backends
+    /// already treat this as non-fatal.
+    ipc: Option<srdwm_platform::IpcServer>,
 }
 
 impl X11Platform {
@@ -121,7 +162,46 @@ impl X11Platform {
         let keysyms_per_keycode = mapping.keysyms_per_keycode;
         let keyboard_mapping = mapping.keysyms;
 
+        // Num Lock's modifier bit is not fixed by the X11 spec (unlike Caps
+        // Lock, which is always `ModMask::LOCK`) - it's whichever of
+        // Mod1..Mod5 the server happens to have bound it to, keyboard- and
+        // OS-dependent. Found the same way every other X11 WM does: look up
+        // Num Lock's keycode (keysym `0xff7f`, XK_Num_Lock) in the keyboard
+        // mapping just queried above, then find which modifier slot's
+        // keycode list contains it. See `grab_keybindings`'s doc comment
+        // for why this is needed at all.
+        let numlock_mask = {
+            const XK_NUM_LOCK: u32 = 0xff7f;
+            let numlock_keycode = (min_keycode..=max_keycode).find(|&kc| {
+                let idx = (kc - min_keycode) as usize * keysyms_per_keycode as usize;
+                keyboard_mapping.get(idx).copied() == Some(XK_NUM_LOCK)
+            });
+            match numlock_keycode {
+                Some(kc) => {
+                    let modmap = conn.get_modifier_mapping().map_err(err)?.reply().map_err(err)?;
+                    let per = modmap.keycodes_per_modifier() as usize;
+                    modmask_for_keycode_in_mod_slots(kc, per, &modmap.keycodes)
+                }
+                None => ModMask::from(0u16),
+            }
+        };
+
         conn.flush().map_err(err)?;
+
+        // Same socket name convention as the Wayland backends
+        // (`srdwm-<display>.sock`) - there, `<display>` is the Wayland
+        // socket's own name; here, the only display identity X11 has is
+        // `$DISPLAY` itself (e.g. `:0`), which is exactly what every X
+        // client - including a nested Xephyr/Xnest session used for
+        // testing - already keys off to tell one server from another.
+        let display_name = std::env::var("DISPLAY").unwrap_or_else(|_| "x11".to_string());
+        let ipc = match srdwm_platform::IpcServer::bind(&display_name) {
+            Ok(ipc) => Some(ipc),
+            Err(e) => {
+                log::warn!("failed to bind srd IPC socket for display '{display_name}': {e}");
+                None
+            }
+        };
 
         Ok(Self {
             conn,
@@ -136,6 +216,8 @@ impl X11Platform {
             max_keycode,
             keysyms_per_keycode,
             keyboard_mapping,
+            numlock_mask,
+            ipc,
         })
     }
 
@@ -194,20 +276,26 @@ impl X11Platform {
     /// Grabs the given `"Mod4+Shift+Return"`-style key combos on the root
     /// window so their KeyPress events reach us even when a client has
     /// input focus. Call after loading config (once bindings are known).
+    ///
+    /// A `KeyPress`'s modifier state includes whichever lock modifiers
+    /// happen to be toggled on (Num Lock, Caps Lock) in addition to
+    /// whatever the binding actually asked for - `XGrabKey` matches state
+    /// *exactly*, not as a subset, so a grab registered only for e.g.
+    /// `Mod4` never fires the moment Num Lock is on, since the real event's
+    /// state is `Mod4 | numlock_mask` instead. Every real X11 WM (i3,
+    /// bspwm, dwm) grabs each binding once per combination of the lock
+    /// modifiers for exactly this reason; this one previously didn't,
+    /// which meant every keybinding silently stopped firing the instant
+    /// Num Lock was toggled on - not a missing feature, a basic X11
+    /// correctness requirement that was simply never implemented.
     pub fn grab_keybindings(&mut self, combos: &[String]) -> PlatformResult<()> {
+        // The four combinations of "Num Lock toggled or not" x "Caps Lock
+        // toggled or not" - Scroll Lock is deliberately not covered here,
+        // matching the convention every WM referenced above also follows
+        // (rarely present on modern keyboards, rarely toggled when it is).
+        let lock_variants = [ModMask::from(0u16), self.numlock_mask, ModMask::LOCK, self.numlock_mask | ModMask::LOCK];
         for combo in combos {
-            let parts: Vec<&str> = combo.split('+').collect();
-            let Some((key_name, mod_parts)) = parts.split_last() else { continue };
-            let mut modifiers = Modifiers::empty();
-            for m in mod_parts {
-                modifiers |= match *m {
-                    "Ctrl" => Modifiers::CTRL,
-                    "Shift" => Modifiers::SHIFT,
-                    "Alt" => Modifiers::ALT,
-                    "Mod4" | "Super" => Modifiers::SUPER,
-                    _ => Modifiers::empty(),
-                };
-            }
+            let Some((modifiers, key_name)) = srdwm_core::parse_key_combo(combo) else { continue };
             let Some(keysym) = keysyms::name_to_keysym(key_name) else {
                 log::warn!("cannot grab '{combo}': unknown key name '{key_name}'");
                 continue;
@@ -217,9 +305,11 @@ impl X11Platform {
                 continue;
             };
             let mask = Self::modmask_for(modifiers);
-            self.conn
-                .grab_key(true, self.root, mask, keycode, GrabMode::ASYNC, GrabMode::ASYNC)
-                .map_err(err)?;
+            for lock in lock_variants {
+                self.conn
+                    .grab_key(true, self.root, mask | lock, keycode, GrabMode::ASYNC, GrabMode::ASYNC)
+                    .map_err(err)?;
+            }
         }
         self.conn.flush().map_err(err)?;
         Ok(())
@@ -228,12 +318,15 @@ impl X11Platform {
     fn manage_new_window(&mut self, client: XWindow) -> PlatformResult<Option<Event>> {
         let geom = self.conn.get_geometry(client).map_err(err)?.reply().map_err(err)?;
         let title = self.window_title(client).unwrap_or_default();
+        let (instance, class) = self.window_class(client);
         let supports_delete = self.supports_wm_delete(client);
 
         let id = {
             let mut wm = self.wm.borrow_mut();
             let id = wm.alloc_window_id();
             let mut w = CoreWindow::new(id, title);
+            w.app_id = class;
+            w.instance = instance;
             w.geometry = Rect::new(geom.x as i32, geom.y as i32, geom.width as u32, geom.height as u32 + TITLEBAR_HEIGHT);
             wm.add_window(w);
             id
@@ -251,6 +344,18 @@ impl X11Platform {
                     | EventMask::EXPOSURE,
             )
             .background_pixel(self.conn.setup().roots[0].white_pixel);
+        // `Window.border_color`/`border_width` were tracked in
+        // `srdwm_core::Window` and settable via `srd.window.set_border_*`,
+        // but nothing ever actually drew a border with them on this
+        // backend - `set_border_color`/`set_border_width` below only
+        // updated the stored struct field. X11 windows have a native
+        // server-drawn border (`border_pixel`/the `create_window`
+        // `border-width` parameter, both unconditionally 0 here before),
+        // so this uses that rather than hand-rendering one - the X server
+        // draws it, no extra composite work needed.
+        let border_color = self.wm.borrow().window(id).map(|w| w.border_color).unwrap_or((0x31, 0x32, 0x44));
+        let border_width = self.wm.borrow().window(id).map(|w| w.border_width).unwrap_or(0);
+        let aux = aux.border_pixel(rgb_to_pixel(border_color));
         self.conn
             .create_window(
                 COPY_DEPTH_FROM_PARENT,
@@ -260,7 +365,7 @@ impl X11Platform {
                 placed.y as i16,
                 placed.width as u16,
                 placed.height as u16,
-                0,
+                border_width as u16,
                 WindowClass::INPUT_OUTPUT,
                 0,
                 &aux,
@@ -324,6 +429,28 @@ impl X11Platform {
             .reply()
             .ok()?;
         String::from_utf8(reply.value).ok()
+    }
+
+    /// Reads `WM_CLASS` and splits it into `(instance, class)` - the
+    /// property is two NUL-terminated strings back to back, instance first
+    /// (ICCCM 4.1.2.5). Was never read at all before this: `manage_new_window`
+    /// only ever set `Window::title`, leaving `app_id` permanently empty on
+    /// every X11 window - meaning every `srd.rule({ class = ... }, ...)`
+    /// silently failed to match anything on this backend, the same root
+    /// cause `with_toplevel_app_id`'s doc comment describes already having
+    /// been found and fixed for native Wayland windows earlier. Returns
+    /// `("", "")` if the property is missing or malformed rather than an
+    /// `Option`, since both halves are used unconditionally either way.
+    fn window_class(&self, client: XWindow) -> (String, String) {
+        let Ok(cookie) = self.conn.get_property(false, client, x11rb::protocol::xproto::AtomEnum::WM_CLASS, x11rb::protocol::xproto::AtomEnum::STRING, 0, 1024)
+        else {
+            return (String::new(), String::new());
+        };
+        let Ok(reply) = cookie.reply() else { return (String::new(), String::new()) };
+        let mut parts = reply.value.split(|&b| b == 0).map(|s| String::from_utf8_lossy(s).into_owned());
+        let instance = parts.next().unwrap_or_default();
+        let class = parts.next().unwrap_or_default();
+        (instance, class)
     }
 
     fn supports_wm_delete(&self, client: XWindow) -> bool {
@@ -531,16 +658,38 @@ impl Platform for X11Platform {
         PlatformKind::X11
     }
 
+    /// Was `wait_for_event()` (blocks indefinitely for the first event,
+    /// only draining any backlog after that), which left `srd`'s IPC socket
+    /// - polled at the end of this method - unresponsive for as long as
+    /// nothing happened on the X11 connection at all: no keypress, no mouse
+    /// motion, nothing. A script sitting on `srd clients` while the user's
+    /// hands were off the keyboard for a few seconds would just hang for
+    /// exactly that long. Replaced with a bounded `poll(2)` on the
+    /// connection's own fd (`~16ms`, matching the Wayland backends' own
+    /// frame-ish cadence) so this method always returns roughly that often
+    /// regardless of X11 activity, draining whatever's actually arrived
+    /// (zero or more events) each time rather than requiring at least one.
     fn poll_events(&mut self) -> PlatformResult<Vec<Event>> {
         self.conn.flush().map_err(err)?;
-        let mut out = Vec::new();
-        let first = self.conn.wait_for_event().map_err(err)?;
-        if let Some(e) = self.handle_event(first)? {
-            out.push(e);
+        let fd = self.conn.stream().as_raw_fd();
+        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        // Safety: `pfd` is a valid, live `pollfd` for the duration of this
+        // call, and `poll` writes only into `revents`, which is never read
+        // here - the return value alone (ready vs. timed out) is what
+        // matters, so a spurious wake or a timeout are both fine outcomes.
+        unsafe {
+            libc::poll(&mut pfd, 1, 16);
         }
+
+        let mut out = Vec::new();
         while let Some(ev) = self.conn.poll_for_event().map_err(err)? {
             if let Some(e) = self.handle_event(ev)? {
                 out.push(e);
+            }
+        }
+        if let Some(ipc) = self.ipc.as_mut() {
+            if ipc.poll(&self.wm) {
+                out.push(Event::WorkspaceChanged);
             }
         }
         Ok(out)
@@ -577,6 +726,14 @@ impl Platform for X11Platform {
     fn apply_geometry(&mut self, window: WindowId, geometry: Rect) -> PlatformResult<()> {
         let Some(frame) = self.frames.get(&window) else { return Ok(()) };
         let (frame_id, client_id) = (frame.frame, frame.client);
+        // The titlebar band is only actually reserved when the window is
+        // decorated - e.g. a `srd.rule(...)` that sets `decorated = false`
+        // - otherwise the client keeps getting offset down by, and
+        // shrunk by, a titlebar that `redraw_decoration` (below) is
+        // correctly not drawing at all, leaving a blank strip and the
+        // frame visibly not matching what's inside it.
+        let decorated = self.wm.borrow().window(window).map(|w| w.decorated).unwrap_or(true);
+        let band = if decorated { TITLEBAR_HEIGHT } else { 0 };
         self.conn
             .configure_window(
                 frame_id,
@@ -586,7 +743,7 @@ impl Platform for X11Platform {
         self.conn
             .configure_window(
                 client_id,
-                &ConfigureWindowAux::new().x(0).y(TITLEBAR_HEIGHT as i32).width(geometry.width).height(geometry.height.saturating_sub(TITLEBAR_HEIGHT)),
+                &ConfigureWindowAux::new().x(0).y(band as i32).width(geometry.width).height(geometry.height.saturating_sub(band)),
             )
             .map_err(err)?;
         self.conn.flush().map_err(err)?;
@@ -640,12 +797,20 @@ impl Platform for X11Platform {
         if let Some(w) = self.wm.borrow_mut().window_mut(window) {
             w.border_color = rgb;
         }
+        if let Some(frame) = self.frame_for(window) {
+            self.conn.change_window_attributes(frame, &ChangeWindowAttributesAux::new().border_pixel(rgb_to_pixel(rgb))).map_err(err)?;
+            self.conn.flush().map_err(err)?;
+        }
         Ok(())
     }
 
     fn set_border_width(&mut self, window: WindowId, width: u32) -> PlatformResult<()> {
         if let Some(w) = self.wm.borrow_mut().window_mut(window) {
             w.border_width = width;
+        }
+        if let Some(frame) = self.frame_for(window) {
+            self.conn.configure_window(frame, &ConfigureWindowAux::new().border_width(width)).map_err(err)?;
+            self.conn.flush().map_err(err)?;
         }
         Ok(())
     }
@@ -655,7 +820,9 @@ impl Platform for X11Platform {
             return Ok(());
         }
         let Some(frame) = self.frame_for(window) else { return Ok(()) };
-        let (bg, fg) = if focused { (0x2e3440u32, 0x88c0d0u32) } else { (0x2e3440u32, 0x4c566a) };
+        let theme = self.wm.borrow().theme;
+        let bg = rgb_to_pixel(theme.titlebar_bg);
+        let fg = rgb_to_pixel(if focused { theme.titlebar_fg_focused } else { theme.titlebar_fg_unfocused });
 
         self.conn.change_gc(self.gc, &x11rb::protocol::xproto::ChangeGCAux::new().foreground(bg)).map_err(err)?;
         self.conn
@@ -702,5 +869,57 @@ impl Platform for X11Platform {
     fn ungrab_keyboard(&mut self) -> PlatformResult<()> {
         self.conn.ungrab_key(0, self.root, ModMask::ANY).map_err(err)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a flattened `GetModifierMappingReply.keycodes`-shaped slice:
+    /// 8 slots (Shift, Lock, Control, Mod1..Mod5) of `per` keycodes each,
+    /// zero-padded, with `assignments` placing one real keycode into
+    /// specific slots.
+    fn modmap(per: usize, assignments: &[(usize, u8)]) -> Vec<u8> {
+        let mut v = vec![0u8; per * 8];
+        for &(slot, kc) in assignments {
+            v[slot * per] = kc;
+        }
+        v
+    }
+
+    #[test]
+    fn finds_numlock_on_mod2_the_common_case() {
+        let keycodes = modmap(2, &[(4, 77)]); // slot 4 == Mod2
+        assert_eq!(modmask_for_keycode_in_mod_slots(77, 2, &keycodes), ModMask::M2);
+    }
+
+    #[test]
+    fn finds_numlock_on_mod5_an_uncommon_but_real_layout() {
+        let keycodes = modmap(2, &[(7, 90)]); // slot 7 == Mod5
+        assert_eq!(modmask_for_keycode_in_mod_slots(90, 2, &keycodes), ModMask::M5);
+    }
+
+    #[test]
+    fn ignores_the_keycode_if_it_only_appears_in_shift_lock_or_control() {
+        // A keycode bound to Lock (e.g. Caps Lock's own keycode) must never
+        // be mistaken for Num Lock - only slots 3..8 (Mod1..Mod5) count.
+        let keycodes = modmap(2, &[(1, 66)]); // slot 1 == Lock
+        assert_eq!(modmask_for_keycode_in_mod_slots(66, 2, &keycodes), ModMask::from(0u16));
+    }
+
+    #[test]
+    fn keycode_zero_never_matches_even_if_a_slot_is_unpadded_zero() {
+        // Unused modifier slots are zero-padded, so keycode 0 must never
+        // resolve to a mask - otherwise a keyboard with no Num Lock key at
+        // all would spuriously "find" it in the first empty slot.
+        let keycodes = modmap(2, &[]);
+        assert_eq!(modmask_for_keycode_in_mod_slots(0, 2, &keycodes), ModMask::from(0u16));
+    }
+
+    #[test]
+    fn no_match_anywhere_returns_empty_mask() {
+        let keycodes = modmap(2, &[(3, 50)]);
+        assert_eq!(modmask_for_keycode_in_mod_slots(99, 2, &keycodes), ModMask::from(0u16));
     }
 }

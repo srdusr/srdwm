@@ -17,6 +17,7 @@ use smithay::input::pointer::{ButtonEvent, MotionEvent};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
+use std::time::{Duration, Instant};
 
 use srdwm_core::{Event as CoreEvent, Modifiers, TitlebarHit, WindowId};
 
@@ -41,12 +42,28 @@ pub(crate) fn last_pointer_pos(state: &CompState) -> Point<f64, Logical> {
 /// `pos` is in the global space; layer geometry is relative to its own
 /// output, so the pointer is translated into output-local coordinates
 /// before hit-testing and the result translated back out.
-pub(crate) fn layer_surface_under(state: &CompState, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<i32, Logical>)> {
+/// Only checked for `Overlay`/`Top` before a window hit-test, and again for
+/// `Bottom`/`Background` after one comes up empty - see the two call
+/// sites in `handle_pointer_button`/`handle_pointer_position` for why it's
+/// split rather than one four-layer loop here. A `Bottom`/`Background`
+/// surface (a desktop-icons layer, a wallpaper daemon that wants clicks) is
+/// meant to sit *behind* normal windows, so a window covering that point
+/// should still get the click; `Overlay`/`Top` (an on-screen keyboard, a
+/// bar, a dock) are meant to sit in front of everything, windows included.
+///
+/// Was `Overlay`/`Top` only, full stop - a `Bottom`-layer surface was
+/// silently unclickable no matter what, since nothing else in
+/// `handle_pointer_button` ever checked layers at all. Not the cause of
+/// the live "clicking the dock does nothing" report (confirmed: that dock
+/// uses `Layer::Top`, which was already checked), but a real, separate gap
+/// found while chasing it - worth closing regardless of whether anything
+/// currently deployed sits at `Bottom`/`Background` yet.
+pub(crate) fn layer_surface_under_layers(state: &CompState, pos: Point<f64, Logical>, layers: [Layer; 2]) -> Option<(WlSurface, Point<i32, Logical>)> {
     let entry = state.output_at(pos)?;
     let origin = entry.location;
     let local = pos - origin.to_f64();
     let map = layer_map_for_output(&entry.output);
-    for layer_kind in [Layer::Overlay, Layer::Top] {
+    for layer_kind in layers {
         let Some(layer) = map.layer_under(layer_kind, local) else { continue };
         let Some(geo) = map.layer_geometry(layer) else { continue };
         if let Some((surface, surface_loc)) = layer.surface_under(local - geo.loc.to_f64(), WindowSurfaceType::ALL) {
@@ -56,7 +73,49 @@ pub(crate) fn layer_surface_under(state: &CompState, pos: Point<f64, Logical>) -
     None
 }
 
+pub(crate) fn layer_surface_under(state: &CompState, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<i32, Logical>)> {
+    layer_surface_under_layers(state, pos, [Layer::Overlay, Layer::Top])
+}
+
+/// The `Bottom`/`Background` half of the same lookup - see
+/// `layer_surface_under_layers`'s doc comment for the ordering rationale.
+pub(crate) fn background_layer_surface_under(state: &CompState, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<i32, Logical>)> {
+    layer_surface_under_layers(state, pos, [Layer::Bottom, Layer::Background])
+}
+
+/// `ext_idle_notify_v1`'s whole job is answering "has the user touched an
+/// input device recently" - `IdleNotifierState` does the actual timer
+/// bookkeeping (see its own doc comment), this just has to be called from
+/// every real input path, deliberately including while the session is
+/// locked: idle activity is about the seat, not about which surface (if
+/// any) an event ends up delivered to, and a lock daemon watching this
+/// protocol to decide when to re-dim/re-lock still needs to see real
+/// movement even though nothing else happens with it at a locked screen.
+///
+/// Throttled to once per 250ms: `notify_activity` removes and re-inserts a
+/// calloop timer for every live notification, every call, with no
+/// throttling of its own - fine at keypress/click frequency, but pointer
+/// motion can fire far more often than that during a drag, and idle
+/// timeouts are measured in minutes, not milliseconds, so nothing about
+/// idle detection needs - or can even perceive - finer resolution than
+/// this. The same class of hot-path-on-every-motion-event cost that made
+/// this session's earlier diagnostic logging a real, measured regression
+/// (see `docs/IMPLEMENTATION_STATUS.md`), just cheap enough here (in-memory
+/// bookkeeping, not synchronous I/O) that throttling rather than removing
+/// it outright is the right amount of caution.
+fn notify_idle_activity(state: &mut CompState) {
+    const THROTTLE: Duration = Duration::from_millis(250);
+    let now = Instant::now();
+    if state.last_idle_notify.is_some_and(|last| now.duration_since(last) < THROTTLE) {
+        return;
+    }
+    state.last_idle_notify = Some(now);
+    let seat = state.seat.clone();
+    state.idle_notifier_state.notify_activity(&seat);
+}
+
 pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Logical>, time: u32) {
+    notify_idle_activity(state);
     // Locked: pointer motion goes to the lock surface only. No hit-testing
     // against windows/decorations, so no hover, no drag, no resize.
     if state.lock.locked {
@@ -64,13 +123,16 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
         if let Some(pointer) = state.seat.get_pointer() {
             let focus = surface.map(|s| (s, Point::from((0, 0)).to_f64()));
             pointer.motion(state, focus, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
+            pointer.frame(state);
         }
         return;
     }
 
     let layer_hit = layer_surface_under(state, pos);
+    let over_layer_surface = layer_hit.is_some();
     let hit = state.wm.borrow().hit_test(pos.x as i32, pos.y as i32);
     let under = state.space.element_under(pos).map(|(w, loc)| (w.clone(), loc));
+    let over_content = under.is_some();
 
     let Some(pointer) = state.seat.get_pointer() else { return };
     if let Some((surface, loc)) = layer_hit {
@@ -80,13 +142,53 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
         // Over our own decoration - no client focus.
         pointer.motion(state, None, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
     } else if let Some((window, loc)) = under {
-        if let Some(surface) = window.toplevel().map(|t| t.wl_surface().clone()) {
-            let surface_loc = pos - loc.to_f64();
-            pointer.motion(state, Some((surface, loc.to_f64())), &MotionEvent { location: surface_loc, serial: SERIAL_COUNTER.next_serial(), time });
+        // `window.toplevel()` is only ever `Some` for a native xdg-shell
+        // surface - it's `None` for every XWayland window, and even for a
+        // plain xdg-shell one it's always the *root* surface regardless of
+        // which subsurface the pointer is actually over (video/GL overlays,
+        // some GTK/Electron popups). Either way that meant pointer focus
+        // landed on the wrong surface - or no surface at all, for X11
+        // clients - and the click coordinates were relative to the window
+        // root rather than whatever was actually under the cursor.
+        // `Window::surface_under` is smithay's own hit-test for this: it
+        // walks the real surface tree (subsurfaces and popups included) and
+        // unifies the xdg-shell/X11 cases the way `dwindow_wl_surface` does
+        // elsewhere in this module.
+        let win_relative = pos - loc.to_f64();
+        if let Some((surface, offset)) = window.surface_under(win_relative, WindowSurfaceType::ALL) {
+            let surface_loc = win_relative - offset.to_f64();
+            let surface_origin = (loc + offset).to_f64();
+            pointer.motion(state, Some((surface, surface_origin)), &MotionEvent { location: surface_loc, serial: SERIAL_COUNTER.next_serial(), time });
         }
+    } else if let Some((surface, loc)) = background_layer_surface_under(state, pos) {
+        // Bare desktop, no window there either - last chance for a
+        // `Bottom`/`Background` layer surface (see
+        // `layer_surface_under_layers`'s doc comment) before giving up.
+        let surface_loc = pos - loc.to_f64();
+        pointer.motion(state, Some((surface, loc.to_f64())), &MotionEvent { location: surface_loc, serial: SERIAL_COUNTER.next_serial(), time });
     } else {
         pointer.motion(state, None, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
     }
+    // `PointerHandle::motion`/`button`/`axis` only queue the event with the
+    // active grab - nothing sends `wl_pointer.frame` on its own (confirmed
+    // reading smithay's `DefaultGrab`: its `motion`/`button` impls call
+    // straight through to the handle and never call `frame`). `frame` is
+    // what tells a client "the events since the last frame are one atomic
+    // update, process them now" - required by the protocol since
+    // `wl_pointer` version 5, and this compositor advertises v9. Without
+    // it, any client that correctly waits for `frame` before acting on
+    // motion/button state (most modern toolkits, confirmed live: neither
+    // Firefox nor wezterm registered a click or a drag-selection, in both
+    // cases with the cursor sitting squarely on the target) never actually
+    // processes what it was sent, even though every event up to this point
+    // was individually correct. This is likely the real root cause behind
+    // this whole session's "clicking/scrolling doesn't work" reports --
+    // every fix so far (subsurface routing, decoration geometry, app_id)
+    // was real and necessary, but none of them could have mattered if the
+    // client was never told to look at what it received.
+    pointer.frame(state);
+
+    update_cursor_shape(state, hit, over_layer_surface, over_content);
 
     let mut wm = state.wm.borrow_mut();
     let dragging_or_resizing = wm.is_dragging() || wm.is_resizing();
@@ -101,6 +203,65 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
         if let Some(id) = focused {
             state.sync_geometry(id);
         }
+    }
+}
+
+/// Sets the pointer to a resize-direction shape while hovering (or
+/// actively dragging) one of our own decoration's resize edges, and back
+/// to the default arrow when leaving our decoration for anything else.
+///
+/// Only ever touches `cursor_status` for our own decoration - never while
+/// `layer_hit`/client content has focus, since a client surface drives its
+/// own cursor via `wl_pointer.set_cursor` once it starts receiving
+/// `pointer.motion()`/`enter` (already sent above, by the time this runs),
+/// and stomping on that here would fight the client for control of its own
+/// cursor rather than just leaving it alone.
+///
+/// Without this, `cursor_status` was only ever set by client requests --
+/// nothing on the compositor's own side ever asked for a resize cursor at
+/// all, so hovering or dragging one of our own decoration's edges never
+/// looked any different from hovering plain content, regardless of what
+/// shapes `cursor.rs` can actually render.
+///
+/// `over_content` distinguishes "over a client surface that will drive its
+/// own cursor" from "over the bare desktop, where nothing ever will" --
+/// without it, dragging off one of our decoration's resize edges straight
+/// onto empty desktop left `cursor_status` stuck on that resize icon
+/// forever: there is no client there to ever call `set_cursor` and reset
+/// it, and this function's own early-return (for the "let the client drive
+/// it" case) doesn't distinguish an *absent* client from a slow one.
+fn update_cursor_shape(state: &mut CompState, hit: Option<(WindowId, TitlebarHit)>, over_layer_surface: bool, over_content: bool) {
+    use smithay::input::pointer::{CursorIcon, CursorImageStatus};
+
+    if over_layer_surface {
+        return;
+    }
+    let edge = match hit {
+        Some((_, TitlebarHit::Resize(edge))) => Some(edge),
+        _ => state.wm.borrow().resize_edge(),
+    };
+    let icon = match edge {
+        Some(edge) => resize_cursor_icon(edge),
+        // Hovering our own decoration but not an edge (the drag area, a
+        // button) and not actively resizing: back to the plain arrow.
+        None if hit.is_some() => CursorIcon::Default,
+        // Over a client's own content: leave `cursor_status` alone, per the
+        // doc comment above - the client drives it.
+        None if over_content => return,
+        // Bare desktop: nothing else will ever reset this, so we have to.
+        None => CursorIcon::Default,
+    };
+    state.cursor_status = CursorImageStatus::Named(icon);
+}
+
+fn resize_cursor_icon(edge: srdwm_core::ResizeEdge) -> smithay::input::pointer::CursorIcon {
+    use smithay::input::pointer::CursorIcon;
+    use srdwm_core::ResizeEdge;
+    match edge {
+        ResizeEdge::Left | ResizeEdge::Right => CursorIcon::EwResize,
+        ResizeEdge::Top | ResizeEdge::Bottom => CursorIcon::NsResize,
+        ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorIcon::NwseResize,
+        ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorIcon::NeswResize,
     }
 }
 
@@ -137,9 +298,33 @@ pub(crate) fn focus_window(state: &mut CompState, id: WindowId) {
     state.set_keyboard_focus(surface);
 }
 
+/// Re-syncs real Wayland/X11 keyboard focus to whatever `WindowManager`
+/// already considers focused, without changing what that is.
+///
+/// For callers where core's own focus already moved on its own --
+/// specifically `WindowManager::remove_window`'s fallback to
+/// `self.order.last()` when the just-closed window was the focused one --
+/// and only the Wayland/X11 side needs to catch up to it. Without this, the
+/// window core now considers focused (and renders as such) never actually
+/// receives a keystroke until it's clicked, since nothing told
+/// `set_keyboard_focus` focus had moved.
+///
+/// `focus_window` above is for the opposite direction: driving core's
+/// focus deliberately (a click, a keybinding) and syncing outward from
+/// that. This is "core already decided, catch the rest of the compositor
+/// up" - `wm.focus_window` must not be called again here, since the id
+/// core picked (or `None`, if nothing is left) is exactly what should win.
+pub(crate) fn sync_keyboard_focus(state: &mut CompState) {
+    let focused = state.wm.borrow().focused_id();
+    let surface = focused.and_then(|id| state.id_to_window.get(&id)).and_then(dwindow_wl_surface);
+    state.set_keyboard_focus(surface);
+}
+
 pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logical>, button: u32, pressed: bool, time: u32) {
+    notify_idle_activity(state);
     const BTN_LEFT: u32 = 0x110;
     const BTN_RIGHT: u32 = 0x111;
+    const BTN_MIDDLE: u32 = 0x112;
     let serial = SERIAL_COUNTER.next_serial();
 
     // Locked: forward the click to the lock surface (it may have a button or
@@ -148,8 +333,29 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
         if let Some(pointer) = state.seat.get_pointer() {
             let button_state = if pressed { BackendButtonState::Pressed } else { BackendButtonState::Released };
             pointer.button(state, &ButtonEvent { serial, time, button, state: button_state });
+            pointer.frame(state);
         }
         return;
+    }
+
+    // The context menu, if open, captures every press: a click inside
+    // resolves whichever row it landed on, a click anywhere else just
+    // dismisses it. Neither case falls through to the normal handling
+    // below - opening the menu and then clicking a window underneath it
+    // should not *also* focus/raise/drag that window on the same click,
+    // the same "one click, one action" rule every native window menu
+    // follows.
+    if pressed {
+        if let Some(menu) = state.context_menu.take() {
+            if let Some(row) = menu.row_at(pos.x as i32, pos.y as i32) {
+                let (_, action) = menu.items[row];
+                state.close_context_menu();
+                state.run_context_menu_action(menu.window, action);
+            } else {
+                state.close_context_menu();
+            }
+            return;
+        }
     }
 
     // Modifier+drag: with the modifier held, dragging *anywhere* in a window
@@ -213,6 +419,7 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
                     if state.is_double_click(id, time) {
                         state.wm.borrow_mut().toggle_maximize(id);
                         state.sync_geometry(id);
+                        crate::foreign_toplevel::send_state(state, id);
                     } else {
                         state.wm.borrow_mut().start_drag(id, pos.x as i32, pos.y as i32)
                     }
@@ -225,8 +432,12 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
                 TitlebarHit::Maximize => {
                     state.wm.borrow_mut().toggle_maximize(id);
                     state.sync_geometry(id);
+                    crate::foreign_toplevel::send_state(state, id);
                 }
-                TitlebarHit::Minimize => state.wm.borrow_mut().minimize_window(id),
+                TitlebarHit::Minimize => {
+                    state.wm.borrow_mut().minimize_window(id);
+                    crate::foreign_toplevel::send_state(state, id);
+                }
                 TitlebarHit::Resize(edge) => state.wm.borrow_mut().start_resize(id, edge, pos.x as i32, pos.y as i32),
             }
         } else if layer_hit.is_none() {
@@ -240,18 +451,73 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
                 }
             }
         }
+    } else if pressed && (button == BTN_RIGHT || button == BTN_MIDDLE) {
+        // Right-click a titlebar: open the window menu (minimize/maximize/
+        // pin/close) - previously nothing at all, since the only
+        // right-button behaviour anywhere was the SUPER+right-drag resize
+        // gesture above, which needs the modifier held. Middle-click:
+        // lower the window instead, the convention several X11 WMs
+        // (twm, fvwm, IceWM) have always had. Both only fire on the
+        // titlebar's plain drag area - a resize edge or one of the three
+        // buttons keeps its own single meaning regardless of which button
+        // was pressed, so a right-click on the close button, say, doesn't
+        // do something else entirely.
+        let hit = state.wm.borrow().hit_test(pos.x as i32, pos.y as i32);
+        if let Some((id, TitlebarHit::Drag)) = hit {
+            if button == BTN_RIGHT {
+                state.open_context_menu(id, (pos.x as i32, pos.y as i32));
+            } else {
+                state.wm.borrow_mut().lower_window(id);
+            }
+        }
     } else if !pressed {
         let mut wm = state.wm.borrow_mut();
-        if wm.is_dragging() {
+        let was_dragging = wm.is_dragging();
+        let was_resizing = wm.is_resizing();
+        // `start_drag`/`start_resize` both focus the window they grab, and
+        // nothing else can change focus while a grab is active (the pointer
+        // is captured by the drag, not routed elsewhere) - so `focused_id`
+        // is reliably the window `end_drag`/`end_resize` are about to
+        // finish, without `WindowManager` needing to hand the id back
+        // itself.
+        let id = wm.focused_id();
+        if was_dragging {
             wm.end_drag();
-        } else if wm.is_resizing() {
+        } else if was_resizing {
             wm.end_resize();
+        }
+        drop(wm);
+        // `end_drag` can snap the geometry one more time (edge/top-of-
+        // screen snapping, `SmartPlacement::snap_zone`) *after* the last
+        // `update_drag` already moved the window - without this, that
+        // final snap only ever reached `Window.geometry`. The border and
+        // titlebar redraw fresh from live geometry every frame, so they'd
+        // jump to the snapped rect immediately, while the client's actual
+        // mapped surface (driven only by `sync_geometry`'s
+        // `space.map_element`/`xdg_toplevel.configure`) stayed wherever the
+        // drag physically stopped - decoration visibly detached from its
+        // own window's content. Click routing desynced the same way:
+        // `hit_test`/`window_at` read the now-snapped `Window.geometry`
+        // while `space.element_under` still read the stale pre-snap
+        // position, so clicks in the visually-snapped zone resolved
+        // against the wrong rect. The X11 backend already gets this right
+        // (`crates/x11/src/lib.rs`'s `ButtonRelease` handler); this was the
+        // one call site in the module doc'd as "shared by both backends"
+        // that never got the same fix.
+        if was_dragging || was_resizing {
+            if let Some(id) = id {
+                state.sync_geometry(id);
+            }
         }
     }
 
     if let Some(pointer) = state.seat.get_pointer() {
         let button_state = if pressed { BackendButtonState::Pressed } else { BackendButtonState::Released };
         pointer.button(state, &ButtonEvent { serial, time, button, state: button_state });
+        // See the matching comment in `handle_pointer_position`: `button`
+        // alone never tells the client the event is ready to act on, only
+        // `frame` does.
+        pointer.frame(state);
     }
 }
 
@@ -260,6 +526,7 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
 /// trait, so the precise-keybinding-matching logic (see the module docs)
 /// only needs to exist once.
 pub(crate) fn handle_keyboard_key_event<B: smithay::backend::input::InputBackend, E: KeyboardKeyEvent<B>>(state: &mut CompState, event: &E) {
+    notify_idle_activity(state);
     let keycode = event.key_code();
     let key_state = event.state();
     let time = event.time_msec();
@@ -340,6 +607,7 @@ where
 {
     use smithay::backend::input::Axis;
 
+    notify_idle_activity(state);
     if state.lock.locked {
         return false;
     }
@@ -358,5 +626,20 @@ where
     // Scrolling down (positive) advances, matching `workspace, e+1`.
     let next = if v > 0.0 { (current + 1) % ids.len() } else { (current + ids.len() - 1) % ids.len() };
     wm.switch_workspace(ids[next]);
+    drop(wm);
+    // Without this, the switch above is invisible: nothing shows or hides
+    // a single window for the new workspace until `main.rs`'s `sync()`
+    // runs, which only happens when a polled event sets `dirty` - see
+    // `srdwm_core::Event::WorkspaceChanged`'s doc comment. Found live-
+    // testing the unrelated `ext_workspace_v1` protocol's own `activate`
+    // request, which has the identical problem; this gesture had the exact
+    // same bug already, just never one anyone traced back this far.
+    state.pending.borrow_mut().push(srdwm_core::Event::WorkspaceChanged);
+    // Same reasoning as `foreign_toplevel::send_state`'s call sites: without
+    // this, a dock's workspace pill only ever tracked switches driven
+    // through `ext_workspace_handle_v1.activate` itself, going stale the
+    // moment this gesture (or any other non-protocol trigger) changed the
+    // active workspace instead.
+    crate::workspace::broadcast_active_workspace(state);
     true
 }

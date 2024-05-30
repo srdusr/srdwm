@@ -14,6 +14,14 @@ use std::sync::OnceLock;
 const FONT_PIXELS: f32 = 13.0;
 const TEXT_LEFT_PADDING: f32 = 8.0;
 
+/// Titlebar buttons are laid out right-aligned in `height`-wide squares --
+/// matching `ResizeEdge::hit_test` in `crates/core/src/window.rs`, whose
+/// `BUTTON` constant is also `TITLEBAR_HEIGHT`. That function only computes
+/// *where* a click on close/maximize/minimize lands; nothing painted the
+/// buttons themselves, so the whole band was one undifferentiated bar with
+/// no visible way to tell where those three clickable regions were.
+const BUTTON_MARGIN: f32 = 0.32;
+
 /// Common monospace font file locations on Linux desktops. Not a full
 /// fontconfig query (no new system dependency for something this small) --
 /// if none of these resolve, titlebars fall back to solid-color-only, same
@@ -85,12 +93,132 @@ fn rgb_to_bgra(rgb: (u8, u8, u8), alpha: u8) -> [u8; 4] {
     [rgb.2, rgb.1, rgb.0, alpha]
 }
 
+/// The titlebar right-click window menu (minimize/maximize/always-on-top/
+/// close) - the one interaction virtually every desktop WM has always
+/// offered on a titlebar that srdwm never did (right-click there was only
+/// ever the SUPER+right-drag resize gesture, and only with the modifier
+/// held). `items` is `(label, highlighted)`; `row_height` matches
+/// `TITLEBAR_HEIGHT` by convention at the call site, not enforced here.
+///
+/// Deliberately plain: solid rows, left-padded text, a 1px border for
+/// definition against whatever's behind it - no submenus, no icons, no
+/// separators. A context menu widget with real visual polish is a project
+/// of its own; this is the minimum that makes the actions discoverable and
+/// clickable at all, which is the actual gap.
+pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], bg: (u8, u8, u8), fg: (u8, u8, u8), highlight_bg: (u8, u8, u8), border: (u8, u8, u8)) -> Vec<u8> {
+    let (width, row_height) = (width.max(1) as usize, row_height.max(1) as usize);
+    let height = (row_height * items.len().max(1)).max(1);
+    let mut buf = vec![0u8; width * height * 4];
+
+    let font = find_system_font();
+    for (i, (label, highlighted)) in items.iter().enumerate() {
+        let row_bg = if *highlighted { highlight_bg } else { bg };
+        let row_top = i * row_height;
+        for y in row_top..(row_top + row_height).min(height) {
+            for x in 0..width {
+                let idx = (y * width + x) * 4;
+                buf[idx..idx + 4].copy_from_slice(&rgb_to_bgra(row_bg, 255));
+            }
+        }
+        if let Some(font) = &font {
+            let baseline = row_top as f32 + row_height as f32 * 0.72;
+            let mut pen_x = TEXT_LEFT_PADDING;
+            for ch in label.chars() {
+                if ch.is_control() {
+                    continue;
+                }
+                let (metrics, coverage) = font.rasterize(ch, FONT_PIXELS);
+                if metrics.width > 0 && metrics.height > 0 {
+                    let glyph_x = pen_x + metrics.xmin as f32;
+                    let glyph_y = baseline - metrics.height as f32 - metrics.ymin as f32;
+                    blit_glyph(&mut buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, row_bg, fg);
+                }
+                pen_x += metrics.advance_width;
+                if pen_x as usize >= width {
+                    break;
+                }
+            }
+        }
+    }
+
+    // A 1px border around the whole menu, drawn last so it isn't overdrawn
+    // by any row's background fill.
+    let border_px = rgb_to_bgra(border, 255);
+    for x in 0..width {
+        buf[x * 4..x * 4 + 4].copy_from_slice(&border_px);
+        let last_row = (height - 1) * width + x;
+        buf[last_row * 4..last_row * 4 + 4].copy_from_slice(&border_px);
+    }
+    for y in 0..height {
+        let left = y * width;
+        buf[left * 4..left * 4 + 4].copy_from_slice(&border_px);
+        let right = y * width + width - 1;
+        buf[right * 4..right * 4 + 4].copy_from_slice(&border_px);
+    }
+    buf
+}
+
+/// The four border strips (top, bottom, left, right) around a window's
+/// full rect, `width` thick, drawn *outside* `geometry` - additive to the
+/// window's on-screen footprint, the same as a native X11 border, rather
+/// than overlapping and clipping into the titlebar or content. This is
+/// purely a rendering concern: `geometry` alone stays authoritative for
+/// hit-testing and placement, nothing reads the strips back.
+///
+/// Without any border at all, a compositor-drawn titlebar and independently
+/// client-rendered content have nothing visually tying them together as
+/// one window - reported live as the titlebar "not seeming part of the
+/// window". `Window.border_color`/`border_width` already existed (and are
+/// drawn by the X11 backend via a native X11 border) but were dead fields
+/// on the Wayland side - `set_border_color`/`set_border_width` were both
+/// no-op stubs.
+pub fn border_strips(geometry: srdwm_core::Rect, width: u32) -> [srdwm_core::Rect; 4] {
+    let w = width as i32;
+    [
+        srdwm_core::Rect::new(geometry.x - w, geometry.y - w, geometry.width + 2 * width, width),
+        srdwm_core::Rect::new(geometry.x - w, geometry.y + geometry.height as i32, geometry.width + 2 * width, width),
+        srdwm_core::Rect::new(geometry.x - w, geometry.y, width, geometry.height),
+        srdwm_core::Rect::new(geometry.x + geometry.width as i32, geometry.y, width, geometry.height),
+    ]
+}
+
+/// Renders the top border strip (`border_strips`'s first rect) as a BGRA8
+/// bitmap instead of a plain solid fill, with its own outer top corners cut
+/// the same way `render_titlebar`'s `round_corners` cuts the titlebar's --
+/// see that parameter's doc comment for why a titlebar rounds but a square
+/// border frame around it used to defeat the point. Rounding *this* strip
+/// too, at a radius `width` pixels larger than the titlebar's (so the cut
+/// continues outward from the titlebar's own, rather than starting over),
+/// is what makes a bordered window's corner read as one continuous curve
+/// instead of a rounded titlebar sitting inside a square frame. The other
+/// three strips (bottom/left/right) don't participate in any visible
+/// corner and stay plain solid fills - see their render call sites.
+pub fn render_border_top(width: u32, thickness: u32, color: (u8, u8, u8)) -> Vec<u8> {
+    let (width, thickness) = (width.max(1) as usize, thickness.max(1) as usize);
+    let bg = rgb_to_bgra(color, 255);
+    let mut buf = vec![0u8; width * thickness * 4];
+    for px in buf.chunks_exact_mut(4) {
+        px.copy_from_slice(&bg);
+    }
+    round_top_corners(&mut buf, width, thickness, CORNER_RADIUS + thickness as u32);
+    buf
+}
+
 /// Renders a `width x height` BGRA8 buffer: filled with `background`, with
 /// `title` drawn left-aligned in `foreground` (best-effort glyph layout --
 /// no text shaping/kerning, adequate for the ASCII-heavy titles window
 /// managers actually display). Returns `None` (caller keeps the previous
 /// solid-color-only look) only if no usable font was found on this system.
-pub fn render_titlebar(width: u32, height: u32, title: &str, background: (u8, u8, u8), foreground: (u8, u8, u8)) -> Vec<u8> {
+///
+/// `round_corners` should be `false` only for a window whose border strips
+/// are rendered as plain square-cornered fills with no matching rounded
+/// treatment of their own. `render_border_top` gives the border's top strip
+/// the same rounded-corner cut (see its own doc comment for how the two
+/// stay visually continuous), so a normal bordered window should pass
+/// `true` here same as a borderless one now - reported live as most
+/// windows (anything with the default border) looking inconsistently
+/// square next to the few borderless ones that were rounded.
+pub fn render_titlebar(width: u32, height: u32, title: &str, background: (u8, u8, u8), foreground: (u8, u8, u8), round_corners: bool) -> Vec<u8> {
     let (width, height) = (width.max(1) as usize, height.max(1) as usize);
     let bg = rgb_to_bgra(background, 255);
     let mut buf = vec![0u8; width * height * 4];
@@ -98,26 +226,154 @@ pub fn render_titlebar(width: u32, height: u32, title: &str, background: (u8, u8
         px.copy_from_slice(&bg);
     }
 
-    let Some(font) = find_system_font() else { return buf };
+    // Reserve the right-hand button squares before laying out text, so a
+    // long title elides under them the same way it would under real window
+    // furniture rather than drawing on top of it.
+    let button_count = if width >= height * 3 { 3 } else { 0 };
+    let text_limit = width.saturating_sub(height * button_count);
 
-    let baseline = (height as f32 * 0.72).round();
-    let mut pen_x = TEXT_LEFT_PADDING;
-    for ch in title.chars() {
-        if ch.is_control() {
-            continue;
-        }
-        let (metrics, coverage) = font.rasterize(ch, FONT_PIXELS);
-        if metrics.width > 0 && metrics.height > 0 {
-            let glyph_x = pen_x + metrics.xmin as f32;
-            let glyph_y = baseline - metrics.height as f32 - metrics.ymin as f32;
-            blit_glyph(&mut buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, background, foreground);
-        }
-        pen_x += metrics.advance_width;
-        if pen_x as usize >= width {
-            break;
+    if let Some(font) = find_system_font() {
+        let baseline = (height as f32 * 0.72).round();
+        let mut pen_x = TEXT_LEFT_PADDING;
+        for ch in title.chars() {
+            if ch.is_control() {
+                continue;
+            }
+            let (metrics, coverage) = font.rasterize(ch, FONT_PIXELS);
+            if metrics.width > 0 && metrics.height > 0 {
+                let glyph_x = pen_x + metrics.xmin as f32;
+                let glyph_y = baseline - metrics.height as f32 - metrics.ymin as f32;
+                blit_glyph(&mut buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, background, foreground);
+            }
+            pen_x += metrics.advance_width;
+            if pen_x as usize >= text_limit {
+                break;
+            }
         }
     }
+
+    if button_count == 3 {
+        draw_minimize_icon(&mut buf, width, height, height * 2, foreground);
+        draw_maximize_icon(&mut buf, width, height, height, foreground);
+        draw_close_icon(&mut buf, width, height, 0, foreground);
+    }
+    if round_corners {
+        round_top_corners(&mut buf, width, height, CORNER_RADIUS);
+    }
     buf
+}
+
+/// How many pixels of each top corner are clipped away by
+/// `round_top_corners`. Small and fixed rather than configurable: this is a
+/// cosmetic nicety, not a feature surface worth a `srd.theme` knob, and a
+/// value this small barely reads as "rounded" if it gets any larger at the
+/// titlebar heights this compositor actually uses.
+const CORNER_RADIUS: u32 = 6;
+
+/// Clips the top-left and top-right corners of a titlebar buffer to a
+/// quarter-circle by making the pixels outside it fully transparent, so
+/// whatever's behind (the desktop, on every top-level window) shows through
+/// instead of a hard square corner.
+///
+/// Only the *top* corners: the titlebar's bottom edge meets the window's
+/// content, which this compositor has no way to clip (content is rendered
+/// entirely by the client) - rounding that seam too would need a
+/// compositor-wide clip mask over arbitrary client buffers, a much larger
+/// change than this cosmetic pass. Real desktops mostly round this the same
+/// way: only the outermost corners of a window, not every internal seam.
+///
+/// Hard cutoff rather than an anti-aliased edge, matching this codebase's
+/// existing pixel-art aesthetic elsewhere (the cursor bitmaps) rather than
+/// mixing rendering styles for one corner treatment.
+fn round_top_corners(buf: &mut [u8], width: usize, height: usize, radius: u32) {
+    let r = (radius as usize).min(width / 2).min(height);
+    if r == 0 {
+        return;
+    }
+    // Corner centres: `r` in from each edge, `r` down from the top - the
+    // standard quarter-circle-in-a-square construction.
+    let is_outside_corner = |x: usize, y: usize, cx: usize, cy: usize| -> bool {
+        let (dx, dy) = (x as i64 - cx as i64, y as i64 - cy as i64);
+        (dx * dx + dy * dy) as u64 > (r * r) as u64
+    };
+    for y in 0..r {
+        for x in 0..r {
+            if is_outside_corner(x, y, r, r) {
+                buf[(y * width + x) * 4 + 3] = 0;
+            }
+        }
+        for x in (width - r)..width {
+            if is_outside_corner(x, y, width - r - 1, r) {
+                buf[(y * width + x) * 4 + 3] = 0;
+            }
+        }
+    }
+}
+
+/// Sets one pixel to `color` if it falls inside the buffer - every icon
+/// drawn below goes through this so none of them need their own bounds
+/// checks.
+fn set_px(buf: &mut [u8], width: usize, height: usize, x: i32, y: i32, color: (u8, u8, u8)) {
+    if x < 0 || y < 0 || x as usize >= width || y as usize >= height {
+        return;
+    }
+    let idx = (y as usize * width + x as usize) * 4;
+    buf[idx..idx + 4].copy_from_slice(&rgb_to_bgra(color, 255));
+}
+
+/// The square `right_offset` pixels in from the right edge of the titlebar,
+/// inset by `BUTTON_MARGIN` on each side - the box a button's glyph is
+/// drawn inside.
+fn button_box(width: usize, height: usize, right_offset: usize) -> (i32, i32, i32, i32) {
+    let square = height as f32;
+    let inset = (square * BUTTON_MARGIN).round() as i32;
+    let right = width as i32 - right_offset as i32;
+    let left = right - height as i32;
+    (left + inset, inset, right - inset, height as i32 - inset)
+}
+
+/// Bresenham line, since none of these icons need anything fancier.
+fn draw_line(buf: &mut [u8], width: usize, height: usize, x0: i32, y0: i32, x1: i32, y1: i32, color: (u8, u8, u8)) {
+    let (mut x0, mut y0) = (x0, y0);
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    loop {
+        set_px(buf, width, height, x0, y0, color);
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+fn draw_close_icon(buf: &mut [u8], width: usize, height: usize, right_offset: usize, color: (u8, u8, u8)) {
+    let (x0, y0, x1, y1) = button_box(width, height, right_offset);
+    draw_line(buf, width, height, x0, y0, x1, y1, color);
+    draw_line(buf, width, height, x0, y1, x1, y0, color);
+}
+
+fn draw_maximize_icon(buf: &mut [u8], width: usize, height: usize, right_offset: usize, color: (u8, u8, u8)) {
+    let (x0, y0, x1, y1) = button_box(width, height, right_offset);
+    draw_line(buf, width, height, x0, y0, x1, y0, color);
+    draw_line(buf, width, height, x0, y1, x1, y1, color);
+    draw_line(buf, width, height, x0, y0, x0, y1, color);
+    draw_line(buf, width, height, x1, y0, x1, y1, color);
+}
+
+fn draw_minimize_icon(buf: &mut [u8], width: usize, height: usize, right_offset: usize, color: (u8, u8, u8)) {
+    let (x0, _, x1, y1) = button_box(width, height, right_offset);
+    draw_line(buf, width, height, x0, y1, x1, y1, color);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -161,10 +417,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn border_strips_surround_geometry_without_overlapping_it() {
+        let geom = srdwm_core::Rect::new(100, 100, 200, 150);
+        let [top, bottom, left, right] = border_strips(geom, 3);
+        // Every strip's own rect must stay entirely outside `geom` - these
+        // are meant to frame the window, not clip into its own titlebar or
+        // content.
+        assert_eq!(top, srdwm_core::Rect::new(97, 97, 206, 3));
+        assert_eq!(bottom, srdwm_core::Rect::new(97, 250, 206, 3));
+        assert_eq!(left, srdwm_core::Rect::new(97, 100, 3, 150));
+        assert_eq!(right, srdwm_core::Rect::new(300, 100, 3, 150));
+    }
+
+    #[test]
     fn fills_background_when_no_text() {
-        let buf = render_titlebar(40, 20, "", (0x2e, 0x34, 0x40), (0xec, 0xef, 0xf4));
+        let buf = render_titlebar(40, 20, "", (0x2e, 0x34, 0x40), (0xec, 0xef, 0xf4), true);
         assert_eq!(buf.len(), 40 * 20 * 4);
-        assert_eq!(&buf[0..4], &rgb_to_bgra((0x2e, 0x34, 0x40), 255));
+        // Center, not (0,0): the top-left pixel is inside the rounded
+        // corner `round_top_corners` clips away, so it's transparent by
+        // design - see `corners_are_clipped_but_the_middle_is_not` below.
+        let mid = ((20 / 2) * 40 + 40 / 2) * 4;
+        assert_eq!(&buf[mid..mid + 4], &rgb_to_bgra((0x2e, 0x34, 0x40), 255));
+    }
+
+    #[test]
+    fn button_icons_are_drawn_in_the_squares_hit_test_assigns_them() {
+        // Regression test for a bug where every drawn icon was one full
+        // button-width left of where a click on it actually landed: the
+        // visible "X" triggered Maximize, the visible square triggered
+        // Minimize, and the true Close hit-zone (the rightmost
+        // TITLEBAR_HEIGHT-wide band) was blank. `button_box`'s
+        // `right_offset` must put each icon in the same square
+        // `ResizeEdge::hit_test` assigns to it - checked here by picking
+        // the centre pixel of each drawn icon's square and confirming
+        // `hit_test` reports the matching button for that same point.
+        let (width, height) = (300u32, srdwm_core::TITLEBAR_HEIGHT);
+        let bg = (0x2e, 0x34, 0x40);
+        let fg = (0xec, 0xef, 0xf4);
+        let buf = render_titlebar(width, height, "", bg, fg, true);
+        let frame = srdwm_core::Rect::new(0, 0, width, height);
+        let (width, height) = (width as usize, height as usize);
+
+        let bg_bytes = rgb_to_bgra(bg, 255);
+        for (right_offset, expected) in [(0, srdwm_core::TitlebarHit::Close), (height, srdwm_core::TitlebarHit::Maximize), (height * 2, srdwm_core::TitlebarHit::Minimize)] {
+            let (x0, y0, x1, y1) = button_box(width, height, right_offset);
+            let drawn = (y0..=y1).any(|y| (x0..=x1).any(|x| buf[(y as usize * width + x as usize) * 4..(y as usize * width + x as usize) * 4 + 4] != bg_bytes));
+            assert!(drawn, "expected some drawn icon pixel inside the right_offset={right_offset} square");
+            let cx = (x0 + x1) / 2;
+            let cy = (y0 + y1) / 2;
+            assert_eq!(srdwm_core::ResizeEdge::hit_test(frame, cx, cy, true, 0), Some(expected), "icon drawn at right_offset={right_offset} does not land in the square hit_test assigns to {expected:?}");
+        }
     }
 
     #[test]
@@ -175,17 +477,110 @@ mod tests {
         }
         let bg = (0x2e, 0x34, 0x40);
         let fg = (0xec, 0xef, 0xf4);
-        let buf = render_titlebar(200, 30, "Terminal", bg, fg);
+        let buf = render_titlebar(200, 30, "Terminal", bg, fg, true);
         let bg_bytes = rgb_to_bgra(bg, 255);
         let changed = buf.chunks_exact(4).any(|px| px != bg_bytes);
         assert!(changed, "expected at least one pixel to differ from the background once text is drawn");
     }
 
     #[test]
-    fn empty_title_leaves_buffer_all_background() {
+    fn empty_title_leaves_buffer_all_background_outside_the_rounded_corners() {
         let bg = (0x10, 0x20, 0x30);
-        let buf = render_titlebar(50, 24, "", bg, (0xff, 0xff, 0xff));
+        let (width, height) = (50, 24);
+        let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true);
         let bg_bytes = rgb_to_bgra(bg, 255);
-        assert!(buf.chunks_exact(4).all(|px| px == bg_bytes));
+        for (i, px) in buf.chunks_exact(4).enumerate() {
+            let (x, y) = (i % width as usize, i / width as usize);
+            let in_top_left = x < CORNER_RADIUS as usize && y < CORNER_RADIUS as usize;
+            let in_top_right = x >= width as usize - CORNER_RADIUS as usize && y < CORNER_RADIUS as usize;
+            if !in_top_left && !in_top_right {
+                assert_eq!(px, bg_bytes, "unexpected non-background pixel at ({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn corners_are_clipped_but_the_middle_is_not() {
+        let bg = (0x10, 0x20, 0x30);
+        let (width, height) = (50, 24);
+        let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true);
+        let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
+        // The very corner pixel is well outside the quarter-circle at any
+        // sane radius - fully clipped.
+        assert_eq!(alpha_at(0, 0), 0, "top-left corner pixel should be transparent");
+        assert_eq!(alpha_at(width as usize - 1, 0), 0, "top-right corner pixel should be transparent");
+        // Bottom corners are deliberately left square (see the function's
+        // doc comment: the titlebar's bottom edge meets client content,
+        // which can't be clipped the same way).
+        assert_eq!(alpha_at(0, height as usize - 1), 255, "bottom-left must stay square");
+        assert_eq!(alpha_at(width as usize - 1, height as usize - 1), 255, "bottom-right must stay square");
+        // Centre is nowhere near either corner circle - untouched.
+        assert_eq!(alpha_at(width as usize / 2, height as usize / 2), 255);
+    }
+
+    #[test]
+    fn round_corners_false_leaves_the_top_corners_square() {
+        let bg = (0x10, 0x20, 0x30);
+        let (width, height) = (50, 24);
+        let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), false);
+        let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
+        assert_eq!(alpha_at(0, 0), 255, "top-left corner should stay square when round_corners is false");
+        assert_eq!(alpha_at(width as usize - 1, 0), 255, "top-right corner should stay square when round_corners is false");
+    }
+
+    #[test]
+    fn border_top_rounds_its_own_top_corners_to_match_the_titlebar() {
+        // Regression coverage for the "not all window borders are rounded"
+        // report: a bordered window's titlebar used to render with
+        // `round_corners = false` specifically to avoid clashing with this
+        // strip's square corners. Now that this strip rounds too, that
+        // workaround is gone (`render_titlebar` is always called with
+        // `true`) - this just confirms the strip actually does what that
+        // change now depends on.
+        let color = (0x40, 0x50, 0x60);
+        let (width, thickness) = (60, 2);
+        let buf = render_border_top(width, thickness, color);
+        let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
+        assert_eq!(alpha_at(0, 0), 0, "top-left corner pixel should be clipped");
+        assert_eq!(alpha_at(width as usize - 1, 0), 0, "top-right corner pixel should be clipped");
+        // A 2px-thick strip is thinner than any sane radius, so the clamp
+        // in `round_top_corners` bounds the cut to the strip's own height --
+        // the bottom row, at least at the strip's horizontal centre, must
+        // stay opaque or there would be no border left to see at all.
+        assert_eq!(alpha_at(width as usize / 2, thickness as usize - 1), 255, "centre of the strip must stay opaque");
+    }
+
+    #[test]
+    fn context_menu_is_one_row_tall_per_item() {
+        let items = [("Minimize", false), ("Maximize", false), ("Always on Top", false), ("Close", false)];
+        let buf = render_context_menu(160, 28, &items, (0x2e, 0x34, 0x40), (0xff, 0xff, 0xff), (0x4c, 0x56, 0x6a), (0x10, 0x10, 0x10));
+        assert_eq!(buf.len(), 160 * (28 * 4) * 4);
+    }
+
+    #[test]
+    fn context_menu_highlighted_row_has_a_different_background_than_the_rest() {
+        let items = [("Minimize", false), ("Close", true)];
+        let bg = (0x2e, 0x34, 0x40);
+        let highlight = (0x4c, 0x56, 0x6a);
+        let buf = render_context_menu(160, 28, &items, bg, (0xff, 0xff, 0xff), highlight, (0x10, 0x10, 0x10));
+        let width = 160usize;
+        // Sample a background pixel from each row, away from the text/border.
+        let px_at = |x: usize, y: usize| -> [u8; 3] {
+            let i = (y * width + x) * 4;
+            [buf[i + 2], buf[i + 1], buf[i]] // BGRA -> RGB
+        };
+        assert_eq!(px_at(100, 5), [bg.0, bg.1, bg.2], "row 0 (not highlighted) should use bg");
+        assert_eq!(px_at(100, 33), [highlight.0, highlight.1, highlight.2], "row 1 (highlighted) should use highlight_bg");
+    }
+
+    #[test]
+    fn context_menu_border_is_opaque_at_every_edge() {
+        let items = [("Close", false)];
+        let buf = render_context_menu(100, 28, &items, (0, 0, 0), (0xff, 0xff, 0xff), (0, 0, 0), (0x99, 0x99, 0x99));
+        let alpha_at = |x: usize, y: usize| buf[(y * 100 + x) * 4 + 3];
+        assert_eq!(alpha_at(0, 0), 255);
+        assert_eq!(alpha_at(99, 0), 255);
+        assert_eq!(alpha_at(0, 27), 255);
+        assert_eq!(alpha_at(99, 27), 255);
     }
 }

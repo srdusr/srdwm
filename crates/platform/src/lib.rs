@@ -8,6 +8,9 @@
 //! pump, macOS's event taps) into the common [`srdwm_core::Event`] queue -
 //! everything downstream of that is platform-independent.
 
+mod ipc;
+pub use ipc::IpcServer;
+
 use srdwm_core::{Monitor, Rect, Window, WindowId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

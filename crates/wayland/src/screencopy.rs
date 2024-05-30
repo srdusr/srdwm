@@ -21,6 +21,7 @@ use std::time::UNIX_EPOCH;
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::{ExportMem, Renderer};
+use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_shm;
@@ -66,6 +67,11 @@ impl ScreencopyState {
 pub struct FrameData {
     /// Region of the output to capture, in physical pixels.
     pub region: Rectangle<i32, Physical>,
+    /// The output this frame captures. `None` if the `wl_output` the client
+    /// named at request time doesn't resolve to a live output (e.g.
+    /// unplugged between bind and capture) - such a frame is failed
+    /// immediately and never queued, so this is only read on that path.
+    pub output: Option<Output>,
     /// Set once `copy`/`copy_with_damage` has been handled, so a second one
     /// can be rejected with the protocol's `already_used` error.
     pub used: bool,
@@ -78,6 +84,11 @@ pub struct PendingCapture {
     pub frame: ZwlrScreencopyFrameV1,
     pub buffer: WlBuffer,
     pub region: Rectangle<i32, Physical>,
+    /// Which head this capture is bound to - the udev backend renders each
+    /// head into its own framebuffer, so a capture must be serviced against
+    /// the framebuffer for *this* output, not whichever head happens to
+    /// render first (see `render_udev_frame`'s per-output split).
+    pub output: Output,
     /// `copy_with_damage` clients expect a `damage` event before `ready`.
     pub with_damage: bool,
 }
@@ -106,9 +117,9 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for CompState {
         data_init: &mut DataInit<'_, Self>,
     ) {
         use zwlr_screencopy_manager_v1::Request;
-        let (frame, region) = match request {
+        let (frame, region, output) = match request {
             Request::CaptureOutput { frame, overlay_cursor: _, output } => {
-                (frame, state.output_capture_region(&output))
+                (frame, state.output_capture_region(&output), state.output_for_wl(&output).map(|e| e.output.clone()))
             }
             Request::CaptureOutputRegion { frame, overlay_cursor: _, output, x, y, width, height } => {
                 // Clamp to the output: a client is free to ask for a region
@@ -116,15 +127,17 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for CompState {
                 // `copy_framebuffer` errors out on out-of-bounds reads.
                 let full = state.output_capture_region(&output);
                 let requested = Rectangle::new((x, y).into(), (width.max(0), height.max(0)).into());
-                (frame, full.intersection(requested).unwrap_or_default())
+                let region = full.intersection(requested).unwrap_or_default();
+                (frame, region, state.output_for_wl(&output).map(|e| e.output.clone()))
             }
             Request::Destroy => return,
             _ => return,
         };
 
-        let frame = data_init.init(frame, FrameData { region, used: false });
-        if region.size.w <= 0 || region.size.h <= 0 {
-            // Nothing to capture (empty or fully off-screen region).
+        let frame = data_init.init(frame, FrameData { region, output: output.clone(), used: false });
+        if region.size.w <= 0 || region.size.h <= 0 || output.is_none() {
+            // Nothing to capture: an empty/off-screen region, or a
+            // `wl_output` that no longer resolves to a live head.
             frame.failed();
             return;
         }
@@ -182,10 +195,20 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for CompState {
             return;
         }
 
+        // A frame with no resolved output was already failed at request
+        // time (see the manager's `request` handler) and should never reach
+        // `Copy`/`CopyWithDamage` from a well-behaved client; guarded rather
+        // than unwrapped so a misbehaving one can't panic the compositor.
+        let Some(output) = data.output.clone() else {
+            frame.post_error(zwlr_screencopy_frame_v1::Error::InvalidBuffer, "frame has no output to capture");
+            return;
+        };
+
         state.screencopy_pending.push(PendingCapture {
             frame: frame.clone(),
             buffer,
             region: data.region,
+            output,
             with_damage,
         });
     }

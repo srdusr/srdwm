@@ -3,6 +3,7 @@ use crate::layout::{Layout, MasterStackLayout, NoOpLayout, TilingConfig};
 use crate::monitor::{Monitor, MonitorId};
 use crate::placement::{PlacementConfig, SmartPlacement, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
 use crate::rules::WindowRule;
+use crate::theme::ThemeConfig;
 use crate::window::{ResizeEdge, TitlebarHit, Window, WindowId};
 use crate::workspace::{Workspace, WorkspaceId};
 use std::collections::HashMap;
@@ -41,14 +42,36 @@ pub struct WindowManager {
     monitors: Vec<Monitor>,
     workspaces: Vec<Workspace>,
     current_workspace: WorkspaceId,
+    /// Whichever workspace was current immediately before the current one
+    /// became current - see `switch_workspace`'s doc comment.
+    previous_workspace: WorkspaceId,
+    /// Read from `workspace.auto_back_and_forth`. When set, switching to
+    /// the workspace that's already active switches to `previous_workspace`
+    /// instead - sway's `workspace_auto_back_and_forth` behavior, a quick
+    /// "jump back to whatever I was just on" toggle on a single keybinding.
+    pub auto_back_and_forth: bool,
     next_workspace_id: WorkspaceId,
     next_window_id: WindowId,
     layouts: HashMap<String, Box<dyn Layout>>,
     pub tiling: TilingConfig,
     pub placement: PlacementConfig,
+    /// Whether geometry changes made via `toggle_maximize`/`toggle_fullscreen`
+    /// should be animated. Read from `general.animations`; a backend's open
+    /// animation is gated on this too, since core has no notion of "open".
+    pub animations_enabled: bool,
+    /// Tween duration in milliseconds, read from `general.animation_duration`.
+    pub animation_duration_ms: u32,
+    /// Default decoration colours and border width, read from `theme.colors.*`/
+    /// `theme.decorations.*`. See `ThemeConfig`'s own doc comment.
+    pub theme: ThemeConfig,
     drag: Option<DragState>,
     resize: Option<ResizeState>,
     rules: Vec<WindowRule>,
+    /// Windows a client-close was requested for, drained once per tick by
+    /// `main.rs`'s event loop and forwarded to `Platform::close`. Needed
+    /// because `WindowManager` is platform-agnostic and has no way to send
+    /// a client its close request directly - see `close_window`.
+    close_requests: Vec<WindowId>,
 }
 
 impl Default for WindowManager {
@@ -71,14 +94,20 @@ impl WindowManager {
             monitors: Vec::new(),
             workspaces: vec![Workspace::new(0, "1", "dynamic")],
             current_workspace: 0,
+            previous_workspace: 0,
+            auto_back_and_forth: false,
             next_workspace_id: 1,
             next_window_id: 1,
             layouts,
             tiling: TilingConfig::default(),
             placement: PlacementConfig::default(),
+            animations_enabled: true,
+            animation_duration_ms: 200,
+            theme: ThemeConfig::default(),
             drag: None,
             resize: None,
             rules: Vec::new(),
+            close_requests: Vec::new(),
         }
     }
 
@@ -147,6 +176,28 @@ impl WindowManager {
                 }
             }
         }
+        // A maximized/fullscreen window's geometry was set to a snapshot of
+        // its monitor's usable/full rect at the moment it was toggled on --
+        // it is not live-bound to that rect afterward. Without this, a bar
+        // or dock changing its exclusive zone while a window is maximized
+        // (the live case: a dock dropping its reservation to 0 so a
+        // maximized window can cover its area) grows or shrinks `Monitor::
+        // geometry`/`full_geometry` here, but the already-maximized window
+        // keeps its stale pre-change size until manually un-maximized and
+        // re-maximized - reported as "maximize does not extend past the
+        // dock" even though the dock's own zone change took effect
+        // immediately in every other respect (new windows placed correctly,
+        // `Monitor::geometry` itself correct if queried fresh).
+        for window in self.windows.values_mut() {
+            if !window.maximized && !window.fullscreen {
+                continue;
+            }
+            let Some(monitor) = live.iter().find(|m| m.id == window.monitor) else { continue };
+            let target = if window.fullscreen { monitor.full_geometry } else { monitor.geometry };
+            if window.geometry != target {
+                window.geometry = target;
+            }
+        }
     }
 
     pub fn monitors(&self) -> &[Monitor] {
@@ -175,7 +226,16 @@ impl WindowManager {
     /// it's left for the next `arrange_workspace` call to place.
     pub fn add_window(&mut self, mut window: Window) -> WindowId {
         let id = window.id;
+        // Applied before rule matching below, which still wins when a rule
+        // sets its own `border_color`/`border_width` - this only replaces
+        // whatever a backend's `Window::new` happened to hardcode.
+        window.border_color = self.theme.default_border_color;
+        window.border_width = self.theme.default_border_width;
         let actions = self.rules.iter().find(|r| r.matcher.matches(&window)).map(|r| r.actions.clone());
+        // See `Window::rules_applied`'s doc comment: a native Wayland window
+        // still has empty title/app_id at this point, so a real (if
+        // inconclusive) match attempt needs to wait for `reapply_rules_if_pending`.
+        window.rules_applied = actions.is_some() || !(window.title.is_empty() && window.app_id.is_empty());
 
         let workspace = actions.as_ref().and_then(|a| a.workspace).unwrap_or(self.current_workspace);
         window.workspace = workspace;
@@ -222,6 +282,63 @@ impl WindowManager {
         id
     }
 
+    /// Retries rule matching for a window `add_window` couldn't conclusively
+    /// match yet (see `Window::rules_applied`'s doc comment) - a backend
+    /// calls this once a native Wayland window's real `title`/`app_id`
+    /// become known, typically on its first real commit. A no-op once
+    /// `rules_applied` is already `true`, so this is safe to call on every
+    /// subsequent metadata change without rules re-applying repeatedly.
+    ///
+    /// Returns whether a rule actually matched and was applied - distinct
+    /// from simply "ran" (this is a no-op past the first call regardless).
+    /// A backend uses this to decide whether a follow-up geometry/decoration
+    /// sync is warranted: `sync_geometry` re-stacks the window to the top
+    /// via smithay's `Space::map_element` as a side effect of updating its
+    /// tracked position (`map_element` always does this, `activate` or
+    /// not - there is no "move without restacking" in this smithay
+    /// version), so calling it on *every* title/app_id change - which
+    /// happens constantly for perfectly ordinary reasons (a browser tab
+    /// finishing a page load) long after the window's own creation - would
+    /// silently yank an unfocused, unrelated window back to the front any
+    /// time its title happened to update. Reported live as exactly that:
+    /// an older window jumping in front of a newer, focused one with no
+    /// user action to explain it.
+    pub fn reapply_rules_if_pending(&mut self, id: WindowId) -> bool {
+        let Some(window) = self.windows.get(&id) else { return false };
+        if window.rules_applied || (window.title.is_empty() && window.app_id.is_empty()) {
+            return false;
+        }
+        let actions = self.rules.iter().find(|r| r.matcher.matches(window)).map(|r| r.actions.clone());
+        let Some(window) = self.windows.get_mut(&id) else { return false };
+        window.rules_applied = true;
+        let Some(actions) = actions else { return false };
+        if let Some(floating) = actions.floating {
+            window.floating = floating;
+        }
+        if let Some(decorated) = actions.decorated {
+            window.decorated = decorated;
+        }
+        if let Some(color) = actions.border_color {
+            window.border_color = color;
+        }
+        if let Some(width) = actions.border_width {
+            window.border_width = width;
+        }
+        if let Some(pinned) = actions.pinned {
+            window.always_on_top = pinned;
+        }
+        if let Some(geometry) = actions.geometry {
+            window.geometry = geometry;
+        }
+        if let Some(workspace) = actions.workspace {
+            self.move_window_to_workspace(id, workspace);
+        }
+        if actions.maximized.unwrap_or(false) {
+            self.toggle_maximize(id);
+        }
+        true
+    }
+
     pub fn remove_window(&mut self, id: WindowId) -> Option<Window> {
         self.order.retain(|&w| w != id);
         if self.focused == Some(id) {
@@ -255,6 +372,22 @@ impl WindowManager {
         if let Some(pos) = self.order.iter().position(|&w| w == id) {
             let id = self.order.remove(pos);
             self.order.push(id);
+        }
+        self.restack_pinned();
+    }
+
+    /// Sends a window to the back of the stack - the middle-click-titlebar
+    /// convention most X11 WMs (twm, fvwm, IceWM) have always had and this
+    /// one never did. Doesn't touch focus: lowering the window you're
+    /// currently looking at out from under the pointer without also moving
+    /// keyboard focus elsewhere would leave input going to a window that's
+    /// no longer visible under the cursor, which is more surprising than
+    /// useful. `restack_pinned` still runs afterward so a pinned window
+    /// can't accidentally end up buried by this either.
+    pub fn lower_window(&mut self, id: WindowId) {
+        if let Some(pos) = self.order.iter().position(|&w| w == id) {
+            let id = self.order.remove(pos);
+            self.order.insert(0, id);
         }
         self.restack_pinned();
     }
@@ -430,6 +563,14 @@ impl WindowManager {
 
     pub fn close_window(&mut self, id: WindowId) {
         log::info!("close_window({id})");
+        self.close_requests.push(id);
+    }
+
+    /// Drains windows queued by `close_window` since the last call. Core
+    /// has no way to reach a client itself - the caller (`main.rs`) is
+    /// expected to forward each id to `Platform::close`.
+    pub fn take_close_requests(&mut self) -> Vec<WindowId> {
+        std::mem::take(&mut self.close_requests)
     }
 
     pub fn minimize_window(&mut self, id: WindowId) {
@@ -447,9 +588,68 @@ impl WindowManager {
         }
     }
 
+    /// Moves a window into the scratchpad pool, hiding it immediately --
+    /// sway's `move scratchpad`. The single most-used "quick terminal"
+    /// pattern in tiling window managers, and srdwm had no equivalent at
+    /// all before this.
+    ///
+    /// Also floats the window: tiling something that's meant to pop in and
+    /// out on demand doesn't make sense, and would otherwise fight
+    /// `arrange_workspace` every time it's shown. Reuses `minimized` for
+    /// the actual show/hide gating rather than introducing a second
+    /// visibility flag - `scratchpad` here is purely a marker of *pool
+    /// membership*, kept separate so `scratchpad_show` knows which hidden
+    /// windows are its own to bring back, as opposed to an ordinarily
+    /// minimized one.
+    pub fn scratchpad_add(&mut self, id: WindowId) {
+        if let Some(w) = self.windows.get_mut(&id) {
+            w.scratchpad = true;
+            w.floating = true;
+        }
+        self.minimize_window(id);
+    }
+
+    /// Removes a window from the scratchpad pool without changing its
+    /// current visibility - for a rule or script that wants to opt a
+    /// window back into ordinary window management.
+    pub fn scratchpad_remove(&mut self, id: WindowId) {
+        if let Some(w) = self.windows.get_mut(&id) {
+            w.scratchpad = false;
+        }
+    }
+
+    /// Toggles the scratchpad - sway's `scratchpad show`, meant for one
+    /// keybinding a user presses repeatedly. If the focused window is
+    /// itself a currently-shown scratchpad window, hides it; otherwise
+    /// shows (and focuses) the most recently added hidden scratchpad
+    /// window, if any, moving it onto whichever workspace is current so it
+    /// follows the user rather than staying pinned to wherever it was
+    /// added from - sway's own behavior. "Most recently added" is `id`
+    /// order, since ids are allocated monotonically and no separate
+    /// timestamp is tracked; only ever one window is shown/hidden per
+    /// call, deliberately not sway's full multi-window cycling, which
+    /// needs its own remembered order and is a rarer need than a single
+    /// scratchpad window covers.
+    pub fn scratchpad_show(&mut self) {
+        if let Some(id) = self.focused {
+            if self.windows.get(&id).is_some_and(|w| w.scratchpad && !w.minimized) {
+                self.minimize_window(id);
+                return;
+            }
+        }
+        let Some(id) = self.windows.values().filter(|w| w.scratchpad && w.minimized).map(|w| w.id).max() else { return };
+        if let Some(w) = self.windows.get_mut(&id) {
+            w.workspace = self.current_workspace;
+        }
+        self.restore_window(id);
+        self.focus_window(id);
+    }
+
     pub fn toggle_maximize(&mut self, id: WindowId) {
         let monitor_geom = self.windows.get(&id).and_then(|w| self.monitor_for(w.monitor)).map(|m| m.geometry);
+        let animations_enabled = self.animations_enabled;
         let Some(w) = self.windows.get_mut(&id) else { return };
+        let from = w.geometry;
         if w.maximized {
             if let Some(restore) = w.restore_geometry.take() {
                 w.geometry = restore;
@@ -460,6 +660,9 @@ impl WindowManager {
             w.geometry = geom;
             w.maximized = true;
         }
+        if animations_enabled && w.geometry != from {
+            w.anim_from = Some(from);
+        }
     }
 
     /// Fullscreen: the window covers its whole monitor with no decoration.
@@ -469,15 +672,38 @@ impl WindowManager {
     /// they are mutually exclusive - toggling one off restores whatever the
     /// window's geometry was before *either* was applied, and entering
     /// fullscreen from a maximised window doesn't lose the original size.
+    ///
+    /// `decorated` is saved and restored the same way, via
+    /// `restore_decorated` - exiting used to hardcode `w.decorated = true`
+    /// unconditionally, which is only correct for a window that was
+    /// decorated to begin with. Any window a rule sets `decorated = false`
+    /// for (client-side-decorated apps like Firefox, matched via
+    /// `srd.rule({ class = "firefox" }, { decorated = false })`) that ever
+    /// goes fullscreen - an HTML5 video, a PDF presentation, plain F11 --
+    /// came back from it permanently `decorated = true`, with no further
+    /// event to ever set it back. Since border/titlebar redraw fresh from
+    /// live `Window.decorated` every frame but the *hit-testing* band this
+    /// wrongly turned on doesn't correspond to anything the client is
+    /// actually drawing there, every click in what srdwm now (incorrectly)
+    /// treats as the titlebar band got swallowed as a drag/button hit
+    /// instead of ever reaching the client - reported live as a click on
+    /// Firefox's back button minimizing the window instead.
     pub fn toggle_fullscreen(&mut self, id: WindowId) {
-        let monitor_geom = self.windows.get(&id).and_then(|w| self.monitor_for(w.monitor)).map(|m| m.geometry);
+        // Unlike `toggle_maximize`, fullscreen uses the monitor's true
+        // full rect, not the exclusive-zone-shrunk usable area - a
+        // fullscreen window should cover (or go under) a bar/dock like
+        // everywhere else, not stop short of it. See `Monitor::
+        // full_geometry`'s doc comment.
+        let monitor_geom = self.windows.get(&id).and_then(|w| self.monitor_for(w.monitor)).map(|m| m.full_geometry);
+        let animations_enabled = self.animations_enabled;
         let Some(w) = self.windows.get_mut(&id) else { return };
+        let from = w.geometry;
         if w.fullscreen {
             if let Some(restore) = w.restore_geometry.take() {
                 w.geometry = restore;
             }
             w.fullscreen = false;
-            w.decorated = true;
+            w.decorated = w.restore_decorated.take().unwrap_or(true);
         } else if let Some(geom) = monitor_geom {
             // Only remember the pre-fullscreen geometry if we aren't already
             // maximised, otherwise the monitor rect would overwrite the real
@@ -488,7 +714,11 @@ impl WindowManager {
             w.maximized = false;
             w.geometry = geom;
             w.fullscreen = true;
+            w.restore_decorated = Some(w.decorated);
             w.decorated = false;
+        }
+        if animations_enabled && w.geometry != from {
+            w.anim_from = Some(from);
         }
     }
 
@@ -529,7 +759,7 @@ impl WindowManager {
             if w.minimized {
                 continue;
             }
-            if let Some(hit) = ResizeEdge::hit_test(w.geometry, x, y) {
+            if let Some(hit) = ResizeEdge::hit_test(w.geometry, x, y, w.decorated, w.border_width) {
                 return Some((w.id, hit));
             }
         }
@@ -578,7 +808,13 @@ impl WindowManager {
         new_geom.x += dx;
         new_geom.y += dy;
 
-        let monitor_bounds = self.windows.get(&drag.window).and_then(|w| self.monitor_for(w.monitor)).map(|m| m.geometry);
+        // `full_geometry`, not `geometry`: a floating window being dragged
+        // must be able to cross into (or land under/over) the strip a
+        // bar/dock reserves - only *placement* of a brand-new window and
+        // maximize avoid it. Clamping a drag to the shrunk usable area
+        // made it physically impossible to ever drag a window past a
+        // dock, at any speed or angle.
+        let monitor_bounds = self.windows.get(&drag.window).and_then(|w| self.monitor_for(w.monitor)).map(|m| m.full_geometry);
         if let Some(bounds) = monitor_bounds {
             new_geom.x = new_geom.x.clamp(bounds.x - new_geom.width as i32 + 40, bounds.right() - 40);
             new_geom.y = new_geom.y.clamp(bounds.y, bounds.bottom() - 40);
@@ -630,6 +866,15 @@ impl WindowManager {
         self.resize.is_some()
     }
 
+    /// The edge currently being dragged, if a resize is in progress - so a
+    /// backend can keep showing the matching resize cursor for the whole
+    /// drag, not just while the pointer happens to still be hovering that
+    /// exact edge (which it usually isn't, once the drag is actually
+    /// underway).
+    pub fn resize_edge(&self) -> Option<ResizeEdge> {
+        self.resize.as_ref().map(|r| r.edge)
+    }
+
     // ---- Workspaces -----------------------------------------------------
 
     pub fn add_workspace(&mut self, name: impl Into<String>, layout: impl Into<String>) -> WorkspaceId {
@@ -637,6 +882,17 @@ impl WindowManager {
         self.next_workspace_id += 1;
         self.workspaces.push(Workspace::new(id, name, layout));
         id
+    }
+
+    /// Sets a workspace's display name - used to apply `workspace.names`
+    /// at startup (`crates/srdwm/src/main.rs`'s `apply_workspace_count`),
+    /// since `WindowManager::new`/`add_workspace` otherwise leave every
+    /// workspace named after its own 1-based index regardless of what a
+    /// config asked for. A no-op if `id` doesn't exist.
+    pub fn rename_workspace(&mut self, id: WorkspaceId, name: impl Into<String>) {
+        if let Some(w) = self.workspaces.iter_mut().find(|w| w.id == id) {
+            w.name = name.into();
+        }
     }
 
     pub fn remove_workspace(&mut self, id: WorkspaceId) {
@@ -653,9 +909,19 @@ impl WindowManager {
         }
     }
 
+    /// Switches to `id`, unless `auto_back_and_forth` is set and `id` is
+    /// already the current workspace - in which case this jumps to
+    /// `previous_workspace` instead, sway's `workspace_auto_back_and_forth`
+    /// behavior. `previous_workspace` itself always tracks "whatever was
+    /// current right before this call changed it", updated on every real
+    /// switch regardless of the setting, so turning the setting on later
+    /// (or a client-driven switch, e.g. `ext_workspace_v1`'s `activate`)
+    /// doesn't need its own separate bookkeeping.
     pub fn switch_workspace(&mut self, id: WorkspaceId) {
-        if self.workspaces.iter().any(|w| w.id == id) {
-            self.current_workspace = id;
+        let target = if self.auto_back_and_forth && id == self.current_workspace { self.previous_workspace } else { id };
+        if self.workspaces.iter().any(|w| w.id == target) && target != self.current_workspace {
+            self.previous_workspace = self.current_workspace;
+            self.current_workspace = target;
         }
     }
 
@@ -681,6 +947,19 @@ impl WindowManager {
     /// active workspace of whichever monitor they're assigned to, and not minimized.
     pub fn visible_windows(&self) -> impl Iterator<Item = &Window> {
         self.windows.values().filter(|w| w.workspace == self.current_workspace && !w.minimized)
+    }
+
+    /// Same windows as [`Self::visible_windows`], but in real front-to-back
+    /// stacking order (topmost first) instead of arbitrary `HashMap`
+    /// iteration order. Needed anywhere a backend composites more than one
+    /// window's elements (content, decoration, border) together and their
+    /// relative order across *different* windows actually matters - unlike
+    /// `visible_windows`, which is fine for anything per-window in
+    /// isolation (border color, geometry) where order never came up.
+    /// `self.order` reversed is the same "topmost first" convention
+    /// `hit_test`/`window_at` already use.
+    pub fn visible_windows_front_to_back(&self) -> impl Iterator<Item = &Window> {
+        self.order.iter().rev().filter_map(|id| self.windows.get(id)).filter(|w| w.workspace == self.current_workspace && !w.minimized)
     }
 
     // ---- Layout -----------------------------------------------------------
@@ -854,7 +1133,7 @@ mod tests {
         w.geometry = Rect::new(500, 500, 400, 300);
         wm.add_window(w);
         wm.start_drag(a, 510, 510);
-        wm.update_drag(20, 510); // drag far left, within snap threshold of edge 0
+        wm.update_drag(15, 510); // drag far left, landing within snap_threshold (8px) of edge 0
         wm.end_drag();
         let g = wm.window(a).unwrap().geometry;
         assert_eq!(g, Rect::new(0, 0, 960, 1080));
@@ -888,6 +1167,42 @@ mod tests {
         assert_eq!(wm.window(a).unwrap().geometry, Rect::new(0, 0, 1920, 1080));
         wm.toggle_maximize(a);
         assert_eq!(wm.window(a).unwrap().geometry, original);
+    }
+
+    #[test]
+    fn maximize_records_anim_from_when_animations_enabled() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.geometry = Rect::new(50, 50, 300, 200);
+        wm.add_window(w);
+        let placed = wm.window(a).unwrap().geometry;
+        wm.toggle_maximize(a);
+        assert_eq!(wm.window(a).unwrap().anim_from, Some(placed));
+    }
+
+    #[test]
+    fn maximize_does_not_record_anim_from_when_animations_disabled() {
+        let mut wm = wm_with_monitor();
+        wm.animations_enabled = false;
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.geometry = Rect::new(50, 50, 300, 200);
+        wm.add_window(w);
+        wm.toggle_maximize(a);
+        assert_eq!(wm.window(a).unwrap().anim_from, None);
+    }
+
+    #[test]
+    fn fullscreen_records_anim_from_covering_the_full_monitor() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.geometry = Rect::new(50, 50, 300, 200);
+        wm.add_window(w);
+        let placed = wm.window(a).unwrap().geometry;
+        wm.toggle_fullscreen(a);
+        assert_eq!(wm.window(a).unwrap().anim_from, Some(placed));
     }
 
     #[test]
@@ -950,7 +1265,7 @@ mod tests {
         let mut wm = wm_with_monitor();
         wm.set_layout(wm.current_workspace(), "tiling");
         wm.add_rule(WindowRule {
-            matcher: crate::rules::WindowMatch { title_contains: Some("calculator".into()), class: None },
+            matcher: crate::rules::WindowMatch { title_contains: Some("calculator".into()), ..Default::default() },
             actions: crate::rules::WindowRuleActions { floating: Some(true), ..Default::default() },
         });
         let id = wm.alloc_window_id();
@@ -962,7 +1277,7 @@ mod tests {
     fn non_matching_rule_leaves_window_untouched() {
         let mut wm = wm_with_monitor();
         wm.add_rule(WindowRule {
-            matcher: crate::rules::WindowMatch { title_contains: Some("calculator".into()), class: None },
+            matcher: crate::rules::WindowMatch { title_contains: Some("calculator".into()), ..Default::default() },
             actions: crate::rules::WindowRuleActions { floating: Some(true), ..Default::default() },
         });
         let id = wm.alloc_window_id();
@@ -975,7 +1290,7 @@ mod tests {
         let mut wm = wm_with_monitor();
         let target = wm.add_workspace("scratch", "dynamic");
         wm.add_rule(WindowRule {
-            matcher: crate::rules::WindowMatch { title_contains: None, class: Some("scratchpad".into()) },
+            matcher: crate::rules::WindowMatch { class: Some("scratchpad".into()), ..Default::default() },
             actions: crate::rules::WindowRuleActions { workspace: Some(target), ..Default::default() },
         });
         let id = wm.alloc_window_id();
@@ -995,6 +1310,150 @@ mod tests {
         wm.remove_workspace(ws2);
         assert_ne!(wm.window(a).unwrap().workspace, ws2);
         assert!(wm.workspace(ws2).is_none());
+    }
+
+    #[test]
+    fn rename_workspace_changes_the_display_name() {
+        let mut wm = wm_with_monitor();
+        let ws2 = wm.add_workspace("2", "dynamic");
+        wm.rename_workspace(ws2, "code");
+        assert_eq!(wm.workspace(ws2).unwrap().name, "code");
+    }
+
+    #[test]
+    fn auto_back_and_forth_jumps_to_the_previous_workspace_when_reselecting_the_active_one() {
+        let mut wm = wm_with_monitor();
+        wm.auto_back_and_forth = true;
+        let ws2 = wm.add_workspace("2", "dynamic");
+        wm.switch_workspace(ws2);
+        assert_eq!(wm.current_workspace(), ws2);
+        // Re-selecting the already-active workspace jumps back to 0, the
+        // one that was active right before.
+        wm.switch_workspace(ws2);
+        assert_eq!(wm.current_workspace(), 0);
+    }
+
+    #[test]
+    fn without_auto_back_and_forth_reselecting_the_active_workspace_is_a_plain_no_op() {
+        let mut wm = wm_with_monitor();
+        let ws2 = wm.add_workspace("2", "dynamic");
+        wm.switch_workspace(ws2);
+        wm.switch_workspace(ws2);
+        assert_eq!(wm.current_workspace(), ws2);
+    }
+
+    #[test]
+    fn switching_to_a_nonexistent_workspace_does_not_move_or_touch_previous() {
+        let mut wm = wm_with_monitor();
+        let ws2 = wm.add_workspace("2", "dynamic");
+        wm.switch_workspace(ws2);
+        wm.switch_workspace(9999);
+        assert_eq!(wm.current_workspace(), ws2);
+        // The failed switch must not have overwritten `previous_workspace`
+        // either - auto_back_and_forth would otherwise jump to a
+        // workspace id that was never really visited.
+        wm.auto_back_and_forth = true;
+        wm.switch_workspace(ws2);
+        assert_eq!(wm.current_workspace(), 0);
+    }
+
+    #[test]
+    fn rename_workspace_is_a_no_op_for_an_id_that_does_not_exist() {
+        let mut wm = wm_with_monitor();
+        wm.rename_workspace(9999, "ghost");
+        assert!(wm.workspaces().iter().all(|w| w.name != "ghost"));
+    }
+
+    // ---- Scratchpad --------------------------------------------------------
+
+    #[test]
+    fn scratchpad_add_hides_the_window_and_marks_pool_membership() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "term"));
+        wm.scratchpad_add(a);
+        let w = wm.window(a).unwrap();
+        assert!(w.scratchpad);
+        assert!(w.minimized);
+        assert!(w.floating);
+        assert!(!wm.visible_windows().any(|w| w.id == a));
+    }
+
+    #[test]
+    fn scratchpad_show_brings_back_the_hidden_window_and_focuses_it() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "term"));
+        wm.scratchpad_add(a);
+        wm.scratchpad_show();
+        let w = wm.window(a).unwrap();
+        assert!(!w.minimized);
+        assert_eq!(wm.focused_id(), Some(a));
+        assert!(wm.visible_windows().any(|w| w.id == a));
+    }
+
+    #[test]
+    fn scratchpad_show_hides_again_when_the_shown_scratchpad_window_is_focused() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "term"));
+        wm.scratchpad_add(a);
+        wm.scratchpad_show(); // shows + focuses
+        wm.scratchpad_show(); // toggles back off
+        assert!(wm.window(a).unwrap().minimized);
+        assert!(!wm.visible_windows().any(|w| w.id == a));
+    }
+
+    #[test]
+    fn scratchpad_show_moves_the_window_onto_the_current_workspace() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "term"));
+        wm.scratchpad_add(a);
+        let ws2 = wm.add_workspace("2", "dynamic");
+        wm.switch_workspace(ws2);
+        wm.scratchpad_show();
+        assert_eq!(wm.window(a).unwrap().workspace, ws2);
+        assert!(wm.visible_windows().any(|w| w.id == a));
+    }
+
+    #[test]
+    fn scratchpad_show_with_no_scratchpad_windows_is_a_no_op() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "normal"));
+        wm.scratchpad_show();
+        assert_eq!(wm.focused_id(), Some(a));
+        assert!(!wm.window(a).unwrap().minimized);
+    }
+
+    #[test]
+    fn scratchpad_show_picks_the_most_recently_added_hidden_window() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "old"));
+        wm.scratchpad_add(a);
+        let b = wm.alloc_window_id();
+        wm.add_window(Window::new(b, "new"));
+        wm.scratchpad_add(b);
+        wm.scratchpad_show();
+        assert_eq!(wm.focused_id(), Some(b));
+        assert!(wm.window(a).unwrap().minimized);
+    }
+
+    #[test]
+    fn scratchpad_remove_leaves_current_visibility_untouched_but_drops_pool_membership() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "term"));
+        wm.scratchpad_add(a);
+        wm.scratchpad_remove(a);
+        assert!(!wm.window(a).unwrap().scratchpad);
+        assert!(wm.window(a).unwrap().minimized);
+        // No longer scratchpad-managed, so a later `scratchpad_show` must
+        // not touch it.
+        wm.scratchpad_show();
+        assert!(wm.window(a).unwrap().minimized);
     }
 
     // ---- Monitor hotplug -------------------------------------------------
@@ -1137,6 +1596,203 @@ mod tests {
         assert!(!got.fullscreen);
         assert_eq!(got.geometry, Rect::new(100, 100, 400, 300));
         assert!(got.decorated);
+    }
+
+    #[test]
+    fn fullscreen_round_trip_restores_a_client_side_decorated_window_to_undecorated() {
+        // Regression test: exiting fullscreen used to hardcode
+        // `decorated = true` unconditionally, which is only correct for a
+        // window that was decorated to begin with. A window a rule sets
+        // `decorated = false` for (client-side-decorated apps like
+        // Firefox) that goes fullscreen and back used to come back
+        // permanently `decorated = true` - with nothing to ever set it
+        // back, since the client only negotiates its decoration mode once.
+        // Since border/titlebar hit-testing is keyed off `Window.decorated`
+        // directly, this made srdwm swallow every click near the top of
+        // the window as a fake titlebar hit instead of forwarding it to
+        // the client.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "firefox");
+        w.geometry = Rect::new(100, 100, 400, 300);
+        w.decorated = false;
+        wm.add_window(w);
+
+        wm.toggle_fullscreen(id);
+        assert!(!wm.window(id).unwrap().decorated, "fullscreen itself must still drop the titlebar");
+
+        wm.toggle_fullscreen(id);
+        assert!(!wm.window(id).unwrap().decorated, "must restore the pre-fullscreen decorated=false, not default to true");
+    }
+
+    /// A monitor whose usable `geometry` is shrunk by a bottom dock's
+    /// exclusive zone, distinct from its true `full_geometry` - the shape
+    /// every real backend reports once a bar/dock has claimed space (see
+    /// `Monitor::full_geometry`'s doc comment).
+    fn monitor_with_dock() -> Monitor {
+        let mut m = Monitor::new(0, "primary", Rect::new(0, 0, 1920, 1020));
+        m.full_geometry = Rect::new(0, 0, 1920, 1080);
+        m.primary = true;
+        m
+    }
+
+    #[test]
+    fn fullscreen_covers_the_full_monitor_ignoring_a_dock_reservation() {
+        // Regression test: fullscreen used to target `Monitor::geometry`
+        // (the usable, exclusive-zone-shrunk area), the same field maximize
+        // correctly uses - so a fullscreened window stopped short of a
+        // dock's reserved strip instead of covering (or going under) it
+        // like fullscreen does everywhere else. `full_geometry` is what
+        // fixes that; `geometry` must stay untouched so maximize keeps
+        // respecting the dock.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(vec![monitor_with_dock()]);
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "a"));
+
+        wm.toggle_fullscreen(id);
+        assert_eq!(wm.window(id).unwrap().geometry, Rect::new(0, 0, 1920, 1080), "fullscreen must reach the true monitor edge, past the dock");
+    }
+
+    #[test]
+    fn maximize_still_respects_the_dock_reservation() {
+        let mut wm = WindowManager::new();
+        wm.set_monitors(vec![monitor_with_dock()]);
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "a"));
+
+        wm.toggle_maximize(id);
+        assert_eq!(wm.window(id).unwrap().geometry, Rect::new(0, 0, 1920, 1020), "maximize must still stop at the dock, unlike fullscreen");
+    }
+
+    #[test]
+    fn maximized_window_grows_when_the_dock_drops_its_reservation_live() {
+        // Regression test: a dock that hides/reduces its exclusive zone
+        // while a window is already maximized (an auto-hide dock reacting
+        // to monocle/maximize, exactly the scenario an AGS peer session hit
+        // live) used to leave that window stuck at its stale, dock-shrunk
+        // size - `set_monitors` updated `Monitor::geometry` correctly but
+        // never touched already-maximized/fullscreen windows' `geometry`,
+        // so nothing re-grew until the window was manually un-maximized and
+        // re-maximized.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(vec![monitor_with_dock()]);
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "a"));
+        wm.toggle_maximize(id);
+        assert_eq!(wm.window(id).unwrap().geometry, Rect::new(0, 0, 1920, 1020));
+
+        // The dock drops its exclusive zone to 0.
+        let mut freed = Monitor::new(0, "primary", Rect::new(0, 0, 1920, 1080));
+        freed.full_geometry = Rect::new(0, 0, 1920, 1080);
+        freed.primary = true;
+        wm.set_monitors(vec![freed]);
+
+        assert_eq!(
+            wm.window(id).unwrap().geometry,
+            Rect::new(0, 0, 1920, 1080),
+            "an already-maximized window must live-track a monitor geometry change, not just windows placed afterward"
+        );
+    }
+
+    #[test]
+    fn fullscreen_window_also_live_tracks_a_monitor_geometry_change() {
+        let mut wm = WindowManager::new();
+        wm.set_monitors(vec![monitor_with_dock()]);
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "a"));
+        wm.toggle_fullscreen(id);
+        assert_eq!(wm.window(id).unwrap().geometry, Rect::new(0, 0, 1920, 1080));
+
+        let mut resized = Monitor::new(0, "primary", Rect::new(0, 0, 2560, 1420));
+        resized.full_geometry = Rect::new(0, 0, 2560, 1440);
+        resized.primary = true;
+        wm.set_monitors(vec![resized]);
+
+        assert_eq!(wm.window(id).unwrap().geometry, Rect::new(0, 0, 2560, 1440), "fullscreen must live-track the true full rect, not the usable one");
+    }
+
+    #[test]
+    fn a_non_maximized_window_is_left_alone_by_a_monitor_geometry_change() {
+        // set_monitors' new re-sync pass is gated on maximized/fullscreen --
+        // must not clobber an ordinary floating/tiled window's geometry just
+        // because the monitor rect changed underneath it.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(vec![monitor_with_dock()]);
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "a");
+        w.geometry = Rect::new(100, 100, 400, 300);
+        wm.add_window(w);
+        wm.window_mut(id).unwrap().geometry = Rect::new(100, 100, 400, 300);
+
+        let mut freed = Monitor::new(0, "primary", Rect::new(0, 0, 1920, 1080));
+        freed.full_geometry = Rect::new(0, 0, 1920, 1080);
+        freed.primary = true;
+        wm.set_monitors(vec![freed]);
+
+        assert_eq!(wm.window(id).unwrap().geometry, Rect::new(100, 100, 400, 300));
+    }
+
+    #[test]
+    fn dragging_a_window_can_cross_into_the_dock_reserved_strip() {
+        // Regression test: `update_drag`'s clamp used to also use
+        // `Monitor::geometry` (the shrunk usable area), which made it
+        // physically impossible to ever drag a floating window into the
+        // strip a dock reserves - not just discouraged, genuinely
+        // unreachable at any drag speed or angle. `full_geometry` is what
+        // makes that space reachable again; the dock still renders on top
+        // as an overlay, same as it does everywhere else.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(vec![monitor_with_dock()]);
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "a");
+        w.geometry = Rect::new(500, 500, 200, 200);
+        wm.add_window(w);
+
+        wm.start_drag(id, 600, 600);
+        // Drag far down - past the old usable-area bottom (1020) and
+        // toward the true monitor bottom (1080).
+        wm.update_drag(600, 5000);
+        let g = wm.window(id).unwrap().geometry;
+        // Old behavior (clamped to `geometry`, bottom 1020) would stop at
+        // y=980; clamped to `full_geometry` (bottom 1080), it reaches 1040.
+        assert_eq!(g.y, 1040, "must clamp against the true monitor bottom, not the dock-shrunk usable area");
+    }
+
+    #[test]
+    fn class_rule_applies_once_app_id_is_known_after_creation() {
+        // Regression test: `add_window` matches rules against whatever
+        // `app_id`/`title` the window already has - for a native Wayland
+        // client those are still empty at that moment (the real values
+        // only arrive on a later commit, well after `new_toplevel`), so
+        // every class-based rule - including `srd.rule({ class =
+        // "firefox" }, { decorated = false })`, meant to stop srdwm
+        // drawing a second titlebar over Firefox's own - silently never
+        // matched. `reapply_rules_if_pending` is the retry a backend calls
+        // once the real app_id is known.
+        let mut wm = wm_with_monitor();
+        wm.add_rule(WindowRule {
+            matcher: crate::rules::WindowMatch { class: Some("firefox".into()), ..Default::default() },
+            actions: crate::rules::WindowRuleActions { decorated: Some(false), ..Default::default() },
+        });
+        let id = wm.alloc_window_id();
+        // Empty app_id, exactly as a fresh native Wayland toplevel has it.
+        wm.add_window(Window::new(id, ""));
+        assert!(wm.window(id).unwrap().decorated, "no app_id yet, so no match - must not have flipped early");
+
+        let w = wm.window_mut(id).unwrap();
+        w.app_id = "firefox".into();
+        wm.reapply_rules_if_pending(id);
+        assert!(!wm.window(id).unwrap().decorated, "app_id now known - the rule must apply on retry");
+
+        // A later, unrelated title change (e.g. a browser tab switching)
+        // must not re-match and re-apply - rule actions apply once.
+        let w = wm.window_mut(id).unwrap();
+        w.decorated = true;
+        w.title = "a new tab title".into();
+        wm.reapply_rules_if_pending(id);
+        assert!(wm.window(id).unwrap().decorated, "rules_applied is already true - must not re-run the match");
     }
 
     #[test]
@@ -1304,5 +1960,35 @@ mod tests {
         wm.toggle_always_on_top(a);
         wm.raise_window(b);
         assert_eq!(wm.stacking_order().last().map(|w| w.id), Some(b));
+    }
+
+    #[test]
+    fn lower_window_sends_it_to_the_back_of_the_stack() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let b = wm.alloc_window_id();
+        wm.add_window(Window::new(b, "b"));
+        let c = wm.alloc_window_id();
+        wm.add_window(Window::new(c, "c"));
+        assert_eq!(wm.stacking_order().last().map(|w| w.id), Some(c), "precondition: c is on top after being added last");
+
+        wm.lower_window(c);
+        let order: Vec<_> = wm.stacking_order().map(|w| w.id).collect();
+        assert_eq!(order, vec![c, a, b], "c must be at the very back, a/b unchanged relative to each other");
+    }
+
+    #[test]
+    fn lower_window_never_buries_a_pinned_window() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let pinned = wm.alloc_window_id();
+        wm.add_window(Window::new(pinned, "pinned"));
+        wm.toggle_always_on_top(pinned);
+        assert_eq!(wm.stacking_order().last().map(|w| w.id), Some(pinned));
+
+        wm.lower_window(a);
+        assert_eq!(wm.stacking_order().last().map(|w| w.id), Some(pinned), "a pinned window must stay on top even after an unrelated lower_window call");
     }
 }

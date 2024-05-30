@@ -44,6 +44,53 @@ pub fn key_combo_string(modifiers: Modifiers, key_name: &str) -> String {
     format!("{modifiers}{key_name}")
 }
 
+/// Parses a `"Mod4+Shift+Return"`-style combo string into modifiers plus the
+/// bare key name, accepting the modifier tokens in *any* order.
+///
+/// This matters because [`key_combo_string`]/[`Modifiers`]'s `Display` only
+/// ever produce one fixed order (Ctrl, Shift, Alt, Mod4) - but every
+/// shipped keybinding is written the conventional "Mod4+Shift+x" way
+/// (Super first, matching Hyprland's own `SUPER, SHIFT, x` convention).
+/// `srd.bind` used to store the combo string exactly as the Lua config
+/// wrote it, and dispatch always looked it up by the canonical
+/// Ctrl/Shift/Alt/Mod4 order built from the real keypress - so any
+/// binding combining more than one modifier in a different order than that
+/// fixed one could never fire: X11 grabbed the physical key correctly
+/// (`grab_keybindings` already parsed order-independently, duplicating
+/// this logic) but dispatch found nothing to run, and on Wayland the combo
+/// was not even recognized as bound at all, so the keypress was forwarded
+/// straight to the focused client instead of reaching srdwm. Confirmed
+/// against the shipped `keybindings.lua`: every multi-modifier binding
+/// there (`Mod4+Shift+*`, `Mod4+Ctrl+k`, `Alt+Shift+Tab`, ...) is written
+/// Super/Alt-first, which never matched the canonical order. Returns
+/// `None` for an empty combo (no key name at all).
+pub fn parse_key_combo(combo: &str) -> Option<(Modifiers, &str)> {
+    let parts: Vec<&str> = combo.split('+').collect();
+    let (key_name, mod_parts) = parts.split_last()?;
+    let mut modifiers = Modifiers::empty();
+    for m in mod_parts {
+        modifiers |= match *m {
+            "Ctrl" => Modifiers::CTRL,
+            "Shift" => Modifiers::SHIFT,
+            "Alt" => Modifiers::ALT,
+            "Mod4" | "Super" => Modifiers::SUPER,
+            _ => Modifiers::empty(),
+        };
+    }
+    Some((modifiers, key_name))
+}
+
+/// Re-orders a combo string into the canonical form [`key_combo_string`]
+/// produces, regardless of what order its modifiers were written in.
+/// Unparseable input (empty string) is returned unchanged, so a caller that
+/// can't do anything better with it still has *something* to store/log.
+pub fn canonicalize_key_combo(combo: &str) -> String {
+    match parse_key_combo(combo) {
+        Some((modifiers, key_name)) => key_combo_string(modifiers, key_name),
+        None => combo.to_string(),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Event {
     WindowCreated(WindowId),
@@ -67,4 +114,67 @@ pub enum Event {
     /// can lock and suspend, which is otherwise impossible: a laptop that
     /// does nothing on lid-close is a real problem, not a nicety.
     LidSwitch { closed: bool },
+    /// `WindowManager::current_workspace` changed. Carries no id: every
+    /// consumer that cares (`main.rs`'s `sync()`) re-reads whichever
+    /// workspace is current now rather than trusting a stale snapshot from
+    /// whenever this event was queued.
+    ///
+    /// Exists purely so `sync()` actually runs after a switch - without a
+    /// `dirty`-setting event, `WindowManager::switch_workspace` alone only
+    /// changes core's own bookkeeping; nothing shows or hides a single
+    /// window for the new workspace until `sync()` runs, which only
+    /// happens when a polled event sets `dirty`. Every switch path (a
+    /// keybinding, `SUPER`+scroll, the `ext_workspace_v1` protocol's
+    /// `activate` request) needs this pushed after it changes
+    /// `current_workspace`, or the switch is invisible.
+    WorkspaceChanged,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn super_first_combo_canonicalizes_to_dispatch_order() {
+        // The shipped keybindings.lua writes every combo Super-first
+        // ("Mod4+Shift+m"), matching Hyprland's own convention - but
+        // `key_combo_string`'s Display order is fixed Ctrl/Shift/Alt/Mod4.
+        // A binding registered under its literal Lua string could never be
+        // found by a real keypress, which always dispatches through the
+        // canonical order. This is exactly the bug `canonicalize_key_combo`
+        // exists to close.
+        assert_eq!(canonicalize_key_combo("Mod4+Shift+m"), "Shift+Mod4+m");
+        assert_eq!(canonicalize_key_combo("Mod4+Ctrl+k"), "Ctrl+Mod4+k");
+        assert_eq!(canonicalize_key_combo("Alt+Shift+Tab"), "Shift+Alt+Tab");
+    }
+
+    #[test]
+    fn already_canonical_combo_is_unchanged() {
+        assert_eq!(canonicalize_key_combo("Ctrl+Mod4+k"), "Ctrl+Mod4+k");
+    }
+
+    #[test]
+    fn single_modifier_combo_is_unaffected() {
+        // No ordering ambiguity with one modifier - this case always
+        // worked, before and after the fix.
+        assert_eq!(canonicalize_key_combo("Mod4+Return"), "Mod4+Return");
+    }
+
+    #[test]
+    fn parse_key_combo_accepts_modifiers_in_any_order() {
+        let (mods, key) = parse_key_combo("Mod4+Shift+m").unwrap();
+        assert_eq!(key, "m");
+        assert!(mods.contains(Modifiers::SUPER) && mods.contains(Modifiers::SHIFT));
+
+        let (mods2, key2) = parse_key_combo("Shift+Mod4+m").unwrap();
+        assert_eq!(key2, "m");
+        assert_eq!(mods, mods2);
+    }
+
+    #[test]
+    fn parse_key_combo_with_no_modifiers_is_bare_key() {
+        let (mods, key) = parse_key_combo("Return").unwrap();
+        assert_eq!(key, "Return");
+        assert_eq!(mods, Modifiers::empty());
+    }
 }

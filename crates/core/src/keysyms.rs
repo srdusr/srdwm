@@ -21,6 +21,7 @@ pub fn keysym_to_name(keysym: u32) -> Option<String> {
         0xff56 => "Next".to_string(),
         0xff50 => "Home".to_string(),
         0xff57 => "End".to_string(),
+        0xff61 => "Print".to_string(),
         0xffbe..=0xffc9 => format!("F{}", keysym - 0xffbe + 1),
         // Laptop/media keys. Values taken from the system's own
         // <X11/XF86keysym.h>, not guessed - a wrong constant here fails
@@ -61,6 +62,7 @@ pub fn name_to_keysym(name: &str) -> Option<u32> {
         "next" | "pagedown" => return Some(0xff56),
         "home" => return Some(0xff50),
         "end" => return Some(0xff57),
+        "print" => return Some(0xff61),
         // Must stay in sync with `keysym_to_name` above: the X11 backend
         // resolves names through here to pass to `XGrabKey`, so a key
         // missing from *this* direction can be pressed but never grabbed.
@@ -127,7 +129,7 @@ mod tests {
 
     #[test]
     fn named_keys_roundtrip() {
-        for name in ["Return", "Escape", "Tab", "Left", "Right", "Up", "Down", "F1", "F12"] {
+        for name in ["Return", "Escape", "Tab", "Left", "Right", "Up", "Down", "Print", "F1", "F12"] {
             let ks = name_to_keysym(name).unwrap();
             assert_eq!(keysym_to_name(ks), Some(name.to_string()));
         }
