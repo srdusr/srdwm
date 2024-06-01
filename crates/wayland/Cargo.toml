@@ -33,6 +33,7 @@ memmap2 = "0.9"
 # actually resolves to, so both see the same wire types.
 wayland-scanner = "0.31.10"
 wayland-backend = { version = "0.3.15", features = ["server_system"] }
+xcursor = "0.3.11"
 
 [dependencies.smithay]
 version = "0.7"

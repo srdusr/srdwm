@@ -12,21 +12,23 @@
 //! 1. **The client's own cursor surface** (`CursorImageStatus::Surface`) --
 //!    a terminal's I-beam, a browser's hand, an app's resize arrows. Drawn
 //!    from its surface tree, offset by the hotspot the client declared.
-//! 2. **A built-in arrow**, for when no client has set an image (over
-//!    srdwm's own decorations and the desktop) or asked for a named shape
-//!    we have no art for.
+//! 2. **The system's real XCursor theme arrow** (`load_theme_arrow`),
+//!    resolved from `XCURSOR_THEME`/`XCURSOR_SIZE` or, failing that, GTK's
+//!    own `gtk-cursor-theme-name`/`-size` - for when no client has set an
+//!    image (over srdwm's own decorations and the desktop) or asked for a
+//!    named shape we have no art for.
+//! 3. **A built-in hand-rasterized arrow**, only if theme loading found
+//!    nothing at all - no theme installed, an unreadable file, whatever.
+//!    A cursor that is always present beats a prettier one that sometimes
+//!    isn't there, the same reasoning as `decoration.rs`'s font fallback;
+//!    this is the same bitmap that used to be the *only* arrow.
 //!
 //! `CursorImageStatus::Hidden` is honoured, so a client that hides the
 //! pointer still gets its way. Named shapes we have dedicated art for
 //! (text entry, the four resize directions, crosshair, move, and the
-//! pointing-hand link-hover shape) render as that shape; anything else
-//! falls back to the arrow.
-//!
-//! The built-in arrow is deliberate rather than loading an XCursor theme:
-//! theme loading pulls in a dependency, needs a theme to actually be
-//! installed, and has a search-path fallback story of its own. A cursor that
-//! is always present beats a prettier one that sometimes isn't there - the
-//! same reasoning as `decoration.rs`'s font fallback.
+//! pointing-hand link-hover shape) still render as that hand-drawn shape,
+//! not a theme lookup - only the plain default arrow goes through theme
+//! resolution.
 
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::utils::{Logical, Point};
@@ -168,6 +170,10 @@ fn add_white_halo(buf: &mut [u8]) {
 #[derive(Clone)]
 pub(crate) struct CursorBuffers {
     pub(crate) arrow: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    /// `arrow`'s hotspot - (0, 0), the bitmap's top-left tip, for the
+    /// built-in fallback, but a real XCursor theme's own `xhot`/`yhot` when
+    /// `load_theme_arrow` found one. See that function's doc comment.
+    pub(crate) arrow_hotspot: (i32, i32),
     pub(crate) text: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
     pub(crate) ns_resize: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
     pub(crate) ew_resize: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
@@ -368,8 +374,21 @@ fn upload(data: Vec<u8>) -> smithay::backend::renderer::element::memory::MemoryR
 pub(crate) const CENTERED_HOTSPOT: (i32, i32) = (CURSOR_SIZE / 2, CURSOR_SIZE / 2);
 
 pub(crate) fn make_buffers() -> CursorBuffers {
+    let (arrow, arrow_hotspot) = match load_theme_arrow() {
+        Some(theme_arrow) => {
+            use smithay::backend::allocator::Fourcc;
+            use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
+            use smithay::utils::Transform;
+            (
+                MemoryRenderBuffer::from_slice(&theme_arrow.bgra, Fourcc::Argb8888, theme_arrow.size, 1, Transform::Normal, None),
+                theme_arrow.hotspot,
+            )
+        }
+        None => (make_buffer(), (0, 0)),
+    };
     CursorBuffers {
-        arrow: make_buffer(),
+        arrow,
+        arrow_hotspot,
         text: upload(text_bitmap()),
         ns_resize: upload(straight_resize_bitmap(false)),
         ew_resize: upload(straight_resize_bitmap(true)),
@@ -445,8 +464,11 @@ where
     // No client image. A named shape we have dedicated art for gets it
     // (centered on the pointer - these are all symmetric shapes, unlike
     // the arrow); anything else (Default, or one of the many shapes we
-    // don't draw, e.g. Grab/Pointer/Crosshair) falls back to the arrow,
-    // whose hotspot is its tip instead, at the origin.
+    // don't draw, e.g. Grab/Pointer/Crosshair) falls back to the arrow.
+    // The arrow's own hotspot is `buffers.arrow_hotspot` - (0, 0), the
+    // bitmap's tip, for the built-in fallback, but a real theme's `xhot`/
+    // `yhot` (not necessarily the top-left corner at all) when
+    // `load_theme_arrow` found one.
     let (buffer, at) = match status {
         CursorImageStatus::Named(icon) => match icon {
             CursorIcon::Text | CursorIcon::VerticalText => {
@@ -467,9 +489,9 @@ where
             CursorIcon::Crosshair => (&buffers.crosshair, (local.0 - CENTERED_HOTSPOT.0, local.1 - CENTERED_HOTSPOT.1)),
             CursorIcon::Move => (&buffers.move_icon, (local.0 - CENTERED_HOTSPOT.0, local.1 - CENTERED_HOTSPOT.1)),
             CursorIcon::Pointer => (&buffers.pointer, (local.0 - POINTER_HOTSPOT.0, local.1 - POINTER_HOTSPOT.1)),
-            _ => (&buffers.arrow, (local.0, local.1)),
+            _ => (&buffers.arrow, (local.0 - buffers.arrow_hotspot.0, local.1 - buffers.arrow_hotspot.1)),
         },
-        _ => (&buffers.arrow, (local.0, local.1)),
+        _ => (&buffers.arrow, (local.0 - buffers.arrow_hotspot.0, local.1 - buffers.arrow_hotspot.1)),
     };
     let at = (at.0 as f64, at.1 as f64);
     match MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Cursor) {
@@ -482,8 +504,106 @@ where
 }
 
 
+/// Resolves which XCursor theme to load the real arrow from, and at what
+/// size.
+///
+/// `XCURSOR_THEME`/`XCURSOR_SIZE` are the standard override, but nothing
+/// sets them on a session started this way (confirmed live) - so the
+/// fallback below, reading GTK's own `gtk-cursor-theme-name`/
+/// `gtk-cursor-theme-size` straight out of `settings.ini`, is what actually
+/// resolves the theme apps on the same session are themed with in practice.
+/// Without it, `xcursor::CursorTheme::load`'s own search lands on
+/// `/usr/share/icons/default/index.theme`, which inherits Adwaita on a
+/// machine with no `~/.icons/default` override - not what GTK reports
+/// (confirmed live: Sweet-cursors), so the compositor's own pointer would
+/// keep not matching every app's client-drawn cursor even after this.
+fn theme_and_size() -> (String, u32) {
+    if let Ok(theme) = std::env::var("XCURSOR_THEME") {
+        if !theme.is_empty() {
+            let size = std::env::var("XCURSOR_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(CURSOR_SIZE as u32);
+            return (theme, size);
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let settings = std::path::Path::new(&home).join(".config/gtk-3.0/settings.ini");
+        if let Ok(contents) = std::fs::read_to_string(&settings) {
+            let mut name = None;
+            let mut size = None;
+            for line in contents.lines() {
+                let line = line.trim();
+                if let Some(v) = line.strip_prefix("gtk-cursor-theme-name=") {
+                    name = Some(v.trim().to_string());
+                } else if let Some(v) = line.strip_prefix("gtk-cursor-theme-size=") {
+                    size = v.trim().parse().ok();
+                }
+            }
+            if let Some(name) = name {
+                return (name, size.unwrap_or(CURSOR_SIZE as u32));
+            }
+        }
+    }
+    ("default".to_string(), CURSOR_SIZE as u32)
+}
+
+/// A loaded XCursor image, converted to what `make_buffers` needs to upload
+/// it: BGRA8888 pixels, pixel dimensions, and hotspot.
+struct ThemeArrow {
+    bgra: Vec<u8>,
+    size: (i32, i32),
+    hotspot: (i32, i32),
+}
+
+/// Loads the real arrow cursor (`left_ptr`) from the resolved XCursor theme,
+/// picking whichever bundled nominal size is closest to the target.
+///
+/// Converts pixels from the crate's RGBA byte order (`Image::pixels_rgba`,
+/// straight off disk) to the BGRA order every buffer in this file uses for
+/// `Fourcc::Argb8888` - see `arrow_bitmap`'s own per-pixel byte order.
+/// XCursor pixel data is already premultiplied alpha per the file format
+/// spec, same as every bitmap built here, so only the channel order needs
+/// converting, not the alpha itself.
+///
+/// Returns `None` on any failure - theme or icon not found, corrupt file,
+/// a pixel count that doesn't match the declared dimensions - so the
+/// caller falls back to the built-in bitmap arrow, which is the entire
+/// reason that fallback exists: see this module's own doc comment.
+fn load_theme_arrow() -> Option<ThemeArrow> {
+    let (theme, size) = theme_and_size();
+    let path = xcursor::CursorTheme::load(&theme).load_icon("left_ptr")?;
+    let bytes = std::fs::read(&path).ok()?;
+    let images = xcursor::parser::parse_xcursor(&bytes)?;
+    let image = images.into_iter().min_by_key(|img| (img.size as i64 - size as i64).abs())?;
+    if image.width == 0 || image.height == 0 || image.pixels_rgba.len() != (image.width * image.height * 4) as usize {
+        return None;
+    }
+    Some(ThemeArrow {
+        bgra: rgba_to_bgra(&image.pixels_rgba),
+        size: (image.width as i32, image.height as i32),
+        hotspot: (image.xhot as i32, image.yhot as i32),
+    })
+}
+
+/// Per-pixel R,G,B,A -> B,G,R,A channel reorder - the byte order `Fourcc::
+/// Argb8888` buffers use everywhere else in this file (see `arrow_bitmap`'s
+/// own doc comment), versus the straight-off-disk order `xcursor::parser`
+/// hands back in `Image::pixels_rgba`. Alpha is untouched: XCursor pixel
+/// data is already premultiplied per the file format spec, same as every
+/// bitmap built here.
+fn rgba_to_bgra(pixels_rgba: &[u8]) -> Vec<u8> {
+    let mut bgra = Vec::with_capacity(pixels_rgba.len());
+    for px in pixels_rgba.chunks_exact(4) {
+        bgra.push(px[2]);
+        bgra.push(px[1]);
+        bgra.push(px[0]);
+        bgra.push(px[3]);
+    }
+    bgra
+}
+
 /// The built-in arrow as an uploadable buffer. Built once at startup rather
-/// than per frame - the bitmap never changes.
+/// than per frame - the bitmap never changes. Kept as a fallback for when
+/// `load_theme_arrow` finds nothing - see this module's doc comment on why
+/// a cursor that's always present beats a prettier one that sometimes isn't.
 pub(crate) fn make_buffer() -> smithay::backend::renderer::element::memory::MemoryRenderBuffer {
     use smithay::backend::allocator::Fourcc;
     use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -494,6 +614,21 @@ pub(crate) fn make_buffer() -> smithay::backend::renderer::element::memory::Memo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rgba_to_bgra_reorders_channels_and_leaves_alpha_alone() {
+        // Same fixture xcursor's own rgba_to_argb test uses, so the two
+        // conversions are easy to cross-check by eye: R=0x12, G=0x34,
+        // B=0x56, A=0x78.
+        let rgba = [0x12, 0x34, 0x56, 0x78];
+        assert_eq!(rgba_to_bgra(&rgba), vec![0x56, 0x34, 0x12, 0x78]);
+    }
+
+    #[test]
+    fn rgba_to_bgra_handles_multiple_pixels_independently() {
+        let rgba = [0x01, 0x02, 0x03, 0x04, 0xaa, 0xbb, 0xcc, 0xdd];
+        assert_eq!(rgba_to_bgra(&rgba), vec![0x03, 0x02, 0x01, 0x04, 0xcc, 0xbb, 0xaa, 0xdd]);
+    }
 
     #[test]
     fn arrow_is_the_expected_size_and_has_an_opaque_tip() {
