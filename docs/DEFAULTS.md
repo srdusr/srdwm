@@ -13,6 +13,8 @@ srd.set("general.window_gap", 8)                       -- Default: 8
 srd.set("general.border_width", 2)                     -- Default: 2
 srd.set("general.animations", true)                    -- Default: true
 srd.set("general.animation_duration", 200)             -- Default: 200ms
+srd.set("general.shadows", true)                       -- Default: true
+srd.set("general.resize_margin", 6)                    -- Default: 6px
 srd.set("general.focus_follows_mouse", false)          -- Default: false
 srd.set("general.mouse_follows_focus", true)           -- Default: true
 srd.set("general.auto_raise", false)                   -- Default: false

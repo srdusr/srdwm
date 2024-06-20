@@ -933,6 +933,7 @@ fn validate(s: &SharedState) -> Vec<String> {
     check_range("general.border_width", 0.0, 20.0);
     check_range("theme.decorations.border.width", 0.0, 20.0);
     check_range("general.animation_duration", 0.0, 1000.0);
+    check_range("general.resize_margin", 1.0, 50.0);
     check_range("performance.max_fps", 30.0, 240.0);
     check_range("performance.window_cache_size", 10.0, 10000.0);
 
@@ -989,6 +990,8 @@ fn default_config() -> HashMap<String, ConfigValue> {
     set("general.border_width", Number(2.0));
     set("general.animations", Bool(true));
     set("general.animation_duration", Number(200.0));
+    set("general.shadows", Bool(true));
+    set("general.resize_margin", Number(6.0));
     set("general.focus_follows_mouse", Bool(false));
     set("general.mouse_follows_focus", Bool(true));
     set("general.auto_raise", Bool(false));

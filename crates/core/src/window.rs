@@ -147,15 +147,25 @@ impl Window {
 /// The height, in pixels, of the drawn title bar. Shared between backends so
 /// hit-testing and rendering agree on the same band.
 pub const TITLEBAR_HEIGHT: u32 = 30;
-/// Width of the resize grab band along each window edge.
+/// Default width, in pixels, of the resize grab band along each window
+/// edge - `WindowManager::resize_margin`'s starting value, read from
+/// `general.resize_margin`, and what every `hit_test` call in this file's
+/// own tests still passes directly.
 ///
-/// 10px rather than a hairline: this is grabbed with a mouse, and a border
-/// only a couple of pixels wide is genuinely hard to hit - which is why
-/// Hyprland ships `extend_border_grab_area` and why every desktop widens
-/// this beyond the visible border. The band is inside the window, so it
-/// costs a few pixels of client edge; that is the right trade for making
-/// resize reliably grabbable without a keyboard.
-pub const RESIZE_MARGIN: i32 = 10;
+/// Originally 10px on the reasoning that a border only a couple of pixels
+/// wide is genuinely hard to grab with a mouse - which is why Hyprland
+/// ships `extend_border_grab_area` and why every desktop widens this
+/// beyond the visible border. But the band is *inside* the window
+/// (`resize_edge_at` measures from `frame`, the client's own content rect,
+/// inward), and at 10px that traded too much: reported live as ordinary
+/// clicks near any edge - a link near a browser's edge, a button near a
+/// panel's edge - regularly landing as a resize-edge grab instead of
+/// reaching the client at all, not just an occasional near-miss. Halved to
+/// 6px, which is still comfortably grabbable (about the same as a native
+/// X11 border on a legacy WM) while giving content much more of its own
+/// edge back. Still configurable per the doc comment above if 6px turns
+/// out to be too little in the other direction for someone.
+pub const RESIZE_MARGIN: i32 = 6;
 /// Top-edge resize margin for an *undecorated* window specifically --
 /// narrower than [`RESIZE_MARGIN`] on purpose.
 ///
@@ -206,7 +216,7 @@ impl ResizeEdge {
     /// client. Resize-from-edge still applies either way: an undecorated
     /// window is still a window, and dragging its (invisible) edge to
     /// resize is still expected to work.
-    pub fn hit_test(frame: Rect, x: i32, y: i32, decorated: bool, border_width: u32) -> Option<TitlebarHit> {
+    pub fn hit_test(frame: Rect, x: i32, y: i32, decorated: bool, border_width: u32, resize_margin: i32) -> Option<TitlebarHit> {
         // Border strips render *outside* `frame` (`decoration::
         // border_strips`, `border_width` pixels past each edge) - without
         // widening the containment check to match, those visible pixels
@@ -236,12 +246,12 @@ impl ResizeEdge {
             }
             return Some(TitlebarHit::Drag);
         }
-        let edge = Self::resize_edge_at(frame, x, y, decorated)?;
+        let edge = Self::resize_edge_at(frame, x, y, decorated, resize_margin)?;
         Some(TitlebarHit::Resize(edge))
     }
 
-    fn resize_edge_at(frame: Rect, x: i32, y: i32, decorated: bool) -> Option<ResizeEdge> {
-        let m = RESIZE_MARGIN;
+    fn resize_edge_at(frame: Rect, x: i32, y: i32, decorated: bool, resize_margin: i32) -> Option<ResizeEdge> {
+        let m = resize_margin;
         let top_m = if decorated { m } else { UNDECORATED_TOP_RESIZE_MARGIN };
         let near_left = x <= frame.x + m;
         let near_right = x >= frame.right() - m;
@@ -318,14 +328,14 @@ mod tests {
     #[test]
     fn close_button_is_top_right_corner_of_titlebar() {
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - 5, f.y + 5, true, 0);
+        let hit = ResizeEdge::hit_test(f, f.right() - 5, f.y + 5, true, 0, RESIZE_MARGIN);
         assert_eq!(hit, Some(TitlebarHit::Close));
     }
 
     #[test]
     fn maximize_is_left_of_close() {
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - TITLEBAR_HEIGHT as i32 - 5, f.y + 5, true, 0);
+        let hit = ResizeEdge::hit_test(f, f.right() - TITLEBAR_HEIGHT as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN);
         assert_eq!(hit, Some(TitlebarHit::Maximize));
     }
 
@@ -333,14 +343,14 @@ mod tests {
     fn middle_of_titlebar_is_drag() {
         let f = frame();
         let (cx, _) = f.center();
-        let hit = ResizeEdge::hit_test(f, cx, f.y + 5, true, 0);
+        let hit = ResizeEdge::hit_test(f, cx, f.y + 5, true, 0, RESIZE_MARGIN);
         assert_eq!(hit, Some(TitlebarHit::Drag));
     }
 
     #[test]
     fn bottom_right_corner_is_resize() {
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.bottom() - 1, true, 0);
+        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.bottom() - 1, true, 0, RESIZE_MARGIN);
         assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::BottomRight)));
     }
 
@@ -357,7 +367,7 @@ mod tests {
         // outside RESIZE_MARGIN, so a real resize edge can't also explain a
         // `None` here - undecorated, this must not be treated as
         // decoration (or a resize edge) at all, just plain content.
-        let hit = ResizeEdge::hit_test(f, cx, f.y + 20, false, 0);
+        let hit = ResizeEdge::hit_test(f, cx, f.y + 20, false, 0, RESIZE_MARGIN);
         assert_eq!(hit, None);
     }
 
@@ -365,7 +375,7 @@ mod tests {
     fn undecorated_window_still_resizes_from_every_edge_including_top() {
         let f = frame();
         let (cx, _) = f.center();
-        let hit = ResizeEdge::hit_test(f, cx, f.y + 1, false, 0);
+        let hit = ResizeEdge::hit_test(f, cx, f.y + 1, false, 0, RESIZE_MARGIN);
         assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::Top)));
     }
 
@@ -381,9 +391,9 @@ mod tests {
         // above where `RESIZE_MARGIN` even starts to matter.
         let f = frame();
         let (cx, _) = f.center();
-        assert_eq!(ResizeEdge::hit_test(f, cx, f.y + 5, false, 0), None, "5px in: past the narrow undecorated band, must reach the client");
+        assert_eq!(ResizeEdge::hit_test(f, cx, f.y + 5, false, 0, RESIZE_MARGIN), None, "5px in: past the narrow undecorated band, must reach the client");
         assert_eq!(
-            ResizeEdge::hit_test(f, cx, f.y + 5, true, 0),
+            ResizeEdge::hit_test(f, cx, f.y + 5, true, 0, RESIZE_MARGIN),
             Some(TitlebarHit::Drag),
             "decorated: 5px in is still well inside the titlebar band, not a resize edge"
         );
@@ -392,7 +402,7 @@ mod tests {
     #[test]
     fn outside_frame_is_none() {
         let f = frame();
-        assert_eq!(ResizeEdge::hit_test(f, 0, 0, true, 0), None);
+        assert_eq!(ResizeEdge::hit_test(f, 0, 0, true, 0, RESIZE_MARGIN), None);
     }
 
     #[test]
@@ -407,16 +417,16 @@ mod tests {
         let border_width = 2;
         // One pixel into the border strip, past the left edge.
         let x = f.x - 1;
-        assert_eq!(ResizeEdge::hit_test(f, x, cy, true, 0), None, "sanity check: with no border, this point really is outside the window");
+        assert_eq!(ResizeEdge::hit_test(f, x, cy, true, 0, RESIZE_MARGIN), None, "sanity check: with no border, this point really is outside the window");
         assert_eq!(
-            ResizeEdge::hit_test(f, x, cy, true, border_width),
+            ResizeEdge::hit_test(f, x, cy, true, border_width, RESIZE_MARGIN),
             Some(TitlebarHit::Resize(ResizeEdge::Left)),
             "one pixel into the actual drawn border must still register as the left edge"
         );
         // Just past the border entirely (border_width + 1 outside frame) is
         // still nothing - the fix widens the dead zone's boundary, it
         // doesn't remove it.
-        assert_eq!(ResizeEdge::hit_test(f, f.x - border_width as i32 - 1, cy, true, border_width), None);
+        assert_eq!(ResizeEdge::hit_test(f, f.x - border_width as i32 - 1, cy, true, border_width, RESIZE_MARGIN), None);
     }
 
     #[test]

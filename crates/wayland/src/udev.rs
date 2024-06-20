@@ -312,6 +312,25 @@ impl CompState {
                     // windows) has to agree with what `sync_geometry` mapped
                     // the content to, or they drift apart again.
                     let geom = self.window_anims.get(&id).map(crate::state::WindowAnim::current_rect).unwrap_or(w.geometry);
+                    // Drawn first among this window's own decoration, and
+                    // positioned from the same animated `geom` as everything
+                    // else here - not `w.geometry` - for the identical
+                    // reason: a shadow that stayed at the pre-tween rect
+                    // while the window slid past it would look exactly as
+                    // detached as the border did before that fix. Not
+                    // fragment-clipped against `occluders` like the titlebar/
+                    // border below: at `SHADOW_MAX_ALPHA`'s low opacity, a
+                    // shadow bleeding slightly onto a window stacked in front
+                    // of this one reads as a soft edge, not the hard-line
+                    // bleed-through that made the titlebar/border need it.
+                    if let Some(shadow) = self.shadow_buffers.get(&id) {
+                        let rect = decoration::shadow_rect(geom);
+                        let pos = ((rect.x - origin.x) as f64, (rect.y - origin.y) as f64);
+                        match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, shadow, None, None, None, Kind::Unspecified) {
+                            Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                            Err(e) => log::warn!("udev: failed to import shadow buffer: {e}"),
+                        }
+                    }
                     if let Some(deco) = self.decorations.get(&id) {
                         // Fragment-clipped, same as the three solid border
                         // strips below - an *all-or-nothing* version of
@@ -996,6 +1015,7 @@ impl UdevPlatform {
             dead_layer_surfaces: HashSet::new(),
             decorations: HashMap::new(),
             border_top_decorations: HashMap::new(),
+            shadow_buffers: HashMap::new(),
             border_side_buffers: HashMap::new(),
             last_synced_size: HashMap::new(),
             pending: pending.clone(),

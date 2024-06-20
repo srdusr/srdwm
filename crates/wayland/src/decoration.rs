@@ -182,6 +182,92 @@ pub fn border_strips(geometry: srdwm_core::Rect, width: u32) -> [srdwm_core::Rec
     ]
 }
 
+/// How far a window's drop shadow extends past its geometry on each side.
+pub const SHADOW_SIZE: u32 = 12;
+
+/// The shadow's darkest alpha, right at the window's own edge - out of
+/// 255. Deliberately subtle (Nord/GNOME-default territory, not a heavy
+/// drop shadow): this compositor has no blur primitive to soften it with
+/// (see `shadow_bitmap`'s own doc comment), so a strong value would read as
+/// a hard dark ring rather than a shadow.
+const SHADOW_MAX_ALPHA: u8 = 90;
+
+/// `geometry` expanded by [`SHADOW_SIZE`] on every side - the full bounding
+/// box [`shadow_bitmap`] rasterises into, and where the caller positions it
+/// (top-left corner at `(geometry.x - SHADOW_SIZE, geometry.y - SHADOW_SIZE)`).
+pub fn shadow_rect(geometry: srdwm_core::Rect) -> srdwm_core::Rect {
+    let s = SHADOW_SIZE as i32;
+    srdwm_core::Rect::new(geometry.x - s, geometry.y - s, geometry.width + SHADOW_SIZE * 2, geometry.height + SHADOW_SIZE * 2)
+}
+
+/// Renders a window's drop shadow as a BGRA8 bitmap: black at an alpha that
+/// falls off linearly from [`SHADOW_MAX_ALPHA`] right at the window's own
+/// edge to fully transparent [`SHADOW_SIZE`] pixels out. `win_width`/
+/// `win_height` are the window's own footprint (`geometry`, border strips
+/// included if any - whatever the caller already draws as opaque); the
+/// returned bitmap is `shadow_rect`'s size, `SHADOW_SIZE` larger on every
+/// side.
+///
+/// Not a true Gaussian blur - no blur primitive is available without a GPU
+/// shader (the udev backend's `PixmanRenderer` is software-only) or a new
+/// image-processing dependency - so this is a stepless *linear* falloff
+/// using Chebyshev (square-ring) distance from the window's edge rather
+/// than a rounded/radial one, cheap enough to rebuild on every resize (see
+/// the caller for when that is) without a per-pixel sqrt. Reads as "soft
+/// enough" at the sizes a titlebar-height window actually uses, the same
+/// "approximate cutoff over true anti-aliasing" trade-off `round_top_corners`
+/// already makes for corners.
+///
+/// The region directly under the window itself (`dist == 0` below) is left
+/// fully transparent rather than filled - harmless either way since the
+/// window's own border/titlebar/content always draws over it, but skipping
+/// it is one less branch of work for the common case (a window with no
+/// occluders in front of it, so most of the bitmap's interior never
+/// contributes a visible pixel).
+pub fn shadow_bitmap(win_width: u32, win_height: u32) -> Vec<u8> {
+    let (win_width, win_height) = (win_width.max(1), win_height.max(1));
+    let width = win_width + SHADOW_SIZE * 2;
+    let height = win_height + SHADOW_SIZE * 2;
+    let mut buf = vec![0u8; (width * height * 4) as usize];
+    for y in 0..height {
+        let dy = edge_distance(y, SHADOW_SIZE, win_height);
+        if dy > SHADOW_SIZE {
+            continue;
+        }
+        for x in 0..width {
+            let dx = edge_distance(x, SHADOW_SIZE, win_width);
+            let dist = dx.max(dy);
+            if dist == 0 || dist > SHADOW_SIZE {
+                continue;
+            }
+            let alpha = (SHADOW_MAX_ALPHA as u32 * (SHADOW_SIZE - dist) / SHADOW_SIZE) as u8;
+            if alpha == 0 {
+                continue;
+            }
+            let i = ((y * width + x) * 4) as usize;
+            // Premultiplied BGRA, but the colour is black (0, 0, 0) - a
+            // premultiplied black pixel is just (0, 0, 0, alpha) at any
+            // alpha, so there's no separate multiply step needed here.
+            buf[i + 3] = alpha;
+        }
+    }
+    buf
+}
+
+/// How far outside `[margin, margin + extent)` - the window's own span
+/// along one axis, inside the shadow's `margin`-pixel border on each side
+/// - position `pos` sits, in pixels. `0` anywhere inside that span
+/// (including exactly on its edge).
+fn edge_distance(pos: u32, margin: u32, extent: u32) -> u32 {
+    if pos < margin {
+        margin - pos
+    } else if pos >= margin + extent {
+        pos - (margin + extent) + 1
+    } else {
+        0
+    }
+}
+
 /// Renders the top border strip (`border_strips`'s first rect) as a BGRA8
 /// bitmap instead of a plain solid fill, with its own outer top corners cut
 /// the same way `render_titlebar`'s `round_corners` cuts the titlebar's --
@@ -430,6 +516,44 @@ mod tests {
     }
 
     #[test]
+    fn shadow_rect_expands_geometry_by_shadow_size_on_every_side() {
+        let geom = srdwm_core::Rect::new(100, 100, 200, 150);
+        let s = shadow_rect(geom);
+        assert_eq!(s, srdwm_core::Rect::new(100 - SHADOW_SIZE as i32, 100 - SHADOW_SIZE as i32, 200 + SHADOW_SIZE * 2, 150 + SHADOW_SIZE * 2));
+    }
+
+    #[test]
+    fn shadow_bitmap_is_the_expected_size_and_transparent_under_the_window() {
+        let buf = shadow_bitmap(40, 20);
+        let width = 40 + SHADOW_SIZE * 2;
+        let height = 20 + SHADOW_SIZE * 2;
+        assert_eq!(buf.len(), (width * height * 4) as usize);
+        // Dead center is inside the window's own footprint - must stay
+        // fully transparent, since the window's own content draws over it.
+        let mid = ((height / 2) * width + width / 2) * 4;
+        assert_eq!(buf[mid as usize + 3], 0);
+    }
+
+    #[test]
+    fn shadow_bitmap_is_darkest_right_at_the_window_edge_and_fades_outward() {
+        let buf = shadow_bitmap(40, 20);
+        let width = (40 + SHADOW_SIZE * 2) as usize;
+        // Walking straight up from the window's horizontal center, from one
+        // pixel above its top edge (row SHADOW_SIZE - 1) out to the shadow's
+        // own outer edge (row 0): alpha must start near SHADOW_MAX_ALPHA and
+        // strictly decrease to 0.
+        let x = width / 2;
+        let mut last_alpha = 255u8;
+        for row in (0..SHADOW_SIZE as usize).rev() {
+            let i = (row * width + x) * 4;
+            let alpha = buf[i + 3];
+            assert!(alpha <= last_alpha, "alpha rose from {last_alpha} to {alpha} moving outward at row {row}");
+            last_alpha = alpha;
+        }
+        assert_eq!(last_alpha, 0, "outermost row must be fully transparent");
+    }
+
+    #[test]
     fn fills_background_when_no_text() {
         let buf = render_titlebar(40, 20, "", (0x2e, 0x34, 0x40), (0xec, 0xef, 0xf4), true);
         assert_eq!(buf.len(), 40 * 20 * 4);
@@ -465,7 +589,11 @@ mod tests {
             assert!(drawn, "expected some drawn icon pixel inside the right_offset={right_offset} square");
             let cx = (x0 + x1) / 2;
             let cy = (y0 + y1) / 2;
-            assert_eq!(srdwm_core::ResizeEdge::hit_test(frame, cx, cy, true, 0), Some(expected), "icon drawn at right_offset={right_offset} does not land in the square hit_test assigns to {expected:?}");
+            assert_eq!(
+                srdwm_core::ResizeEdge::hit_test(frame, cx, cy, true, 0, srdwm_core::RESIZE_MARGIN),
+                Some(expected),
+                "icon drawn at right_offset={right_offset} does not land in the square hit_test assigns to {expected:?}"
+            );
         }
     }
 

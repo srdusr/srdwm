@@ -4,7 +4,7 @@ use crate::monitor::{Monitor, MonitorId};
 use crate::placement::{PlacementConfig, SmartPlacement, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
 use crate::rules::WindowRule;
 use crate::theme::ThemeConfig;
-use crate::window::{ResizeEdge, TitlebarHit, Window, WindowId};
+use crate::window::{ResizeEdge, TitlebarHit, Window, WindowId, RESIZE_MARGIN};
 use crate::workspace::{Workspace, WorkspaceId};
 use std::collections::HashMap;
 
@@ -61,6 +61,15 @@ pub struct WindowManager {
     pub animations_enabled: bool,
     /// Tween duration in milliseconds, read from `general.animation_duration`.
     pub animation_duration_ms: u32,
+    /// Whether windows get a drop shadow. Read from `general.shadows`. A
+    /// maximized or fullscreen window never gets one regardless of this --
+    /// see the Wayland backend's shadow render call site - so this only
+    /// ever turns it off entirely, not on for those.
+    pub shadows_enabled: bool,
+    /// Width, in pixels, of the resize grab band along a window's edges,
+    /// read from `general.resize_margin`. See [`crate::window::RESIZE_MARGIN`]'s
+    /// doc comment for the default and why it's what it is.
+    pub resize_margin: i32,
     /// Default decoration colours and border width, read from `theme.colors.*`/
     /// `theme.decorations.*`. See `ThemeConfig`'s own doc comment.
     pub theme: ThemeConfig,
@@ -103,6 +112,8 @@ impl WindowManager {
             placement: PlacementConfig::default(),
             animations_enabled: true,
             animation_duration_ms: 200,
+            shadows_enabled: true,
+            resize_margin: RESIZE_MARGIN,
             theme: ThemeConfig::default(),
             drag: None,
             resize: None,
@@ -759,7 +770,7 @@ impl WindowManager {
             if w.minimized {
                 continue;
             }
-            if let Some(hit) = ResizeEdge::hit_test(w.geometry, x, y, w.decorated, w.border_width) {
+            if let Some(hit) = ResizeEdge::hit_test(w.geometry, x, y, w.decorated, w.border_width, self.resize_margin) {
                 return Some((w.id, hit));
             }
         }

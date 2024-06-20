@@ -228,6 +228,7 @@ impl WaylandPlatform {
             dead_layer_surfaces: HashSet::new(),
             decorations: HashMap::new(),
             border_top_decorations: HashMap::new(),
+            shadow_buffers: HashMap::new(),
             border_side_buffers: HashMap::new(),
             last_synced_size: HashMap::new(),
             pending: pending.clone(),
@@ -397,6 +398,17 @@ impl WaylandPlatform {
             // (reported live as the border "not flush" with the window
             // during an animated maximize/fullscreen/open-slide transition).
             let geom = self.state.window_anims.get(&id).map(crate::state::WindowAnim::current_rect).unwrap_or(w.geometry);
+            // Same reasoning as udev.rs's matching push: positioned from
+            // `geom`, not `w.geometry`, and not fragment-clipped against
+            // `occluders` - see that comment.
+            if let Some(shadow) = self.state.shadow_buffers.get(&id) {
+                let rect = decoration::shadow_rect(geom);
+                let pos = (rect.x as f64, rect.y as f64);
+                match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, shadow, None, None, None, Kind::Unspecified) {
+                    Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                    Err(e) => log::warn!("failed to import shadow buffer for window {id}: {e}"),
+                }
+            }
             if let Some(deco) = self.state.decorations.get(&id) {
                 // Fragment-clipped, same as udev.rs's matching titlebar
                 // push - see that comment for why all-or-nothing (skip

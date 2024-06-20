@@ -236,6 +236,18 @@ pub(crate) struct CompState {
     /// `elements::border_side_render_element`'s doc comment for the damage-
     /// tracking reason a per-frame rebuild was wrong in the first place.
     pub(crate) border_top_decorations: HashMap<WindowId, MemoryRenderBuffer>,
+    /// A window's drop-shadow bitmap (`decoration::shadow_bitmap`), cached
+    /// the same way and at the same trigger points as `border_top_decorations`
+    /// - rebuilt only on creation or a real size change, not per frame, for
+    /// the identical damage-tracking reason (a fresh `Id` every frame means
+    /// `OutputDamageTracker` never finds a previous-frame match, so the
+    /// shadow - like the border strips before this caching existed - would
+    /// mark itself fully damaged forever, keeping the output page-flipping
+    /// on an otherwise fully static screen). `None` for a maximized or
+    /// fullscreen window, or with `general.shadows` off - see the render
+    /// call site for why those don't get a shadow at all rather than a
+    /// zero-alpha one.
+    pub(crate) shadow_buffers: HashMap<WindowId, MemoryRenderBuffer>,
     /// Persistent solid-colour buffers backing a window's other three
     /// border strips (bottom, left, right - `decoration::border_strips`'
     /// order past index 0), reused by position every frame rather than
@@ -610,6 +622,23 @@ impl CompState {
         } else {
             self.border_top_decorations.remove(&id);
         }
+        // No shadow for a maximized/fullscreen window: it already reaches
+        // (or, for fullscreen, exceeds) the monitor's own edge, so there is
+        // nowhere for `SHADOW_SIZE` pixels of shadow to actually fall, and
+        // a shadow drawn there would either be clipped to nothing useful or
+        // - for a maximized window short of the true monitor edge - read
+        // as a shadow the window doesn't visually need. Matches the
+        // Hyprland/GNOME convention `MISSING.md` measures this compositor
+        // against.
+        let shadows_enabled = self.wm.borrow().shadows_enabled;
+        if shadows_enabled && !w.maximized && !w.fullscreen {
+            let data = decoration::shadow_bitmap(w.geometry.width, w.geometry.height);
+            let rect = decoration::shadow_rect(w.geometry);
+            let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (rect.width as i32, rect.height as i32), 1, Transform::Normal, None);
+            self.shadow_buffers.insert(id, buffer);
+        } else {
+            self.shadow_buffers.remove(&id);
+        }
     }
 
     pub(crate) fn remove_window(&mut self, surface: &WlSurface) {
@@ -619,6 +648,7 @@ impl CompState {
         }
         self.decorations.remove(&id);
         self.border_top_decorations.remove(&id);
+        self.shadow_buffers.remove(&id);
         self.border_side_buffers.remove(&id);
         self.last_synced_size.remove(&id);
         // A window closing (crash, kill, or its own menu's "Close" action
