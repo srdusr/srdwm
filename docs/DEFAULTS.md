@@ -214,6 +214,9 @@ srd.rule(matcher, actions)
   given together to take effect
 - `decorated` (bool)
 - `border_color` (`{r, g, b}`), `border_width` (number)
+- `pinned` (bool) - always-on-top
+- `opacity` (number, `0.0`..=`1.0`) - content opacity; srdwm's own
+  titlebar/border/shadow always stay fully opaque regardless
 
 ```lua
 srd.rule({ class = "pavucontrol" }, { floating = true })

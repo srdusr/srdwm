@@ -13,8 +13,10 @@ use smithay::backend::renderer::element::surface::{render_elements_from_surface_
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::{Color32F, ImportAll, ImportMem, Renderer};
 use smithay::desktop::{layer_map_for_output, PopupManager, Space, Window as DWindow};
+use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Physical, Point, Rectangle, Scale};
+use smithay::wayland::shell::wlr_layer::Layer;
 
 use srdwm_core::TITLEBAR_HEIGHT;
 
@@ -105,6 +107,72 @@ pub(crate) fn border_fragment_buffer(pool: &mut Vec<SolidColorBuffer>, index: us
         pool.resize_with(index + 1, SolidColorBuffer::default);
     }
     &mut pool[index]
+}
+
+/// A mapped window's own `WlSurface`, regardless of which protocol backs
+/// it - a native Wayland `xdg_toplevel` or an XWayland client. `None` for
+/// an X11 window between `MapRequest` and its first commit, which really
+/// has no surface yet.
+pub(crate) fn window_wl_surface(w: &DWindow) -> Option<WlSurface> {
+    if let Some(top) = w.toplevel() {
+        return Some(top.wl_surface().clone());
+    }
+    w.x11_surface().and_then(|x| x.wl_surface())
+}
+
+/// Renders one window's (or one layer-shell surface's) own content --
+/// nothing else, not decoration, not popups - at `location` (output-local
+/// physical space, the same convention every other `custom_elements` entry
+/// already uses) and `alpha`.
+///
+/// Deliberately not `Window::render_elements` (`AsRenderElements`): that
+/// bundles a window's own popups into the same call, which would double
+/// them with [`popup_render_elements`]'s own separate pass over
+/// [`popup_targets`]. `render_elements_from_surface_tree` walks only the
+/// given surface's own (sub)surface tree - the same low-level call this
+/// file's popup rendering and `cursor.rs`'s client-cursor-image path
+/// already use safely, so reusing it here for a window's *main* content is
+/// the same proven primitive, not a new one.
+///
+/// This is what lets content have its own `alpha`, at all: content used to
+/// only ever render via `self.space` passed whole to `render_output`,
+/// which takes one `alpha` for the entire frame's worth of space content,
+/// not one per window - there was no way to make one window translucent
+/// without also dimming everything else in `self.space`.
+pub(crate) fn surface_content_elements<R>(renderer: &mut R, surface: &WlSurface, location: (i32, i32), alpha: f32) -> Vec<OverlayElement<R>>
+where
+    R: Renderer + ImportAll + ImportMem,
+    R::TextureId: Clone + Send + 'static,
+{
+    render_elements_from_surface_tree(renderer, surface, location, 1.0, alpha, Kind::Unspecified)
+}
+
+/// Every mapped layer-shell surface on `output` whose [`Layer`] `include`
+/// accepts, each rendered via [`surface_content_elements`] at full opacity
+/// - layer-shell surfaces (bars, docks, wallpaper engines) don't have a
+/// per-surface opacity concept the way `srd.rule`'s `opacity` gives
+/// windows.
+///
+/// Order matches smithay's own `space_render_elements` (0.7.0): `.rev()`
+/// on `map.layers()` before rendering, so surfaces sharing one `Layer`
+/// keep the same relative stacking smithay's convenience wrapper gave
+/// them, now that this function replaces it.
+pub(crate) fn output_layer_elements<R>(renderer: &mut R, output: &Output, origin: (i32, i32), include: impl Fn(Layer) -> bool) -> Vec<OverlayElement<R>>
+where
+    R: Renderer + ImportAll + ImportMem,
+    R::TextureId: Clone + Send + 'static,
+{
+    let map = layer_map_for_output(output);
+    let mut elements = Vec::new();
+    for layer in map.layers().rev() {
+        if !include(layer.layer()) {
+            continue;
+        }
+        let Some(geo) = map.layer_geometry(layer) else { continue };
+        let location = (origin.0 + geo.loc.x, origin.1 + geo.loc.y);
+        elements.extend(surface_content_elements(renderer, layer.wl_surface(), location, 1.0));
+    }
+    elements
 }
 
 /// A mapped toplevel's surface and on-screen (global-space, band-adjusted)

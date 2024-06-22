@@ -25,8 +25,8 @@ use smithay::backend::renderer::ImportDma;
 use smithay::backend::winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend};
 use smithay::reexports::winit::dpi::LogicalSize as WinitLogicalSize;
 use smithay::reexports::winit::window::Window as WinitWindow;
-use smithay::desktop::space::render_output;
 use smithay::desktop::{layer_map_for_output, PopupManager, Space};
+use smithay::wayland::shell::wlr_layer::Layer;
 use smithay::input::SeatState;
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::EventLoop as CalloopEventLoop;
@@ -349,46 +349,54 @@ impl WaylandPlatform {
                 Err(e) => log::warn!("failed to import context menu buffer: {e}"),
             }
         }
-        // Decoration/border built per window, front-to-back (topmost
-        // first), so a window's own titlebar/border at least stay ordered
-        // consistently relative to *other* windows' decoration/border.
+        // Content now renders here too, one window at a time, not through
+        // `render_output`'s own `spaces` argument - see this function's
+        // own call to `damage_tracker.render_output` further down for why,
+        // and `elements.rs`'s `surface_content_elements` doc comment for
+        // what it's actually for (per-window opacity, impossible through
+        // `spaces`, which takes one `alpha` for the whole frame).
         //
-        // Content deliberately still goes through `render_output`'s own
-        // `spaces` argument below (`self.state.space`), not through this
-        // loop: an earlier version of this fix pushed each window's own
-        // `Window::render_elements` output into `custom_elements` here too,
-        // in per-window stacking order, specifically to let decoration/
-        // border interleave correctly with *other* windows' content
-        // (custom_elements otherwise draws entirely above every window's
-        // content, `spaces` or not - seeing `render_output`'s source is
-        // what motivated that attempt). It was reverted: with two or more
-        // native Wayland toplevels on screen, whichever was created
-        // *first* always painted in front of later ones regardless of
-        // real focus/stacking order, reproduced consistently across three
-        // separate test windows, independent of push order, forced full
-        // redraws (`age = 0`), and buffer age - i.e. a real ordering bug
-        // in mixing multiple windows' own `render_elements` output this
-        // way, not a damage-tracking artifact. The real root cause (found
-        // later, by instrumenting a locally vendored smithay copy
-        // directly) turned out to be unrelated to content-vs-decoration
-        // mixing at all: `sync_geometry`'s `Space::map_element` call
-        // silently re-stacked windows to the top of `Space`'s own order
-        // any time position/size synced for *any* reason, independent of
-        // which rendering path was used - see `state.rs`'s
+        // An earlier version of this exact change was reverted: with two or
+        // more native Wayland toplevels on screen, whichever was created
+        // *first* always painted in front of later ones regardless of real
+        // focus/stacking order. That bug's real root cause (found by
+        // instrumenting a locally vendored smithay copy directly) turned
+        // out to be `sync_geometry`'s `Space::map_element` call silently
+        // re-stacking windows to the top of `Space`'s *own* internal
+        // order as a side effect of updating position - see `state.rs`'s
         // `resync_stacking_order` doc comment for the full story and the
-        // actual fix. `self.state.space` stayed the content path here
-        // since reverting it was never itself wrong, just insufficient on
-        // its own.
+        // fix that landed for it (called after every `map_element` since).
+        // This loop never reads `Space`'s order at all: `ids` below comes
+        // from `WindowManager.order` (`visible_windows_front_to_back`),
+        // srdwm's own stacking model, the same source `hit_test` already
+        // trusts - so the specific bug that sank the earlier attempt
+        // can't recur here regardless of whether `resync_stacking_order`
+        // ever drifts again. `self.state.space` stays mapped and
+        // `resync_stacking_order`-maintained exactly as before; only the
+        // render step stopped reading from it.
         let ids: Vec<WindowId> = self.wm.borrow().visible_windows_front_to_back().map(|w| w.id).collect();
         let focused = self.wm.borrow().focused_id();
+        // Popups next: always above every window's own content - see the
+        // matching comment in `udev.rs`'s render loop for why this has to
+        // be pushed ahead of both the bar/dock and every window now that
+        // content shares this same list.
+        let popup_targets = crate::elements::popup_targets(&self.state);
+        custom_elements.extend(crate::elements::popup_render_elements(&popup_targets, renderer, (0, 0)));
+        // The bar/dock/launcher, skipped entirely for a fullscreen window --
+        // see `udev.rs`'s matching push for the full reasoning.
+        let hide_top_layers = self.wm.borrow().visible_windows_front_to_back().any(|w| w.fullscreen);
+        if !hide_top_layers {
+            custom_elements.extend(crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Top | Layer::Overlay)));
+        }
         // Windows stacked in front of whichever one border/decoration is
         // being built right now - `ids` is already front-to-back, so this
-        // only ever needs appending to, not recomputing. Only a window's
-        // own *content* occludes correctly on its own path (via `space`,
-        // real stacking order respected); everything drawn here goes
-        // through `custom_elements`, which composites above *all* content
-        // unconditionally, so both the border strips and the titlebar
-        // bitmap below need this explicit occlusion test against it.
+        // only ever needs appending to, not recomputing. A window's own
+        // *content*, pushed inside this same loop below, needs no separate
+        // occlusion test - see the matching comment in `udev.rs`'s render
+        // loop for why ordinary front-to-back push order already occludes
+        // it correctly. The border strips and titlebar bitmap are
+        // different: outside `geometry`, so they still need `occluders`'
+        // explicit clip against whichever window is stacked in front.
         let mut occluders: Vec<srdwm_core::Rect> = Vec::with_capacity(ids.len());
         for id in ids {
             let Some(w) = self.wm.borrow().window(id).cloned() else { continue };
@@ -468,25 +476,32 @@ impl WaylandPlatform {
                     }
                 }
             }
+            // The window's own content, at its own `opacity` - see the
+            // matching push in `udev.rs`'s render loop for why. Single
+            // output at the global origin, so no offset to subtract (see
+            // `elements.rs`'s doc comment on why `udev.rs`'s per-head call
+            // does).
+            if let Some(dwindow) = self.state.id_to_window.get(&id) {
+                if let Some(surface) = crate::elements::window_wl_surface(dwindow) {
+                    let band = if w.decorated { srdwm_core::TITLEBAR_HEIGHT as i32 } else { 0 };
+                    custom_elements.extend(crate::elements::surface_content_elements(renderer, &surface, (geom.x, geom.y + band), w.opacity));
+                }
+            }
             occluders.push(geom);
         }
-        // Single output at the global origin - no offset to subtract, see
-        // `elements.rs`'s doc comment on why udev.rs's per-head call does.
-        let popup_targets = crate::elements::popup_targets(&self.state);
-        custom_elements.extend(crate::elements::popup_render_elements(&popup_targets, renderer, (0, 0)));
+        // Background/bottom layer-shell (wallpaper engines) last --
+        // bottommost, matching smithay's own `space_render_elements`
+        // ordering, which this whole custom loop now replaces.
+        custom_elements.extend(crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Background | Layer::Bottom)));
 
-        let result = render_output(
-            &self.output,
-            renderer,
-            &mut framebuffer,
-            1.0,
-            age,
-            [&self.state.space],
-            &custom_elements,
-            &mut self.damage_tracker,
-            [0.05, 0.05, 0.08, 1.0],
-        )
-        .map_err(err)?;
+        // Not `smithay::desktop::space::render_output`: see `udev.rs`'s
+        // matching call site for why (per-window opacity, fullscreen-aware
+        // layer-shell inclusion - `custom_elements` above already carries
+        // everything that wrapper would have built).
+        let result = self
+            .damage_tracker
+            .render_output(renderer, &mut framebuffer, age, &custom_elements, [0.05, 0.05, 0.08, 1.0])
+            .map_err(err)?;
         let damage_rects: Vec<Rectangle<i32, Physical>> = result.damage.cloned().unwrap_or_default();
         let has_damage = !damage_rects.is_empty();
         drop(framebuffer);
@@ -588,29 +603,42 @@ impl WaylandPlatform {
             renderer.create_buffer(Fourcc::Abgr8888, (size.w, size.h).into()).map_err(err)?;
         let mut framebuffer = renderer.bind(&mut target).map_err(err)?;
 
+        // Not full parity with the on-screen render loop above (no border/
+        // shadow strips here, same as before this function's content/opacity
+        // fix) - a real, pre-existing gap in what a screenshot shows on
+        // this backend, flagged rather than grown further in this pass.
+        // Content (with each window's own `opacity`, unlike the
+        // `self.state.space`-based single-alpha call this replaced) and the
+        // bar/dock now render into the capture, at least: a screenshot used
+        // to only ever show titlebars for windows that had one, and never
+        // any layer-shell surface at all.
+        let hide_top_layers = self.wm.borrow().visible_windows_front_to_back().any(|w| w.fullscreen);
         let mut custom_elements: Vec<crate::elements::OverlayElement<GlesRenderer>> = Vec::new();
-        for (&id, deco) in self.state.decorations.iter() {
-            let Some(geom) = self.wm.borrow().visible_windows().find(|w| w.id == id).map(|w| w.geometry) else { continue };
-            if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(renderer, (geom.x as f64, geom.y as f64), deco, None, None, None, Kind::Unspecified) {
-                custom_elements.push(crate::elements::OverlayElement::Memory(elem));
+        if !hide_top_layers {
+            custom_elements.extend(crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Top | Layer::Overlay)));
+        }
+        for id in self.wm.borrow().visible_windows_front_to_back().map(|w| w.id).collect::<Vec<_>>() {
+            let Some(w) = self.wm.borrow().window(id).cloned() else { continue };
+            if let Some(deco) = self.state.decorations.get(&id) {
+                if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(renderer, (w.geometry.x as f64, w.geometry.y as f64), deco, None, None, None, Kind::Unspecified) {
+                    custom_elements.push(crate::elements::OverlayElement::Memory(elem));
+                }
+            }
+            if let Some(dwindow) = self.state.id_to_window.get(&id) {
+                if let Some(surface) = crate::elements::window_wl_surface(dwindow) {
+                    let band = if w.decorated { srdwm_core::TITLEBAR_HEIGHT as i32 } else { 0 };
+                    custom_elements.extend(crate::elements::surface_content_elements(renderer, &surface, (w.geometry.x, w.geometry.y + band), w.opacity));
+                }
             }
         }
+        custom_elements.extend(crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Background | Layer::Bottom)));
 
         // A throwaway damage tracker, so this pass always draws the whole
         // scene (age 0) and never perturbs the on-screen tracker's history.
         let mut tracker = OutputDamageTracker::from_output(&self.output);
-        render_output(
-            &self.output,
-            renderer,
-            &mut framebuffer,
-            1.0,
-            0,
-            [&self.state.space],
-            &custom_elements,
-            &mut tracker,
-            [0.05, 0.05, 0.08, 1.0],
-        )
-        .map_err(err)?;
+        tracker
+            .render_output(renderer, &mut framebuffer, 0, &custom_elements, [0.05, 0.05, 0.08, 1.0])
+            .map_err(err)?;
 
         screencopy::service_pending(captures, renderer, &framebuffer);
         Ok(())

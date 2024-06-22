@@ -90,6 +90,13 @@ pub struct Window {
     pub always_on_top: bool,
     pub border_color: (u8, u8, u8),
     pub border_width: u32,
+    /// This window's own content opacity, `0.0`..=`1.0`. Only the content
+    /// (the client's own surface tree) is affected - srdwm's own
+    /// decoration (titlebar/border/shadow) always renders fully opaque
+    /// regardless, the same way a native macOS/Windows translucent-window
+    /// effect still keeps its frame legible. Set via `srd.window.
+    /// set_opacity()` or a rule's `opacity` action.
+    pub opacity: f32,
     pub workspace: usize,
     pub monitor: u32,
     /// Whether `WindowManager`'s class/title-matched rules have already
@@ -135,6 +142,7 @@ impl Window {
             always_on_top: false,
             border_color: (136, 192, 208), // Nord accent, matches legacy theme default
             border_width: 2,
+            opacity: 1.0,
             workspace: 0,
             monitor: 0,
             rules_applied: false,

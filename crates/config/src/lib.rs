@@ -237,6 +237,7 @@ impl Engine {
         window.set("set_decorations", self.fn_window_set_decorations()?)?;
         window.set("set_border_color", self.fn_window_set_border_color()?)?;
         window.set("set_border_width", self.fn_window_set_border_width()?)?;
+        window.set("set_opacity", self.fn_window_set_opacity()?)?;
         window.set("set_floating", self.fn_window_set_floating()?)?;
         window.set("toggle_floating", self.fn_window_action(WindowAction::ToggleFloating)?)?;
         window.set("is_floating", self.fn_window_is_floating()?)?;
@@ -413,8 +414,8 @@ impl Engine {
     /// class_regex = "...", instance = "..." }, { floating = true,
     /// workspace = 2, x = .., y = .., width = .., height = ..,
     /// decorated = false, border_color = {r,g,b}, border_width = 2,
-    /// maximized = true })`. At least one matcher field is required;
-    /// unmatched rules apply nothing.
+    /// maximized = true, opacity = 0.9 })`. At least one matcher field is
+    /// required; unmatched rules apply nothing.
     ///
     /// `title`/`class` are plain substring/exact match, cheap and cover
     /// most rules with no regex syntax to get right. `title_regex`/
@@ -468,6 +469,7 @@ impl Engine {
                     border_color,
                     border_width: actions.get("border_width")?,
                     pinned: actions.get("pinned")?,
+                    opacity: actions.get("opacity")?,
                 },
             };
             state.borrow().wm.borrow_mut().add_rule(rule);
@@ -741,6 +743,20 @@ impl Engine {
             if let Some(id) = wm.focused_id() {
                 if let Some(w) = wm.window_mut(id) {
                     w.border_width = width;
+                }
+            }
+            Ok(())
+        })?)
+    }
+
+    fn fn_window_set_opacity(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, opacity: f32| {
+            let wm = state.borrow().wm.clone();
+            let mut wm = wm.borrow_mut();
+            if let Some(id) = wm.focused_id() {
+                if let Some(w) = wm.window_mut(id) {
+                    w.opacity = opacity.clamp(0.0, 1.0);
                 }
             }
             Ok(())

@@ -266,6 +266,9 @@ impl WindowManager {
             if let Some(pinned) = a.pinned {
                 window.always_on_top = pinned;
             }
+            if let Some(opacity) = a.opacity {
+                window.opacity = opacity.clamp(0.0, 1.0);
+            }
         }
 
         if let Some(monitor) = self.primary_monitor() {
@@ -337,6 +340,9 @@ impl WindowManager {
         }
         if let Some(pinned) = actions.pinned {
             window.always_on_top = pinned;
+        }
+        if let Some(opacity) = actions.opacity {
+            window.opacity = opacity.clamp(0.0, 1.0);
         }
         if let Some(geometry) = actions.geometry {
             window.geometry = geometry;
@@ -1804,6 +1810,31 @@ mod tests {
         w.title = "a new tab title".into();
         wm.reapply_rules_if_pending(id);
         assert!(wm.window(id).unwrap().decorated, "rules_applied is already true - must not re-run the match");
+    }
+
+    #[test]
+    fn opacity_rule_applies_on_the_deferred_retry_same_as_other_actions() {
+        // Regression test: `opacity` was added to `add_window`'s own rule
+        // application but missed here, in the deferred retry
+        // `reapply_rules_if_pending` - confirmed live: a rule like
+        // `srd.rule({ class = "Alacritty" }, { opacity = 0.4 })` never took
+        // effect for any real native Wayland client, since (per the test
+        // above) that's the *only* path a class-based rule actually
+        // matches through for one of those - `add_window`'s own match
+        // attempt always fails first, against an as-yet-empty `app_id`.
+        let mut wm = wm_with_monitor();
+        wm.add_rule(WindowRule {
+            matcher: crate::rules::WindowMatch { class: Some("alacritty".into()), ..Default::default() },
+            actions: crate::rules::WindowRuleActions { opacity: Some(0.4), ..Default::default() },
+        });
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, ""));
+        assert_eq!(wm.window(id).unwrap().opacity, 1.0, "no app_id yet, so no match - must not have applied early");
+
+        let w = wm.window_mut(id).unwrap();
+        w.app_id = "Alacritty".into();
+        wm.reapply_rules_if_pending(id);
+        assert_eq!(wm.window(id).unwrap().opacity, 0.4, "app_id now known - the rule must apply on retry");
     }
 
     #[test]
