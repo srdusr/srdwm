@@ -248,6 +248,17 @@ pub(crate) struct CompState {
     /// call site for why those don't get a shadow at all rather than a
     /// zero-alpha one.
     pub(crate) shadow_buffers: HashMap<WindowId, MemoryRenderBuffer>,
+    /// The compiled rounded-corner GLES shader program (`rounded_corners::
+    /// compile`), if that succeeded - `None` on the udev backend always
+    /// (it never even tries, `PixmanRenderer` has no shader stage) and on
+    /// winit only if compilation itself failed (an old/software GL driver
+    /// missing something the shader needs), in which case content falls
+    /// back to plain, unrounded rendering rather than the compositor
+    /// refusing to start over a cosmetic feature. A concrete, non-generic
+    /// smithay type (`GlesTexProgram`), so this field costs nothing to
+    /// declare on the shared `CompState` even though only one backend ever
+    /// populates it.
+    pub(crate) rounded_corners_program: Option<smithay::backend::renderer::gles::GlesTexProgram>,
     /// Persistent solid-colour buffers backing a window's other three
     /// border strips (bottom, left, right - `decoration::border_strips`'
     /// order past index 0), reused by position every frame rather than

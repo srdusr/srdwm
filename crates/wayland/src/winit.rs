@@ -165,6 +165,18 @@ impl WaylandPlatform {
         let mut dmabuf_state = DmabufState::new();
         dmabuf_state.create_global::<CompState>(&dh, backend.renderer().dmabuf_formats());
 
+        // See `state.rs`'s `rounded_corners_program` doc comment: `None` on
+        // any failure (an old/software GL driver missing something the
+        // shader needs) rather than refusing to start over a cosmetic
+        // feature - content just renders unrounded in that case.
+        let rounded_corners_program = match crate::rounded_corners::compile(backend.renderer()) {
+            Ok(program) => Some(program),
+            Err(e) => {
+                log::warn!("winit: rounded-corner shader failed to compile, content will render unrounded: {e}");
+                None
+            }
+        };
+
         let pending = Rc::new(RefCell::new(Vec::new()));
         let state = CompState {
             compositor_state,
@@ -229,6 +241,7 @@ impl WaylandPlatform {
             decorations: HashMap::new(),
             border_top_decorations: HashMap::new(),
             shadow_buffers: HashMap::new(),
+            rounded_corners_program,
             border_side_buffers: HashMap::new(),
             last_synced_size: HashMap::new(),
             pending: pending.clone(),
@@ -337,7 +350,15 @@ impl WaylandPlatform {
             return Ok(());
         }
 
-        let mut custom_elements: Vec<crate::elements::OverlayElement<GlesRenderer>> = Vec::new();
+        // `WinitElement`, not `OverlayElement<GlesRenderer>` directly - see
+        // `rounded_corners.rs`'s own doc comment on why content that gets
+        // rounded needs a wider element type than everything else here,
+        // and why that couldn't just be added as a new `OverlayElement`
+        // variant instead. Every existing push below wraps its
+        // `OverlayElement` in `WinitElement::Base`; only the new
+        // rounded-content push (further down) uses `WinitElement::Rounded`
+        // directly.
+        let mut custom_elements: Vec<crate::rounded_corners::WinitElement> = Vec::new();
         // The right-click titlebar menu, if open - pushed first so it's
         // topmost over every window (this backend draws no cursor of its
         // own, see this module's doc comment, so there's no "stay under
@@ -345,7 +366,7 @@ impl WaylandPlatform {
         if let (Some(menu), Some(buffer)) = (self.state.context_menu.as_ref(), self.state.context_menu_buffer.as_ref()) {
             let pos = (menu.pos.0 as f64, menu.pos.1 as f64);
             match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, None, None, Kind::Unspecified) {
-                Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
                 Err(e) => log::warn!("failed to import context menu buffer: {e}"),
             }
         }
@@ -381,12 +402,17 @@ impl WaylandPlatform {
         // be pushed ahead of both the bar/dock and every window now that
         // content shares this same list.
         let popup_targets = crate::elements::popup_targets(&self.state);
-        custom_elements.extend(crate::elements::popup_render_elements(&popup_targets, renderer, (0, 0)));
+        custom_elements.extend(crate::elements::popup_render_elements(&popup_targets, renderer, (0, 0)).into_iter().map(crate::rounded_corners::WinitElement::Base));
         // The bar/dock/launcher, skipped entirely for a fullscreen window --
         // see `udev.rs`'s matching push for the full reasoning.
         let hide_top_layers = self.wm.borrow().visible_windows_front_to_back().any(|w| w.fullscreen);
+        let rounded_corners_enabled = self.wm.borrow().rounded_corners_enabled;
         if !hide_top_layers {
-            custom_elements.extend(crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Top | Layer::Overlay)));
+            custom_elements.extend(
+                crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Top | Layer::Overlay))
+                    .into_iter()
+                    .map(crate::rounded_corners::WinitElement::Base),
+            );
         }
         // Windows stacked in front of whichever one border/decoration is
         // being built right now - `ids` is already front-to-back, so this
@@ -413,7 +439,7 @@ impl WaylandPlatform {
                 let rect = decoration::shadow_rect(geom);
                 let pos = (rect.x as f64, rect.y as f64);
                 match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, shadow, None, None, None, Kind::Unspecified) {
-                    Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                    Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
                     Err(e) => log::warn!("failed to import shadow buffer for window {id}: {e}"),
                 }
             }
@@ -431,7 +457,7 @@ impl WaylandPlatform {
                         Size::from((fragment.width as f64, fragment.height as f64)),
                     );
                     match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, deco, None, Some(src), None, Kind::Unspecified) {
-                        Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                        Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
                         Err(e) => log::warn!("failed to import titlebar buffer for window {id}: {e}"),
                     }
                 }
@@ -458,7 +484,7 @@ impl WaylandPlatform {
                 if strips[0].width > 0 && strips[0].height > 0 && !strips[0].subtract_all(&occluders).is_empty() {
                     if let Some(buffer) = self.state.border_top_decorations.get(&id) {
                         match MemoryRenderBufferRenderElement::from_buffer(renderer, (strips[0].x as f64, strips[0].y as f64), buffer, None, None, None, Kind::Unspecified) {
-                            Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                            Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
                             Err(e) => log::warn!("failed to import top border buffer for window {id}: {e}"),
                         }
                     }
@@ -472,7 +498,7 @@ impl WaylandPlatform {
                     for fragment in crate::elements::visible_border_fragments(*strip, &occluders) {
                         let buf = crate::elements::border_fragment_buffer(pool, buf_index);
                         buf_index += 1;
-                        custom_elements.push(crate::elements::OverlayElement::Solid(crate::elements::border_side_render_element(buf, fragment, color, (0, 0))));
+                        custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Solid(crate::elements::border_side_render_element(buf, fragment, color, (0, 0)))));
                     }
                 }
             }
@@ -480,11 +506,29 @@ impl WaylandPlatform {
             // matching push in `udev.rs`'s render loop for why. Single
             // output at the global origin, so no offset to subtract (see
             // `elements.rs`'s doc comment on why `udev.rs`'s per-head call
-            // does).
+            // does). Rounded via `rounded_corners::rounded_content_element`
+            // when the feature's on and the shader compiled - a decorated
+            // window only rounds its bottom two corners (the top two are
+            // already rounded, on the titlebar's own bitmap, by
+            // `decoration.rs`), an undecorated/CSD one rounds all four,
+            // since its content *is* the window's whole visible extent.
+            // Falls back to the plain, unrounded `surface_content_elements`
+            // on any failure - no committed buffer yet, a single-pixel
+            // solid-colour buffer, or the feature simply being off - same
+            // "always show something over a prettier maybe-nothing"
+            // reasoning `cursor.rs`'s built-in-arrow fallback already uses.
             if let Some(dwindow) = self.state.id_to_window.get(&id) {
                 if let Some(surface) = crate::elements::window_wl_surface(dwindow) {
                     let band = if w.decorated { srdwm_core::TITLEBAR_HEIGHT as i32 } else { 0 };
-                    custom_elements.extend(crate::elements::surface_content_elements(renderer, &surface, (geom.x, geom.y + band), w.opacity));
+                    let pos = (geom.x, geom.y + band);
+                    let rounded = rounded_corners_enabled.then_some(self.state.rounded_corners_program.as_ref()).flatten().and_then(|program| {
+                        let corners = if w.decorated { crate::rounded_corners::RoundedCorners::BOTTOM_ONLY } else { crate::rounded_corners::RoundedCorners::ALL };
+                        crate::rounded_corners::rounded_content_element(renderer, program, &surface, pos, w.opacity, crate::decoration::CORNER_RADIUS as f32, corners)
+                    });
+                    match rounded {
+                        Some(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Rounded(elem)),
+                        None => custom_elements.extend(crate::elements::surface_content_elements(renderer, &surface, pos, w.opacity).into_iter().map(crate::rounded_corners::WinitElement::Base)),
+                    }
                 }
             }
             occluders.push(geom);
@@ -492,7 +536,11 @@ impl WaylandPlatform {
         // Background/bottom layer-shell (wallpaper engines) last --
         // bottommost, matching smithay's own `space_render_elements`
         // ordering, which this whole custom loop now replaces.
-        custom_elements.extend(crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Background | Layer::Bottom)));
+        custom_elements.extend(
+            crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Background | Layer::Bottom))
+                .into_iter()
+                .map(crate::rounded_corners::WinitElement::Base),
+        );
 
         // Not `smithay::desktop::space::render_output`: see `udev.rs`'s
         // matching call site for why (per-window opacity, fullscreen-aware

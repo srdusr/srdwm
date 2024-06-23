@@ -1008,6 +1008,7 @@ fn default_config() -> HashMap<String, ConfigValue> {
     set("general.animation_duration", Number(200.0));
     set("general.shadows", Bool(true));
     set("general.resize_margin", Number(6.0));
+    set("general.rounded_corners", Bool(true));
     set("general.focus_follows_mouse", Bool(false));
     set("general.mouse_follows_focus", Bool(true));
     set("general.auto_raise", Bool(false));

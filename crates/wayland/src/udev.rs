@@ -1079,6 +1079,7 @@ impl UdevPlatform {
             decorations: HashMap::new(),
             border_top_decorations: HashMap::new(),
             shadow_buffers: HashMap::new(),
+            rounded_corners_program: None,
             border_side_buffers: HashMap::new(),
             last_synced_size: HashMap::new(),
             pending: pending.clone(),

@@ -49,6 +49,7 @@ mod lock;
 mod output_management;
 mod output_power;
 mod protocols;
+mod rounded_corners;
 mod screencopy;
 mod state;
 mod udev;

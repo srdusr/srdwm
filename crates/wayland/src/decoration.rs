@@ -354,7 +354,14 @@ pub fn render_titlebar(width: u32, height: u32, title: &str, background: (u8, u8
 /// cosmetic nicety, not a feature surface worth a `srd.theme` knob, and a
 /// value this small barely reads as "rounded" if it gets any larger at the
 /// titlebar heights this compositor actually uses.
-const CORNER_RADIUS: u32 = 6;
+///
+/// `pub(crate)`, not private: `rounded_corners.rs` reuses the exact same
+/// value for a decorated window's own content (its bottom two corners,
+/// where the GLES backend can round the client's actual pixels, unlike
+/// the CPU bitmap clip this file does for the titlebar/border), so a
+/// bordered window's curve reads as one continuous radius from titlebar
+/// to content rather than two different ones meeting at a seam.
+pub(crate) const CORNER_RADIUS: u32 = 6;
 
 /// Clips the top-left and top-right corners of a titlebar buffer to a
 /// quarter-circle by making the pixels outside it fully transparent, so
