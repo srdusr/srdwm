@@ -147,6 +147,47 @@ where
     render_elements_from_surface_tree(renderer, surface, location, 1.0, alpha, Kind::Unspecified)
 }
 
+/// Looks up (rebuilding first if stale) the Pixman-backend rounded-corner
+/// masked copy of `surface`'s content - see `rounded_corners_pixman`'s
+/// module doc comment for what this actually does and why it needs a cache
+/// at all. `epoch` is the window's current `CompState::content_epoch`
+/// value (bumped once per real commit, in `commit()`); the cached entry is
+/// only rebuilt when that no longer matches what it was last built from, so
+/// a window that isn't currently repainting costs nothing here beyond one
+/// `HashMap` lookup per frame.
+///
+/// Free function taking the two fields it needs directly, rather than a
+/// `CompState` method, so it can be called from inside `udev.rs`'s render
+/// loop alongside the already-live `self.udev.as_mut()` borrow - see that
+/// call site.
+///
+/// `None` either because masking genuinely isn't possible right now (falls
+/// through to `rounded_corners_pixman::masked_content_buffer`'s own `None`
+/// cases) or because it hasn't been attempted yet this call; either way the
+/// caller's fallback is the same: render `surface`'s content unrounded via
+/// [`surface_content_elements`].
+pub(crate) fn rounded_content_buffer<'a>(
+    cache: &'a mut std::collections::HashMap<srdwm_core::WindowId, (u64, smithay::backend::renderer::element::memory::MemoryRenderBuffer)>,
+    epoch: u64,
+    id: srdwm_core::WindowId,
+    surface: &WlSurface,
+    radius: f32,
+    corners: crate::rounded_corners::RoundedCorners,
+) -> Option<&'a smithay::backend::renderer::element::memory::MemoryRenderBuffer> {
+    let stale = cache.get(&id).map(|(built, _)| *built != epoch).unwrap_or(true);
+    if stale {
+        match crate::rounded_corners_pixman::masked_content_buffer(surface, radius, corners) {
+            Some(buf) => {
+                cache.insert(id, (epoch, buf));
+            }
+            None => {
+                cache.remove(&id);
+            }
+        }
+    }
+    cache.get(&id).map(|(_, b)| b)
+}
+
 /// Every mapped layer-shell surface on `output` whose [`Layer`] `include`
 /// accepts, each rendered via [`surface_content_elements`] at full opacity
 /// - layer-shell surfaces (bars, docks, wallpaper engines) don't have a

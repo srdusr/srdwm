@@ -259,6 +259,22 @@ pub(crate) struct CompState {
     /// declare on the shared `CompState` even though only one backend ever
     /// populates it.
     pub(crate) rounded_corners_program: Option<smithay::backend::renderer::gles::GlesTexProgram>,
+    /// Bumped once per real `commit()` of a mapped window's surface --
+    /// see that handler in `protocols.rs`. The only signal `rounded_content_buffers`
+    /// needs to know its cached masked copy is stale, since content changes
+    /// (unlike geometry, which `redraw_decoration_buffer`'s trigger points
+    /// already cover) can arrive on every single frame for a video or
+    /// terminal, with nothing else in this struct tracking that.
+    pub(crate) content_epoch: HashMap<WindowId, u64>,
+    /// The udev/Pixman-backend rounded-corner masked copy of a window's own
+    /// content (`rounded_corners_pixman::masked_content_buffer`), paired
+    /// with the `content_epoch` value it was built from - see
+    /// `elements::rounded_content_buffer`, which owns rebuilding this.
+    /// Always empty on the winit backend (GLES rounds via a shader instead,
+    /// `rounded_corners_program`), but costs nothing to declare here
+    /// unconditionally, the same call `rounded_corners_program` itself
+    /// already makes.
+    pub(crate) rounded_content_buffers: HashMap<WindowId, (u64, MemoryRenderBuffer)>,
     /// Persistent solid-colour buffers backing a window's other three
     /// border strips (bottom, left, right - `decoration::border_strips`'
     /// order past index 0), reused by position every frame rather than
@@ -662,6 +678,8 @@ impl CompState {
         self.shadow_buffers.remove(&id);
         self.border_side_buffers.remove(&id);
         self.last_synced_size.remove(&id);
+        self.content_epoch.remove(&id);
+        self.rounded_content_buffers.remove(&id);
         // A window closing (crash, kill, or its own menu's "Close" action
         // racing ahead of this) while its context menu is still open would
         // otherwise leave the menu pointing at a dead id - selecting any

@@ -207,6 +207,10 @@ impl CompState {
         // looked up fresh per head (head-local `origin` translation).
         let ids: Vec<srdwm_core::WindowId> = if locked { Vec::new() } else { self.wm.borrow().visible_windows_front_to_back().map(|w| w.id).collect() };
         let focused = self.wm.borrow().focused_id();
+        // Default `false` here, unlike winit's `unwrap_or(true)` - see
+        // `rounded_corners_pixman`'s module doc comment for the CPU cost
+        // that makes this backend opt-in rather than on by default.
+        let rounded_corners_enabled = self.wm.borrow().rounded_corners_enabled.unwrap_or(false);
         let popup_targets = if locked { Vec::new() } else { crate::elements::popup_targets(self) };
 
         // Which heads are eligible, and what each needs, gathered before the
@@ -458,7 +462,29 @@ impl CompState {
                         if let Some(surface) = crate::elements::window_wl_surface(dwindow) {
                             let band = if w.decorated { srdwm_core::TITLEBAR_HEIGHT as i32 } else { 0 };
                             let pos = (geom.x - origin.x, geom.y + band - origin.y);
-                            custom_elements.extend(crate::elements::surface_content_elements(&mut udev.renderer, &surface, pos, w.opacity));
+                            let mut rounded_elem = None;
+                            if rounded_corners_enabled {
+                                let epoch = self.content_epoch.get(&id).copied().unwrap_or(0);
+                                // Bottom-only for a decorated window, same
+                                // reasoning as `winit.rs`'s identical split:
+                                // the top two corners are already hidden
+                                // under the titlebar band's own rounded
+                                // bitmap.
+                                let corners = if w.decorated { crate::rounded_corners::RoundedCorners::BOTTOM_ONLY } else { crate::rounded_corners::RoundedCorners::ALL };
+                                if let Some(buffer) =
+                                    crate::elements::rounded_content_buffer(&mut self.rounded_content_buffers, epoch, id, &surface, decoration::CORNER_RADIUS as f32, corners)
+                                {
+                                    match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, (pos.0 as f64, pos.1 as f64), buffer, Some(w.opacity), None, None, Kind::Unspecified)
+                                    {
+                                        Ok(elem) => rounded_elem = Some(elem),
+                                        Err(e) => log::warn!("udev: failed to import rounded content buffer: {e}"),
+                                    }
+                                }
+                            }
+                            match rounded_elem {
+                                Some(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                                None => custom_elements.extend(crate::elements::surface_content_elements(&mut udev.renderer, &surface, pos, w.opacity)),
+                            }
                         }
                     }
                     occluders.push(geom);
@@ -1080,6 +1106,8 @@ impl UdevPlatform {
             border_top_decorations: HashMap::new(),
             shadow_buffers: HashMap::new(),
             rounded_corners_program: None,
+            content_epoch: HashMap::new(),
+            rounded_content_buffers: HashMap::new(),
             border_side_buffers: HashMap::new(),
             last_synced_size: HashMap::new(),
             pending: pending.clone(),

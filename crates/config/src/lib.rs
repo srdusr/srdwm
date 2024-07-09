@@ -1008,7 +1008,15 @@ fn default_config() -> HashMap<String, ConfigValue> {
     set("general.animation_duration", Number(200.0));
     set("general.shadows", Bool(true));
     set("general.resize_margin", Number(6.0));
-    set("general.rounded_corners", Bool(true));
+    // Deliberately *not* seeded here, unlike every other `general.*` key --
+    // its actual default differs by backend (GLES/winit: on; udev/Pixman:
+    // off, an untested-on-real-hardware CPU cost too real to default to on
+    // - see `crates/wayland/src/rounded_corners.rs`), and neither backend
+    // is known yet at the point `default_config` runs. Leaving the key
+    // genuinely absent (rather than pre-seeded `true`/`false`) is what lets
+    // `main.rs`'s `apply_general_settings` tell "user never touched this"
+    // apart from "user explicitly chose a value" and hand the *unset* case
+    // to whichever backend ends up connecting instead of deciding for it.
     set("general.focus_follows_mouse", Bool(false));
     set("general.mouse_follows_focus", Bool(true));
     set("general.auto_raise", Bool(false));

@@ -50,6 +50,7 @@ mod output_management;
 mod output_power;
 mod protocols;
 mod rounded_corners;
+mod rounded_corners_pixman;
 mod screencopy;
 mod state;
 mod udev;

@@ -242,6 +242,8 @@ impl WaylandPlatform {
             border_top_decorations: HashMap::new(),
             shadow_buffers: HashMap::new(),
             rounded_corners_program,
+            content_epoch: HashMap::new(),
+            rounded_content_buffers: HashMap::new(),
             border_side_buffers: HashMap::new(),
             last_synced_size: HashMap::new(),
             pending: pending.clone(),
@@ -406,7 +408,12 @@ impl WaylandPlatform {
         // The bar/dock/launcher, skipped entirely for a fullscreen window --
         // see `udev.rs`'s matching push for the full reasoning.
         let hide_top_layers = self.wm.borrow().visible_windows_front_to_back().any(|w| w.fullscreen);
-        let rounded_corners_enabled = self.wm.borrow().rounded_corners_enabled;
+        // `None` (the user's config never touched `general.rounded_corners`)
+        // defaults to *on* here - this backend has an actual GPU shader
+        // behind the feature (see `rounded_corners.rs`), no untested
+        // per-frame CPU cost to weigh the way the udev backend's own
+        // default has to.
+        let rounded_corners_enabled = self.wm.borrow().rounded_corners_enabled.unwrap_or(true);
         if !hide_top_layers {
             custom_elements.extend(
                 crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Top | Layer::Overlay))

@@ -72,10 +72,15 @@ pub struct WindowManager {
     pub resize_margin: i32,
     /// Whether a decorated window's content rounds its bottom two corners
     /// to match the titlebar's own curve (an undecorated/CSD window rounds
-    /// all four). Read from `general.rounded_corners`. GLES-backend-only
-    /// in practice - see `crates/wayland/src/rounded_corners.rs` - so
-    /// this is a no-op on the udev/Pixman backend regardless of its value.
-    pub rounded_corners_enabled: bool,
+    /// all four). Read from `general.rounded_corners` - `None` when the
+    /// user's config never touched that key at all (deliberately *not*
+    /// defaulted in `crates/config`, unlike every other `general.*` key),
+    /// so each backend can fall back to its own default rather than one
+    /// baked in here: GLES/winit defaults on, udev/Pixman defaults off
+    /// (an untested-on-real-hardware per-frame CPU cost for content that
+    /// redraws constantly - see `crates/wayland/src/rounded_corners.rs`).
+    /// `Some(_)` only when the user explicitly set it, and wins either way.
+    pub rounded_corners_enabled: Option<bool>,
     /// Default decoration colours and border width, read from `theme.colors.*`/
     /// `theme.decorations.*`. See `ThemeConfig`'s own doc comment.
     pub theme: ThemeConfig,
@@ -120,7 +125,7 @@ impl WindowManager {
             animation_duration_ms: 200,
             shadows_enabled: true,
             resize_margin: RESIZE_MARGIN,
-            rounded_corners_enabled: true,
+            rounded_corners_enabled: None,
             theme: ThemeConfig::default(),
             drag: None,
             resize: None,

@@ -151,7 +151,10 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     let duration = engine.get_f64("general.animation_duration", 200.0).max(0.0) as u32;
     let shadows = engine.get_bool("general.shadows", true);
     let resize_margin = engine.get_f64("general.resize_margin", srdwm_core::RESIZE_MARGIN as f64).max(1.0) as i32;
-    let rounded_corners = engine.get_bool("general.rounded_corners", true);
+    // Genuinely absent, not `false`, when the user's config never sets it
+    // - see `WindowManager::rounded_corners_enabled`'s doc comment for why
+    // this can't just be `get_bool(..., true)` like every other flag here.
+    let rounded_corners = engine.get("general.rounded_corners").and_then(|v| v.as_bool());
 
     // Only the three `theme.*` keys with an unambiguous, already-rendered
     // counterpart are wired - see `srdwm_core::ThemeConfig`'s doc comment.

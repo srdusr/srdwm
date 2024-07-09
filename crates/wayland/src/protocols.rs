@@ -123,6 +123,12 @@ impl CompositorHandler for CompState {
             if let Some(w) = self.id_to_window.get(&id) {
                 w.on_commit();
             }
+            // See `content_epoch`'s doc comment: this is the only per-commit
+            // signal the udev backend's rounded-corner mask cache has to
+            // invalidate itself, since content can change every frame,
+            // independent of the geometry-driven points `redraw_decoration_
+            // buffer` already runs at.
+            *self.content_epoch.entry(id).or_insert(0) += 1;
             crate::state::sync_toplevel_metadata(self, id, surface);
         }
         self.ensure_layer_initial_configure(surface);
