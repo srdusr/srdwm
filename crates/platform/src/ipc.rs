@@ -279,7 +279,7 @@ fn client_snapshot(wm: &std::rc::Rc<std::cell::RefCell<WindowManager>>) -> Vec<C
     let focused = wm.focused_id();
     wm.windows()
         .map(|w| ClientInfo {
-            id: w.id as u64,
+            id: w.id,
             app_id: w.app_id.clone(),
             title: w.title.clone(),
             workspace: w.workspace,

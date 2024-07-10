@@ -426,8 +426,9 @@ fn button_box(width: usize, height: usize, right_offset: usize) -> (i32, i32, i3
 }
 
 /// Bresenham line, since none of these icons need anything fancier.
-fn draw_line(buf: &mut [u8], width: usize, height: usize, x0: i32, y0: i32, x1: i32, y1: i32, color: (u8, u8, u8)) {
-    let (mut x0, mut y0) = (x0, y0);
+fn draw_line(buf: &mut [u8], width: usize, height: usize, from: (i32, i32), to: (i32, i32), color: (u8, u8, u8)) {
+    let (mut x0, mut y0) = from;
+    let (x1, y1) = to;
     let dx = (x1 - x0).abs();
     let dy = -(y1 - y0).abs();
     let sx = if x0 < x1 { 1 } else { -1 };
@@ -452,21 +453,21 @@ fn draw_line(buf: &mut [u8], width: usize, height: usize, x0: i32, y0: i32, x1: 
 
 fn draw_close_icon(buf: &mut [u8], width: usize, height: usize, right_offset: usize, color: (u8, u8, u8)) {
     let (x0, y0, x1, y1) = button_box(width, height, right_offset);
-    draw_line(buf, width, height, x0, y0, x1, y1, color);
-    draw_line(buf, width, height, x0, y1, x1, y0, color);
+    draw_line(buf, width, height, (x0, y0), (x1, y1), color);
+    draw_line(buf, width, height, (x0, y1), (x1, y0), color);
 }
 
 fn draw_maximize_icon(buf: &mut [u8], width: usize, height: usize, right_offset: usize, color: (u8, u8, u8)) {
     let (x0, y0, x1, y1) = button_box(width, height, right_offset);
-    draw_line(buf, width, height, x0, y0, x1, y0, color);
-    draw_line(buf, width, height, x0, y1, x1, y1, color);
-    draw_line(buf, width, height, x0, y0, x0, y1, color);
-    draw_line(buf, width, height, x1, y0, x1, y1, color);
+    draw_line(buf, width, height, (x0, y0), (x1, y0), color);
+    draw_line(buf, width, height, (x0, y1), (x1, y1), color);
+    draw_line(buf, width, height, (x0, y0), (x0, y1), color);
+    draw_line(buf, width, height, (x1, y0), (x1, y1), color);
 }
 
 fn draw_minimize_icon(buf: &mut [u8], width: usize, height: usize, right_offset: usize, color: (u8, u8, u8)) {
     let (x0, _, x1, y1) = button_box(width, height, right_offset);
-    draw_line(buf, width, height, x0, y1, x1, y1, color);
+    draw_line(buf, width, height, (x0, y1), (x1, y1), color);
 }
 
 #[allow(clippy::too_many_arguments)]

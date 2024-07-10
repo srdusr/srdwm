@@ -215,10 +215,8 @@ impl Dispatch<ZwlrOutputConfigurationHeadV1, ConfigurationHeadData> for CompStat
         match request {
             zwlr_output_configuration_head_v1::Request::SetPosition { x, y } => *position = Some((x, y)),
             zwlr_output_configuration_head_v1::Request::SetScale { scale: s } => *scale = Some(s),
-            zwlr_output_configuration_head_v1::Request::SetTransform { transform: t } => {
-                if let WEnum::Value(t) = t {
-                    *transform = Some(wl_transform_to_smithay(t));
-                }
+            zwlr_output_configuration_head_v1::Request::SetTransform { transform: WEnum::Value(t) } => {
+                *transform = Some(wl_transform_to_smithay(t));
             }
             zwlr_output_configuration_head_v1::Request::SetMode { mode: mode_obj } => {
                 if let Some(m) = mode_obj.data::<ModeData>() {
