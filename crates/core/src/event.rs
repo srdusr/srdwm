@@ -81,12 +81,36 @@ pub fn parse_key_combo(combo: &str) -> Option<(Modifiers, &str)> {
 }
 
 /// Re-orders a combo string into the canonical form [`key_combo_string`]
-/// produces, regardless of what order its modifiers were written in.
+/// produces, regardless of what order its modifiers were written in, *and*
+/// normalizes the key name to the exact casing [`crate::keysyms::
+/// keysym_to_name`] produces at dispatch time.
+///
+/// That second part matters on its own, independent of modifier order:
+/// `keysym_to_name` capitalizes every named key ("Space", "Return",
+/// "Escape", "BackSpace", ...) while leaving letters/digits as-is, but
+/// nothing constrains how a config author *writes* one - `srd.bind
+/// ("Super+space", ...)` (lowercase, as `keybindings.lua` had it) parsed to
+/// the literal key name "space" with no case change, so the string stored
+/// here never matched what a real Space keypress builds at dispatch
+/// ("Space", capitalized) even though the modifier-order fix above was
+/// already in place. The bind was accepted at config-load time (no error,
+/// nothing to notice) and then simply never fired - confirmed live: the
+/// bind's own diagnostic (spawning a command that logs to a file) never
+/// produced a log entry, meaning the keypress never even reached the
+/// callback. Round-tripping through [`crate::keysyms::name_to_keysym`] (which
+/// *is* already case-insensitive) and back fixes any such case mismatch for
+/// every key the table recognizes; an unrecognized name is left as-is
+/// (harmless - it wouldn't have matched at dispatch regardless of case).
+///
 /// Unparseable input (empty string) is returned unchanged, so a caller that
 /// can't do anything better with it still has *something* to store/log.
 pub fn canonicalize_key_combo(combo: &str) -> String {
     match parse_key_combo(combo) {
-        Some((modifiers, key_name)) => key_combo_string(modifiers, key_name),
+        Some((modifiers, key_name)) => {
+            let canonical_name =
+                crate::keysyms::name_to_keysym(key_name).and_then(crate::keysyms::keysym_to_name).unwrap_or_else(|| key_name.to_string());
+            key_combo_string(modifiers, &canonical_name)
+        }
         None => combo.to_string(),
     }
 }
@@ -158,6 +182,26 @@ mod tests {
         // No ordering ambiguity with one modifier - this case always
         // worked, before and after the fix.
         assert_eq!(canonicalize_key_combo("Mod4+Return"), "Mod4+Return");
+    }
+
+    #[test]
+    fn lowercase_named_key_still_reaches_the_capitalized_dispatch_form() {
+        // `srd.bind("Super+space", ...)` (lowercase, as a real config had
+        // it) must resolve to the exact same string a live Space keypress
+        // builds at dispatch time - `keysyms::keysym_to_name` always
+        // capitalizes named keys ("Space"), so without this normalization
+        // the bind is silently accepted at load time and then never fires.
+        assert_eq!(canonicalize_key_combo("Super+space"), canonicalize_key_combo("Super+Space"));
+        assert_eq!(canonicalize_key_combo("Super+space"), "Mod4+Space");
+        assert_eq!(canonicalize_key_combo("Super+Shift+return"), canonicalize_key_combo("Super+Shift+Return"));
+    }
+
+    #[test]
+    fn unrecognized_key_name_is_left_as_is() {
+        // Not in `keysyms`' table at all - round-tripping through it fails,
+        // so the original text passes through unchanged rather than being
+        // silently dropped.
+        assert_eq!(canonicalize_key_combo("Mod4+NotARealKey"), "Mod4+NotARealKey");
     }
 
     #[test]
