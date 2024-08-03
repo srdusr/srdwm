@@ -3,7 +3,7 @@
 //! bridged into the same `srdwm_core::WindowManager`/`Space` pipeline as
 //! native `xdg-shell` windows.
 //!
-//! Only wired up for the udev/DRM backend (`udev.rs`) for now: XWayland's
+//! Only wired up for the udev/DRM backend (`udev`) for now: XWayland's
 //! window-manager side (`X11Wm::start_wm`) is driven entirely through a
 //! `calloop` event loop, which only the udev backend has - the nested
 //! winit backend still drives its own manual poll loop (see `lib.rs`'s
@@ -42,7 +42,7 @@ pub(crate) type X11Window = smithay::xwayland::xwm::X11Window;
 /// `X11Wm` on disconnect) is what shuts things down.
 ///
 /// Before spawning, arranges for XWayland to run with `-shm`: this
-/// compositor only ever supports `wl_shm` (see `udev.rs`'s module docs on
+/// compositor only ever supports `wl_shm` (see `udev/mod.rs`'s module docs on
 /// why it's deliberately software-only, no GBM/DMA-BUF), and XWayland's
 /// default behavior of trying `glamor` first and falling back to
 /// shared-memory buffers on failure does *not* fall back to the
@@ -493,7 +493,7 @@ impl CompState {
         // report) `_NET_ACTIVE_WINDOW` never updates either, since this is
         // `set_keyboard_focus`'s only caller for X11 windows and that's the
         // sole place `_NET_ACTIVE_WINDOW` gets written. The xdg-shell path
-        // (`new_managed_window` in state.rs) already does this; this is the
+        // (`new_managed_window` in state/lifecycle.rs) already does this; this is the
         // equivalent X11 creation path, which never got the same fix.
         self.set_keyboard_focus(Some(wl_surface));
         self.pending.borrow_mut().push(CoreEvent::WindowCreated(id));
@@ -507,7 +507,7 @@ impl CompState {
             self.space.unmap_elem(&w);
         }
         self.decorations.remove(&id);
-        // Same reason as `state.rs`'s native `remove_window`: don't leave
+        // Same reason as `state/lifecycle.rs`'s native `remove_window`: don't leave
         // the context menu open against a window that's about to stop
         // existing.
         if self.context_menu.as_ref().is_some_and(|m| m.window == id) {
@@ -516,7 +516,7 @@ impl CompState {
         self.wm.borrow_mut().remove_window(id);
         self.pending.borrow_mut().push(CoreEvent::WindowDestroyed(id));
         crate::foreign_toplevel::window_closed(self, id);
-        // Same reason as the equivalent call in `state.rs`'s native
+        // Same reason as the equivalent call in `state/lifecycle.rs`'s native
         // `remove_window`: core may have already moved focus to whatever's
         // now on top, and the Wayland/X11 side needs to be told to follow.
         crate::input::sync_keyboard_focus(self);

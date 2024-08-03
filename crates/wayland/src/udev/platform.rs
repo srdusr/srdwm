@@ -94,7 +94,7 @@ impl UdevPlatform {
             variant: system_xkb.variant.as_deref().unwrap_or(""),
             options: system_xkb.options.clone(),
         };
-        // 600ms delay, not 200 - see `state.rs`'s `REPEAT_DELAY` doc
+        // 600ms delay, not 200 - see `state/mod.rs`'s `REPEAT_DELAY` doc
         // comment for why.
         seat.add_keyboard(xkb_config, 600, 25).map_err(err)?;
         seat.add_pointer();

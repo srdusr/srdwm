@@ -644,7 +644,7 @@ impl WlrLayerShellHandler for CompState {
             if let Some(layer) = found {
                 // Same zone-change recompute `ensure_layer_initial_configure`
                 // already does on every commit that changes a layer's
-                // exclusive zone (state.rs) - but this is the *only* place
+                // exclusive zone (state/layers.rs) - but this is the *only* place
                 // that ever runs for a surface that goes away without one
                 // last commit. `unmap_layer` alone doesn't trigger it:
                 // reported live (by the AGS peer session) as a bar unmapping

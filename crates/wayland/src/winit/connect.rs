@@ -59,7 +59,7 @@ impl WaylandPlatform {
             variant: system_xkb.variant.as_deref().unwrap_or(""),
             options: system_xkb.options.clone(),
         };
-        // 600ms delay, not 200 - see `state.rs`'s `REPEAT_DELAY` doc
+        // 600ms delay, not 200 - see `state/mod.rs`'s `REPEAT_DELAY` doc
         // comment for why.
         seat.add_keyboard(xkb_config, 600, 25).map_err(err)?;
         seat.add_pointer();
@@ -74,7 +74,7 @@ impl WaylandPlatform {
         let mut dmabuf_state = DmabufState::new();
         dmabuf_state.create_global::<CompState>(&dh, backend.renderer().dmabuf_formats());
 
-        // See `state.rs`'s `rounded_corners_program` doc comment: `None` on
+        // See `state/mod.rs`'s `rounded_corners_program` doc comment: `None` on
         // any failure (an old/software GL driver missing something the
         // shader needs) rather than refusing to start over a cosmetic
         // feature - content just renders unrounded in that case.

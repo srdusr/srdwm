@@ -24,7 +24,7 @@ impl CompState {
         // Rendered per window, front-to-back (topmost first), each window's
         // content immediately followed by its decoration and border --
         // fixes the same cross-window ordering bug documented in
-        // `winit.rs`'s render loop: a background window's titlebar could
+        // `winit/render.rs`'s render loop: a background window's titlebar could
         // otherwise show through in front of the actually-focused window on
         // top of it, since decorations/borders used to be a single flat
         // layer drawn unconditionally above *every* window's content
@@ -297,7 +297,7 @@ impl CompState {
                             if rounded_corners_enabled {
                                 let epoch = self.content_epoch.get(&id).copied().unwrap_or(0);
                                 // Bottom-only for a decorated window, same
-                                // reasoning as `winit.rs`'s identical split:
+                                // reasoning as `winit/render.rs`'s identical split:
                                 // the top two corners are already hidden
                                 // under the titlebar band's own rounded
                                 // bitmap.

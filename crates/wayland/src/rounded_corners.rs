@@ -26,7 +26,7 @@
 //! subsurface tree through a shape mask is real additional work belonging
 //! to a follow-up, not this pass. `elements::surface_content_elements`
 //! (plain, unrounded, subsurface-aware) stays the fallback - see this
-//! module's own call site in `winit.rs`.
+//! module's own call site in `winit/render.rs`.
 
 use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::Kind;
@@ -37,17 +37,17 @@ use smithay::backend::renderer::Renderer;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::Point;
 
-// `winit.rs`'s `custom_elements` element type. `crate::elements::
+// `winit/render.rs`'s `custom_elements` element type. `crate::elements::
 // OverlayElement<GlesRenderer>` already covers everything the render loop
 // draws (cursor, decoration, borders, popups, plain content, layer-shell
 // surfaces) but can't also carry `TextureShaderElement`: that type only
 // implements `RenderElement<GlesRenderer>`, not the generic `RenderElement<R>`
 // every `OverlayElement<R>` variant needs (`OverlayElement<PixmanRenderer>`,
-// used identically by `udev.rs`, would stop compiling the moment a
+// used identically by `udev`, would stop compiling the moment a
 // GLES-only variant were added to the shared enum). Wrapping the whole
 // existing enum as one variant here, concrete to `GlesRenderer` from the
 // start (`<=GlesRenderer>`, not `<R>`), sidesteps that without touching
-// the shared type at all - `udev.rs` never sees this module.
+// the shared type at all - `udev` never sees this module.
 smithay::backend::renderer::element::render_elements! {
     pub(crate) WinitElement<=GlesRenderer>;
     Base=crate::elements::OverlayElement<GlesRenderer>,

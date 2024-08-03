@@ -54,14 +54,14 @@ impl Platform for WaylandPlatform {
 
     fn monitors(&mut self) -> PlatformResult<Vec<srdwm_core::Monitor>> {
         // Shrunk by any layer-shell exclusive zone - see the matching
-        // comment in `udev.rs`'s `monitors()`. This backend is always a
+        // comment in `udev/platform.rs`'s `monitors()`. This backend is always a
         // single output at the global origin, so the output-local zone
         // rectangle already is the usable global-space rect.
         let zone = layer_map_for_output(&self.output).non_exclusive_zone();
         Ok(vec![{
             let rect = srdwm_core::Rect::new(zone.loc.x, zone.loc.y, zone.size.w as u32, zone.size.h as u32);
             let mut m = srdwm_core::Monitor::new(0, "winit", rect);
-            // Same fix as `udev.rs`'s matching function: `Monitor::new`
+            // Same fix as `udev/platform.rs`'s matching function: `Monitor::new`
             // defaults `full_geometry` to `geometry`, which is already
             // zone-shrunk here - without this, `toggle_fullscreen` had no
             // way to actually cover a bar/dock's reserved strip, since the
@@ -84,7 +84,7 @@ impl Platform for WaylandPlatform {
         Ok(())
     }
 
-    /// See `udev.rs`'s matching impl for why this has to go through
+    /// See `udev/platform.rs`'s matching impl for why this has to go through
     /// `crate::input::focus_window` (the same path a real mouse click
     /// already uses) rather than only touching core state.
     fn focus(&mut self, window: WindowId) -> PlatformResult<()> {

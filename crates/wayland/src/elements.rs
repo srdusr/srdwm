@@ -157,7 +157,7 @@ where
 /// `HashMap` lookup per frame.
 ///
 /// Free function taking the two fields it needs directly, rather than a
-/// `CompState` method, so it can be called from inside `udev.rs`'s render
+/// `CompState` method, so it can be called from inside `udev/render.rs`'s
 /// loop alongside the already-live `self.udev.as_mut()` borrow - see that
 /// call site.
 ///

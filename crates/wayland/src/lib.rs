@@ -74,7 +74,7 @@ pub(crate) fn err(e: impl std::fmt::Display) -> PlatformError {
 }
 
 /// Connects to Wayland, choosing between the udev/DRM backend (bare TTY, no
-/// host compositor to nest under - see `udev.rs`) and this module's winit
+/// host compositor to nest under - see `udev`) and this module's winit
 /// backend (nested window), the same way real compositors decide
 /// nested-vs-native. Falls back to winit if udev initialization fails for
 /// any reason (no seat access, no DRM device, ...), logging why rather than

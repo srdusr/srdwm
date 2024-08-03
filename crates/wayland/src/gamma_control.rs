@@ -5,7 +5,7 @@
 //! DRM/udev backend only: there is no real CRTC gamma table to adjust when
 //! nested under a host compositor, same reasoning as `output_power.rs`. The
 //! global is genuinely not created there (`CompState::_gamma_control_state`
-//! is `Option`, `None` for `winit.rs`) rather than advertised-and-always-
+//! is `Option`, `None` for `winit`) rather than advertised-and-always-
 //! failing.
 //!
 //! No smithay helper exists for this protocol, so the `GlobalDispatch`/

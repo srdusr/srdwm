@@ -440,7 +440,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     wm.borrow_mut().set_monitors(monitors);
 
     // The platform is fully connected now (for Wayland, `WAYLAND_DISPLAY`
-    // was just set by `srdwm_wayland::connect` - see `udev.rs`/`winit.rs`
+    // was just set by `srdwm_wayland::connect` - see `udev`/`winit`
     // - and for X11, `DISPLAY` was already set by whatever started the X
     // server srdwm connected to). Only past this point does a process
     // `srd.spawn`ed from a `"ready"` handler have a real display socket to

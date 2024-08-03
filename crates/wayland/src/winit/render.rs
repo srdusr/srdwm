@@ -50,7 +50,7 @@ impl WaylandPlatform {
         // The right-click titlebar menu, if open - pushed first so it's
         // topmost over every window (this backend draws no cursor of its
         // own, see this module's doc comment, so there's no "stay under
-        // the pointer" ordering concern like udev.rs's matching push has).
+        // the pointer" ordering concern like udev/render.rs's matching push has).
         if let (Some(menu), Some(buffer)) = (self.state.context_menu.as_ref(), self.state.context_menu_buffer.as_ref()) {
             let pos = (menu.pos.0 as f64, menu.pos.1 as f64);
             match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, None, None, Kind::Unspecified) {
@@ -72,7 +72,7 @@ impl WaylandPlatform {
         // instrumenting a locally vendored smithay copy directly) turned
         // out to be `sync_geometry`'s `Space::map_element` call silently
         // re-stacking windows to the top of `Space`'s *own* internal
-        // order as a side effect of updating position - see `state.rs`'s
+        // order as a side effect of updating position - see `state/tick.rs`'s
         // `resync_stacking_order` doc comment for the full story and the
         // fix that landed for it (called after every `map_element` since).
         // This loop never reads `Space`'s order at all: `ids` below comes
@@ -86,13 +86,13 @@ impl WaylandPlatform {
         let ids: Vec<WindowId> = self.wm.borrow().visible_windows_front_to_back().map(|w| w.id).collect();
         let focused = self.wm.borrow().focused_id();
         // Popups next: always above every window's own content - see the
-        // matching comment in `udev.rs`'s render loop for why this has to
+        // matching comment in `udev/render.rs`'s render loop for why this has to
         // be pushed ahead of both the bar/dock and every window now that
         // content shares this same list.
         let popup_targets = crate::elements::popup_targets(&self.state);
         custom_elements.extend(crate::elements::popup_render_elements(&popup_targets, renderer, (0, 0)).into_iter().map(crate::rounded_corners::WinitElement::Base));
         // The bar/dock/launcher, skipped entirely for a fullscreen window --
-        // see `udev.rs`'s matching push for the full reasoning.
+        // see `udev/render.rs`'s matching push for the full reasoning.
         let hide_top_layers = self.wm.borrow().visible_windows_front_to_back().any(|w| w.fullscreen);
         // `None` (the user's config never touched `general.rounded_corners`)
         // defaults to *on* here - this backend has an actual GPU shader
@@ -111,7 +111,7 @@ impl WaylandPlatform {
         // being built right now - `ids` is already front-to-back, so this
         // only ever needs appending to, not recomputing. A window's own
         // *content*, pushed inside this same loop below, needs no separate
-        // occlusion test - see the matching comment in `udev.rs`'s render
+        // occlusion test - see the matching comment in `udev/render.rs`'s render
         // loop for why ordinary front-to-back push order already occludes
         // it correctly. The border strips and titlebar bitmap are
         // different: outside `geometry`, so they still need `occluders`'
@@ -121,11 +121,11 @@ impl WaylandPlatform {
             let Some(w) = self.wm.borrow().window(id).cloned() else { continue };
             // `w.geometry` is the animation's target, not necessarily where
             // the window is actually drawn this frame - see the matching
-            // comment in `udev.rs`'s render loop for the full story
+            // comment in `udev/render.rs`'s render loop for the full story
             // (reported live as the border "not flush" with the window
             // during an animated maximize/fullscreen/open-slide transition).
             let geom = self.state.window_anims.get(&id).map(crate::state::WindowAnim::current_rect).unwrap_or(w.geometry);
-            // Same reasoning as udev.rs's matching push: positioned from
+            // Same reasoning as udev/render.rs's matching push: positioned from
             // `geom`, not `w.geometry`, and not fragment-clipped against
             // `occluders` - see that comment.
             if let Some(shadow) = self.state.shadow_buffers.get(&id) {
@@ -137,7 +137,7 @@ impl WaylandPlatform {
                 }
             }
             if let Some(deco) = self.state.decorations.get(&id) {
-                // Fragment-clipped, same as udev.rs's matching titlebar
+                // Fragment-clipped, same as udev/render.rs's matching titlebar
                 // push - see that comment for why all-or-nothing (skip
                 // only once *fully* covered) wasn't enough: a titlebar
                 // only partially covered, the common case for cascaded
@@ -172,7 +172,7 @@ impl WaylandPlatform {
                 // why a per-frame rebuild of either was a real, continuous
                 // cost, not a cosmetic one. Not fragment-clipped like the
                 // other three below - see the matching comment in
-                // `udev.rs` for why the top strip only gets the cheaper
+                // `udev/render.rs` for why the top strip only gets the cheaper
                 // all-or-nothing occlusion check.
                 if strips[0].width > 0 && strips[0].height > 0 && !strips[0].subtract_all(&occluders).is_empty() {
                     if let Some(buffer) = self.state.border_top_decorations.get(&id) {
@@ -196,9 +196,9 @@ impl WaylandPlatform {
                 }
             }
             // The window's own content, at its own `opacity` - see the
-            // matching push in `udev.rs`'s render loop for why. Single
+            // matching push in `udev/render.rs`'s render loop for why. Single
             // output at the global origin, so no offset to subtract (see
-            // `elements.rs`'s doc comment on why `udev.rs`'s per-head call
+            // `elements.rs`'s doc comment on why `udev/render.rs`'s per-head call
             // does). Rounded via `rounded_corners::rounded_content_element`
             // when the feature's on and the shader compiled - a decorated
             // window only rounds its bottom two corners (the top two are
@@ -235,7 +235,7 @@ impl WaylandPlatform {
                 .map(crate::rounded_corners::WinitElement::Base),
         );
 
-        // Not `smithay::desktop::space::render_output`: see `udev.rs`'s
+        // Not `smithay::desktop::space::render_output`: see `udev/render.rs`'s
         // matching call site for why (per-window opacity, fullscreen-aware
         // layer-shell inclusion - `custom_elements` above already carries
         // everything that wrapper would have built).
@@ -293,7 +293,7 @@ impl WaylandPlatform {
         }
         // Layer-shell surfaces get their callback every pass, unconditionally
         // - NOT folded into the `has_damage` gate above. See the matching
-        // (much longer) comment in udev.rs's `render_udev_frame`: many
+        // (much longer) comment in udev/render.rs's `render_udev_frame`: many
         // layer-shell clients (GTK4/AGS among them) drive their entire
         // repaint loop off frame callbacks with no independent timer
         // fallback, so withholding the callback until *something* on the

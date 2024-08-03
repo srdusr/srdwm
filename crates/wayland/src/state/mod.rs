@@ -304,7 +304,7 @@ pub(crate) struct CompState {
     /// The binding currently held down and repeating, if any.
     pub(crate) repeat: Option<RepeatState>,
     pub(crate) start_time: Instant,
-    /// `Some` only for the udev/DRM backend; see `udev.rs` module docs for
+    /// `Some` only for the udev/DRM backend; see `udev/mod.rs` module docs for
     /// why its runtime state lives here rather than on a separate struct.
     pub(crate) udev: Option<udev::UdevState>,
     /// XWayland support; see `xwayland.rs` module docs. `xwm` is `None`

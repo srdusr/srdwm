@@ -18,7 +18,7 @@ pub(super) fn handle_winit_event(state: &mut CompState, output: &Output, event: 
         // This backend had no scroll handling at all - `InputEvent::
         // PointerAxis` fell into the catch-all below and was silently
         // dropped, unconditionally, on every device. Same forwarding as
-        // `udev.rs`'s equivalent (see its own comment for the `stop()`/
+        // `udev/session.rs`'s equivalent (see its own comment for the `stop()`/
         // `v120()` reasoning); duplicated rather than shared since the two
         // backends' `InputEvent` generic parameters differ and there's no
         // shared event type to write one function against.

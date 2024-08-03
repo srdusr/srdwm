@@ -4,9 +4,9 @@
 //! `crates/ctl` (the `srd` binary) is the reference client.
 //!
 //! Deliberately synchronous and non-blocking-polled from each backend's
-//! `poll_events()` tick (see `udev.rs`/`winit.rs`), the same way the
+//! `poll_events()` tick (see `udev`/`winit`), the same way the
 //! Wayland client socket itself is accepted - there is no calloop event
-//! loop shared by both backends (`winit.rs` has none at all), so this
+//! loop shared by both backends (`winit` has none at all), so this
 //! avoids needing two different registration mechanisms for one feature.
 //! An ordinary request is one request/one response/close; nothing here is
 //! held open for those, so a stalled or hostile client can only ever leak

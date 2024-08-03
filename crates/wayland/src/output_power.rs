@@ -9,7 +9,7 @@
 //! Neither protocol implies the other.
 //!
 //! DRM/udev backend only: there is no real display to power down when
-//! nested under a host compositor (`winit.rs`) - the host owns the actual
+//! nested under a host compositor (`winit`) - the host owns the actual
 //! screen, and turning off the *nested window* makes no sense. The global
 //! is simply never created there (`CompState::_output_power_state` is
 //! `None`), so a client sees the protocol as genuinely unsupported rather
