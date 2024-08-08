@@ -464,7 +464,8 @@ where
     // No client image. A named shape we have dedicated art for gets it
     // (centered on the pointer - these are all symmetric shapes, unlike
     // the arrow); anything else (Default, or one of the many shapes we
-    // don't draw, e.g. Grab/Pointer/Crosshair) falls back to the arrow.
+    // still don't draw, e.g. Grab/Wait/Help/NotAllowed) falls back to the
+    // arrow.
     // The arrow's own hotspot is `buffers.arrow_hotspot` - (0, 0), the
     // bitmap's tip, for the built-in fallback, but a real theme's `xhot`/
     // `yhot` (not necessarily the top-left corner at all) when
