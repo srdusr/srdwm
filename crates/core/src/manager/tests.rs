@@ -223,6 +223,29 @@
     }
 
     #[test]
+    fn hit_test_ignores_a_window_on_another_workspace_even_if_its_geometry_overlaps() {
+        // Reported live: clicking a window sent the click to a different,
+        // invisible window that merely happened to sit at the same screen
+        // coordinates on a workspace that wasn't current. Rendering already
+        // filtered by workspace (`visible_windows`); hit-testing didn't.
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        let mut wa = Window::new(a, "a");
+        wa.geometry = Rect::new(0, 0, 400, 300);
+        wm.add_window(wa);
+        let b = wm.alloc_window_id();
+        let mut wb = Window::new(b, "b");
+        wb.geometry = Rect::new(0, 0, 400, 300); // identical geometry to `a`
+        wm.add_window(wb);
+        let other_workspace = wm.add_workspace("2", "dynamic");
+        wm.move_window_to_workspace(b, other_workspace); // b is now off-screen, not minimized
+
+        let (hit_id, _) = wm.hit_test(200, 10).unwrap();
+        assert_eq!(hit_id, a, "a click must land on the visible window, not one hidden on another workspace");
+        assert_eq!(wm.window_at(200, 10), Some(a));
+    }
+
+    #[test]
     fn moving_window_to_another_workspace_removes_it_from_current() {
         let mut wm = wm_with_monitor();
         let a = wm.alloc_window_id();
