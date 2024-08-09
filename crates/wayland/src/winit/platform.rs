@@ -105,8 +105,14 @@ impl Platform for WaylandPlatform {
     }
 
     fn close(&mut self, window: WindowId) -> PlatformResult<()> {
-        if let Some(w) = self.state.id_to_window.get(&window).and_then(|w| w.toplevel()) {
-            w.send_close();
+        let Some(w) = self.state.id_to_window.get(&window) else { return Ok(()) };
+        if let Some(toplevel) = w.toplevel() {
+            toplevel.send_close();
+        } else if let Some(x11) = w.x11_surface() {
+            // Same fix as `udev/platform.rs`'s matching function: `w.toplevel()`
+            // is `None` for an XWayland window, so closing one silently did
+            // nothing at all without this arm.
+            let _ = x11.close();
         }
         Ok(())
     }

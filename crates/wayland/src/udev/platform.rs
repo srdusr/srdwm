@@ -355,8 +355,17 @@ impl Platform for UdevPlatform {
     }
 
     fn close(&mut self, window: srdwm_core::WindowId) -> PlatformResult<()> {
-        if let Some(w) = self.state.id_to_window.get(&window).and_then(|w| w.toplevel()) {
-            w.send_close();
+        let Some(w) = self.state.id_to_window.get(&window) else { return Ok(()) };
+        if let Some(toplevel) = w.toplevel() {
+            toplevel.send_close();
+        } else if let Some(x11) = w.x11_surface() {
+            // `w.toplevel()` is `None` for an XWayland window - without
+            // this arm, closing one (the WM's own close binding, or `srd
+            // dispatch close`) silently did nothing at all. `close()` itself
+            // handles both cases: a polite WM_DELETE_WINDOW for a
+            // cooperating client, outright `destroy_window` for one that
+            // doesn't support it.
+            let _ = x11.close();
         }
         Ok(())
     }
