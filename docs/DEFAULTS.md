@@ -27,9 +27,11 @@ srd.set("general.auto_focus", true)                    -- Default: true
 srd.set("monitor.primary_layout", "dynamic")           -- Default: "dynamic"
 srd.set("monitor.secondary_layout", "tiling")          -- Default: "tiling"
 srd.set("monitor.auto_detect", true)                   -- Default: true
-srd.set("monitor.primary_workspace", 1)                -- Default: 1
-srd.set("monitor.workspace_count", 10)                 -- Default: 10
 ```
+srdwm has one flat workspace list shared by every monitor, not an
+independent set per monitor - there is no "this monitor's primary
+workspace"/"this monitor's workspace count" to configure. `workspace.count`
+below is the actual knob.
 
 ### Window Behavior (`window.*`)
 ```lua
@@ -47,10 +49,10 @@ srd.set("window.remember_state", true)                 -- Default: true
 ```lua
 srd.set("workspace.count", 10)                         -- Default: 10
 srd.set("workspace.names", {"1", "2", "3", "4", "5", "6", "7", "8", "9", "0"})
-srd.set("workspace.auto_switch", false)                -- Default: false
-srd.set("workspace.persistent", true)                  -- Default: true
 srd.set("workspace.auto_back_and_forth", false)        -- Default: false
 ```
+(`workspace.auto_switch`/`workspace.persistent` are not implemented - not
+listed here since setting either currently does nothing.)
 
 ### Performance Settings (`performance.*`)
 ```lua

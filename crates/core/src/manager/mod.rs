@@ -41,6 +41,11 @@ pub struct WindowManager {
     focused: Option<WindowId>,
     monitors: Vec<Monitor>,
     workspaces: Vec<Workspace>,
+    /// One flat value shared by every monitor - not per-output. Unlike
+    /// Hyprland, srdwm has no notion of an independent workspace set per
+    /// monitor; switching workspace changes what's visible on every screen
+    /// at once. See `visible_windows`'s doc comment for the filter this
+    /// actually drives.
     current_workspace: WorkspaceId,
     /// Whichever workspace was current immediately before the current one
     /// became current - see `switch_workspace`'s doc comment.

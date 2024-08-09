@@ -75,7 +75,12 @@ impl WindowManager {
     }
 
     /// Windows that should currently be shown to the user: those on the
-    /// active workspace of whichever monitor they're assigned to, and not minimized.
+    /// current workspace, and not minimized.
+    ///
+    /// `current_workspace` is a single value shared by every monitor --
+    /// srdwm does not have Hyprland-style independent per-monitor
+    /// workspaces, so switching workspace changes what's shown on every
+    /// screen at once. `w.monitor` plays no part in this filter at all.
     pub fn visible_windows(&self) -> impl Iterator<Item = &Window> {
         self.windows.values().filter(|w| w.workspace == self.current_workspace && !w.minimized)
     }

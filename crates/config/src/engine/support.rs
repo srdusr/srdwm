@@ -159,8 +159,12 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     set("monitor.primary_layout", String("dynamic".into()));
     set("monitor.secondary_layout", String("tiling".into()));
     set("monitor.auto_detect", Bool(true));
-    set("monitor.primary_workspace", Number(1.0));
-    set("monitor.workspace_count", Number(10.0));
+    // Deliberately *not* seeded, unlike everything else here: srdwm has one
+    // flat workspace list shared by every monitor (see WindowManager's
+    // `current_workspace` doc comment), not Hyprland-style independent
+    // per-monitor workspace sets - "this monitor's primary workspace" and
+    // "this monitor's workspace count" describe a design that doesn't
+    // exist. `workspace.count` is the one knob that actually does anything.
 
     set("window.focus_follows_mouse", Bool(false));
     set("window.mouse_follows_focus", Bool(true));
@@ -173,8 +177,13 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
 
     set("workspace.count", Number(10.0));
     set("workspace.names", List(["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"].map(|s| s.to_string()).to_vec()));
-    set("workspace.auto_switch", Bool(false));
-    set("workspace.persistent", Bool(true));
+    // `auto_switch` (jump to a new window's workspace when a rule places it
+    // elsewhere) and `persistent` (workspace state surviving a restart) are
+    // deliberately *not* seeded here: neither is implemented, and a key
+    // that's accepted and silently does nothing is worse than one that
+    // doesn't exist - see the same reasoning on `general.rounded_corners`'
+    // absence from this function, though that one differs by backend
+    // rather than being simply unbuilt.
     set("workspace.auto_back_and_forth", Bool(false));
 
     set("performance.vsync", Bool(true));
