@@ -25,7 +25,7 @@
 use smithay::reexports::calloop::LoopHandle;
 use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
-use smithay::xwayland::xwm::{Reorder, ResizeEdge as X11ResizeEdge, XwmId};
+use smithay::xwayland::xwm::{Reorder, ResizeEdge as X11ResizeEdge, WmWindowProperty, XwmId};
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler};
 use smithay::{delegate_xwayland_shell, desktop::Window as DWindow};
 
@@ -609,6 +609,53 @@ impl XwmHandler for CompState {
         let xid = window.window_id();
         self.remove_x11_window(xid);
         self.xwayland_windows.remove(&xid);
+    }
+
+    /// Re-reads title/class after either changes post-map and updates
+    /// `Window`/foreign-toplevel listeners if either actually did - the
+    /// XWayland equivalent of `sync_toplevel_metadata` (see its own doc
+    /// comment for the identical xdg-shell-side problem this mirrors).
+    ///
+    /// `map_window_request` only ever reads `window.title()`/`.class()`
+    /// once, at `MapRequest` - but for some real clients (confirmed live:
+    /// Spotify, OpenSnitch's tray-prompt window) the *managed* X11 window
+    /// never carries `WM_NAME`/`WM_CLASS` at all at that moment, or ever;
+    /// the properties land on a separately-reparented child window instead,
+    /// and XWayland's own X11Wm surfaces that as a `property_notify` on
+    /// *this* window once it observes the change. Without handling it here,
+    /// `Window.title`/`app_id` stay permanently empty for such a window --
+    /// which reaches `srd.rule` (class matching), the compositor's own
+    /// titlebar text, and every `wlr-foreign-toplevel-management` listener
+    /// (a dock's running-indicator, an app switcher, icon lookup), not just
+    /// this compositor's own UI.
+    fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
+        if !matches!(property, WmWindowProperty::Title | WmWindowProperty::Class) {
+            return;
+        }
+        let Some(&id) = self.xwayland_windows.get(&window.window_id()) else { return };
+        let title = window.title();
+        let app_id = window.class();
+        let changed = {
+            let mut wm = self.wm.borrow_mut();
+            let Some(w) = wm.window_mut(id) else { return };
+            let changed = w.title != title || w.app_id != app_id;
+            w.title = title;
+            w.app_id = app_id;
+            changed
+        };
+        if changed {
+            // Same reasoning as `sync_toplevel_metadata`: only a rule
+            // actually matching for the first time warrants a decoration/
+            // geometry refresh, since `sync_geometry` re-stacks the window
+            // to the top of `Space` as an unconditional side effect of
+            // `map_element` - calling it on every later title change would
+            // silently yank an unrelated, unfocused window back to front.
+            if self.wm.borrow_mut().reapply_rules_if_pending(id) {
+                self.redraw_decoration_buffer(id);
+                self.sync_geometry(id);
+            }
+            crate::foreign_toplevel::send_state(self, id);
+        }
     }
 
     fn configure_request(&mut self, _xwm: XwmId, _window: X11Surface, _x: Option<i32>, _y: Option<i32>, _w: Option<u32>, _h: Option<u32>, _reorder: Option<Reorder>) {
