@@ -177,6 +177,16 @@ struct ClientInfo {
     // `ext_foreign_toplevel_list_v1` carries geometry at all, by design of
     // those protocols, so this compositor's own IPC is the only place it
     // can come from.
+    //
+    // This is `Window.geometry` verbatim: the *frame* rect, decorated
+    // window and all - for a decorated window that means `height`
+    // includes `TITLEBAR_HEIGHT` on top of the client's own content size,
+    // the same "band added on top" convention hit-testing/rendering/every
+    // other internal consumer of `Window.geometry` already uses. Not the
+    // client's own content rect, which for a decorated window sits
+    // `TITLEBAR_HEIGHT` logical pixels lower and that much shorter. A
+    // consumer treating this as on-screen window extent (e.g. an overlap/
+    // auto-hide test) wants the frame rect, which is what this is.
     x: i32,
     y: i32,
     width: u32,
