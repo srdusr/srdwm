@@ -193,6 +193,12 @@ pub const RESIZE_MARGIN: i32 = 6;
 /// a much narrower band that a click meant to grab the tab strip is very
 /// unlikely to land in by accident.
 pub const UNDECORATED_TOP_RESIZE_MARGIN: i32 = 3;
+/// How much wider than [`RESIZE_MARGIN`] a corner's own diagonal-resize
+/// zone reaches, as a multiplier on whatever margin is actually in effect
+/// - see `ResizeEdge::resize_edge_at`'s doc comment for why corners need
+/// more room than a straight edge at all, not just a proportionally bigger
+/// dead-simple hit box.
+pub const CORNER_MARGIN: i32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeEdge {
@@ -241,6 +247,27 @@ impl ResizeEdge {
             return None;
         }
         if decorated && y < frame.y + TITLEBAR_HEIGHT as i32 {
+            // The titlebar's own top-left corner pixels are still the
+            // window's outer corner - without this, a decorated window's
+            // top-left diagonal resize was completely unreachable: every y
+            // inside the titlebar band returned here unconditionally,
+            // before `resize_edge_at` (checked below, for every other edge)
+            // ever ran. A genuine small square right at the corner (both x
+            // *and* y within it), not just "close on one axis" - otherwise
+            // this would claim the whole left end of the drag area at any
+            // height within the titlebar, not just its actual corner.
+            //
+            // The top-right corner deliberately does *not* get the same
+            // treatment: it's where the close button already lives, and
+            // every mainstream desktop's convention is that the corner of a
+            // titlebar closes the window, not resizes it. Adding a
+            // competing resize zone there would trade a real, expected
+            // target (close) for a rarely-wanted one at exactly the spot a
+            // miss is most costly.
+            let corner_zone = CORNER_MARGIN * resize_margin;
+            if x <= frame.x + corner_zone && y <= frame.y + corner_zone {
+                return Some(TitlebarHit::Resize(ResizeEdge::TopLeft));
+            }
             const BUTTON: i32 = TITLEBAR_HEIGHT as i32;
             let right = frame.right();
             if x >= right - BUTTON {
@@ -261,21 +288,50 @@ impl ResizeEdge {
     fn resize_edge_at(frame: Rect, x: i32, y: i32, decorated: bool, resize_margin: i32) -> Option<ResizeEdge> {
         let m = resize_margin;
         let top_m = if decorated { m } else { UNDECORATED_TOP_RESIZE_MARGIN };
+
+        // A corner resize gets a bigger, prioritized hit zone than a plain
+        // single edge, checked first - a diagonal drag is a harder target
+        // to land than a straight edge, and several desktops (GNOME, KDE)
+        // give it noticeably more room for exactly that reason. Reported
+        // live: corners felt like they had no priority over sides at all,
+        // which tracked - a corner previously only registered in the exact
+        // pixel square where both edges' own `resize_margin` zones happened
+        // to overlap (6x6px at the default margin), nothing wider.
+        // `corner_top_m` still respects the undecorated window's much
+        // narrower top reach (`UNDECORATED_TOP_RESIZE_MARGIN`) rather than
+        // widening it too - this must not reopen the "can't grab Firefox's
+        // tab strip" bug near a top corner, only the horizontal reach grows
+        // there.
+        let corner_m = CORNER_MARGIN * m;
+        let corner_top_m = if decorated { corner_m } else { UNDECORATED_TOP_RESIZE_MARGIN };
+        let corner_left = x <= frame.x + corner_m;
+        let corner_right = x >= frame.right() - corner_m;
+        let corner_top = y <= frame.y + corner_top_m;
+        let corner_bottom = y >= frame.bottom() - corner_m;
+        if corner_left && corner_top {
+            return Some(ResizeEdge::TopLeft);
+        }
+        if corner_right && corner_top {
+            return Some(ResizeEdge::TopRight);
+        }
+        if corner_left && corner_bottom {
+            return Some(ResizeEdge::BottomLeft);
+        }
+        if corner_right && corner_bottom {
+            return Some(ResizeEdge::BottomRight);
+        }
+
         let near_left = x <= frame.x + m;
         let near_right = x >= frame.right() - m;
         let near_top = y <= frame.y + top_m;
         let near_bottom = y >= frame.bottom() - m;
-        Some(match (near_left, near_right, near_top, near_bottom) {
-            (true, _, true, _) => ResizeEdge::TopLeft,
-            (_, true, true, _) => ResizeEdge::TopRight,
-            (true, _, _, true) => ResizeEdge::BottomLeft,
-            (_, true, _, true) => ResizeEdge::BottomRight,
-            (true, false, false, false) => ResizeEdge::Left,
-            (false, true, false, false) => ResizeEdge::Right,
-            (false, false, true, false) => ResizeEdge::Top,
-            (false, false, false, true) => ResizeEdge::Bottom,
-            _ => return None,
-        })
+        match (near_left, near_right, near_top, near_bottom) {
+            (true, false, false, false) => Some(ResizeEdge::Left),
+            (false, true, false, false) => Some(ResizeEdge::Right),
+            (false, false, true, false) => Some(ResizeEdge::Top),
+            (false, false, false, true) => Some(ResizeEdge::Bottom),
+            _ => None,
+        }
     }
 
     /// Apply a pointer delta to `original` geometry along this edge, honoring
@@ -435,6 +491,57 @@ mod tests {
         // still nothing - the fix widens the dead zone's boundary, it
         // doesn't remove it.
         assert_eq!(ResizeEdge::hit_test(f, f.x - border_width as i32 - 1, cy, true, border_width, RESIZE_MARGIN), None);
+    }
+
+    #[test]
+    fn corner_resize_reaches_further_than_a_plain_edge_would() {
+        // Reported live: corners felt like they had no priority over sides.
+        // At the default margin (6px) a corner previously only registered
+        // in the exact 6x6 overlap of both edges' own zones; a click a
+        // little further along either axis fell back to a single-edge
+        // resize instead, even though it still read as "aiming for the
+        // corner." This point is well past the plain 6px edge margin on
+        // both axes but still within `CORNER_MARGIN`'s wider corner zone.
+        let f = frame();
+        let corner_reach = CORNER_MARGIN * RESIZE_MARGIN;
+        assert!(corner_reach > RESIZE_MARGIN, "the whole point of this test is that corner reach exceeds a plain edge's");
+        let x = f.x + corner_reach - 1;
+        let y = f.bottom() - corner_reach + 1;
+        assert_eq!(ResizeEdge::hit_test(f, x, y, true, 0, RESIZE_MARGIN), Some(TitlebarHit::Resize(ResizeEdge::BottomLeft)));
+    }
+
+    #[test]
+    fn just_past_the_corner_zone_falls_back_to_a_single_edge() {
+        let f = frame();
+        let corner_reach = CORNER_MARGIN * RESIZE_MARGIN;
+        // Still within the corner zone vertically but past it horizontally
+        // - must read as a plain bottom edge, not a corner.
+        let x = f.x + corner_reach + 5;
+        let y = f.bottom() - 1;
+        assert_eq!(ResizeEdge::hit_test(f, x, y, true, 0, RESIZE_MARGIN), Some(TitlebarHit::Resize(ResizeEdge::Bottom)));
+    }
+
+    #[test]
+    fn decorated_window_top_left_corner_of_titlebar_resizes_not_drags() {
+        // The titlebar band used to claim every y within it unconditionally
+        // (drag, or a button near the right edge) - a decorated window's
+        // top-left diagonal resize was completely unreachable, since
+        // `resize_edge_at` never even ran for a y inside the titlebar.
+        let f = frame();
+        let corner_reach = CORNER_MARGIN * RESIZE_MARGIN;
+        let hit = ResizeEdge::hit_test(f, f.x + corner_reach - 1, f.y + corner_reach - 1, true, 0, RESIZE_MARGIN);
+        assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::TopLeft)));
+    }
+
+    #[test]
+    fn decorated_window_top_right_corner_still_closes_not_resizes() {
+        // Deliberately the opposite of the top-left case: the close button
+        // owns the top-right corner, matching every mainstream desktop's
+        // convention, rather than competing with a resize zone at exactly
+        // the spot a miss is most costly.
+        let f = frame();
+        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.y + 1, true, 0, RESIZE_MARGIN);
+        assert_eq!(hit, Some(TitlebarHit::Close));
     }
 
     #[test]
