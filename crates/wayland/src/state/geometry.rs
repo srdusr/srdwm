@@ -64,6 +64,35 @@ impl CompState {
                 if size_changed {
                     top.with_pending_state(|state| {
                         state.size = Some(size.into());
+                        // No configure from this compositor, ever, set any
+                        // `xdg_toplevel` state bit at all before this --
+                        // confirmed by grepping the whole crate for
+                        // `xdg_toplevel::State`, zero hits. GTK4 (Firefox
+                        // concretely) reads the tiled bits to decide whether
+                        // to reserve its own invisible client-side shadow
+                        // margin around its actual content, independent of
+                        // whether decoration is server- or client-side --
+                        // with none ever sent, it always assumed "floating,
+                        // might need a shadow" and kept reserving one. That
+                        // margin sits inside the committed buffer but is
+                        // functionally invisible, so this compositor's own
+                        // border - drawn at the *full* geometry, margin
+                        // included, since nothing here knew the margin
+                        // existed - ended up visibly offset from where the
+                        // client's real chrome began. Reported live as
+                        // Firefox's border "not with the window," and more
+                        // generally never feeling like part of it. Setting
+                        // all four unconditionally (the same technique
+                        // river/dwl use) tells every window it's flush
+                        // against something and should skip its own shadow,
+                        // regardless of whether it's actually in a tiled
+                        // layout - which is the outcome actually wanted:
+                        // this compositor draws the frame, so nothing else
+                        // should also be reserving room for one.
+                        state.states.set(xdg_toplevel::State::TiledLeft);
+                        state.states.set(xdg_toplevel::State::TiledRight);
+                        state.states.set(xdg_toplevel::State::TiledTop);
+                        state.states.set(xdg_toplevel::State::TiledBottom);
                     });
                     top.send_configure();
                 }

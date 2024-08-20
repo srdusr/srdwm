@@ -33,6 +33,7 @@ use smithay::wayland::selection::primary_selection::{set_primary_focus, PrimaryS
 use smithay::wayland::selection::wlr_data_control::DataControlState;
 use smithay::wayland::session_lock::SessionLockManagerState;
 use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, LayerSurfaceData, WlrLayerShellState};
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::wayland::shell::xdg::{ToplevelSurface, XdgShellState, XdgToplevelSurfaceData};
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::dmabuf::DmabufState;
