@@ -394,6 +394,20 @@ fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<WindowManager
             wm.borrow_mut().close_window(id);
             (ok(), true)
         }
+        // `srd.window.maximize()`/`.fullscreen()`'s exact IPC-side
+        // equivalents - lets an external script (or a live diagnostic
+        // check, same as `toggle_visibility`/`focus`/`close` already allow)
+        // drive either without needing a keybinding to already exist.
+        "toggle_maximize" => {
+            let Some(id) = id else { return (err("missing id"), false) };
+            wm.borrow_mut().toggle_maximize(id);
+            (ok(), true)
+        }
+        "toggle_fullscreen" => {
+            let Some(id) = id else { return (err("missing id"), false) };
+            wm.borrow_mut().toggle_fullscreen(id);
+            (ok(), true)
+        }
         _ => (err("unknown command"), false),
     }
 }

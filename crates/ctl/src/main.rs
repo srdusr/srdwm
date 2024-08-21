@@ -12,6 +12,8 @@
 //!   srd dispatch toggle_visibility ID  hide/show a window
 //!   srd dispatch focus ID
 //!   srd dispatch close ID
+//!   srd dispatch toggle_maximize ID
+//!   srd dispatch toggle_fullscreen ID
 //!
 //! The socket is Unix-domain; on platforms without one this always fails
 //! cleanly rather than not building at all, since it's one binary in a
@@ -48,8 +50,8 @@ fn build_request(args: &[String]) -> Result<String, String> {
         Some("monitors") => Ok(r#"{"cmd":"monitors"}"#.to_string()),
         Some("subscribe") => Ok(r#"{"cmd":"subscribe"}"#.to_string()),
         Some("dispatch") => {
-            let action = args.get(1).ok_or("dispatch needs an action (toggle_visibility/focus/close)")?;
-            if !matches!(action.as_str(), "toggle_visibility" | "focus" | "close") {
+            let action = args.get(1).ok_or("dispatch needs an action (toggle_visibility/focus/close/toggle_maximize/toggle_fullscreen)")?;
+            if !matches!(action.as_str(), "toggle_visibility" | "focus" | "close" | "toggle_maximize" | "toggle_fullscreen") {
                 return Err(format!("unknown dispatch action '{action}'"));
             }
             let id: u64 = args.get(2).ok_or("dispatch needs a window id")?.parse().map_err(|_| "window id must be a number".to_string())?;
@@ -67,6 +69,8 @@ fn print_usage() {
     eprintln!("  srd dispatch toggle_visibility <id>");
     eprintln!("  srd dispatch focus <id>");
     eprintln!("  srd dispatch close <id>");
+    eprintln!("  srd dispatch toggle_maximize <id>");
+    eprintln!("  srd dispatch toggle_fullscreen <id>");
 }
 
 #[cfg(unix)]
