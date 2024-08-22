@@ -24,7 +24,8 @@ impl WindowManager {
             if w.minimized || w.workspace != self.current_workspace {
                 continue;
             }
-            if let Some(hit) = ResizeEdge::hit_test(w.geometry, x, y, w.decorated, w.border_width, self.resize_margin) {
+            let margin = w.resize_margin.unwrap_or(self.resize_margin);
+            if let Some(hit) = ResizeEdge::hit_test(w.geometry, x, y, w.decorated, w.border_width, margin) {
                 return Some((w.id, hit));
             }
         }

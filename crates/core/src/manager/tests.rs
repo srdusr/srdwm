@@ -246,6 +246,23 @@
     }
 
     #[test]
+    fn per_window_resize_margin_overrides_the_wm_wide_default() {
+        // Hyprland's per-window `extend_border_grab_area` equivalent.
+        let mut wm = wm_with_monitor();
+        wm.set_layout(wm.current_workspace(), "tiling"); // keeps add_window from overriding geometry via SmartPlacement
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "a");
+        w.geometry = Rect::new(100, 100, 400, 300);
+        w.resize_margin = Some(30);
+        wm.add_window(w);
+
+        // 15px in from the left edge: well past the WM-wide default (6px),
+        // but still inside this window's own wider 30px override.
+        let hit = wm.hit_test(115, 250);
+        assert_eq!(hit.map(|(_, h)| h), Some(TitlebarHit::Resize(ResizeEdge::Left)));
+    }
+
+    #[test]
     fn moving_window_to_another_workspace_removes_it_from_current() {
         let mut wm = wm_with_monitor();
         let a = wm.alloc_window_id();

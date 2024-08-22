@@ -45,6 +45,7 @@ impl Engine {
         window.set("set_border_color", self.fn_window_set_border_color()?)?;
         window.set("set_border_width", self.fn_window_set_border_width()?)?;
         window.set("set_opacity", self.fn_window_set_opacity()?)?;
+        window.set("set_resize_margin", self.fn_window_set_resize_margin()?)?;
         window.set("set_floating", self.fn_window_set_floating()?)?;
         window.set("toggle_floating", self.fn_window_action(WindowAction::ToggleFloating)?)?;
         window.set("is_floating", self.fn_window_is_floating()?)?;

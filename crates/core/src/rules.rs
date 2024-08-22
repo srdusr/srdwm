@@ -90,6 +90,9 @@ pub struct WindowRuleActions {
     pub pinned: Option<bool>,
     /// Content opacity, `0.0`..=`1.0` (Hyprland's `windowrule = opacity`).
     pub opacity: Option<f32>,
+    /// Per-window resize-grab-margin override, in logical pixels
+    /// (Hyprland's per-window `extend_border_grab_area`).
+    pub resize_margin: Option<i32>,
 }
 
 #[derive(Debug, Clone, Default)]

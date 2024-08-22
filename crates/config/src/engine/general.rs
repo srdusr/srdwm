@@ -184,6 +184,7 @@ impl Engine {
                     border_width: actions.get("border_width")?,
                     pinned: actions.get("pinned")?,
                     opacity: actions.get("opacity")?,
+                    resize_margin: actions.get("resize_margin")?,
                 },
             };
             state.borrow().wm.borrow_mut().add_rule(rule);

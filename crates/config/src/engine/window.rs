@@ -153,6 +153,20 @@ impl Engine {
         })?)
     }
 
+    pub(super) fn fn_window_set_resize_margin(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, margin: i32| {
+            let wm = state.borrow().wm.clone();
+            let mut wm = wm.borrow_mut();
+            if let Some(id) = wm.focused_id() {
+                if let Some(w) = wm.window_mut(id) {
+                    w.resize_margin = Some(margin);
+                }
+            }
+            Ok(())
+        })?)
+    }
+
     pub(super) fn fn_window_set_floating(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |_, floating: bool| {

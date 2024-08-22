@@ -52,6 +52,9 @@ impl WindowManager {
             if let Some(opacity) = a.opacity {
                 window.opacity = opacity.clamp(0.0, 1.0);
             }
+            if let Some(margin) = a.resize_margin {
+                window.resize_margin = Some(margin);
+            }
         }
 
         if let Some(monitor) = self.primary_monitor() {
@@ -126,6 +129,9 @@ impl WindowManager {
         }
         if let Some(opacity) = actions.opacity {
             window.opacity = opacity.clamp(0.0, 1.0);
+        }
+        if let Some(margin) = actions.resize_margin {
+            window.resize_margin = Some(margin);
         }
         if let Some(geometry) = actions.geometry {
             window.geometry = geometry;

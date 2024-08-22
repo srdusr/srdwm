@@ -97,6 +97,11 @@ pub struct Window {
     /// effect still keeps its frame legible. Set via `srd.window.
     /// set_opacity()` or a rule's `opacity` action.
     pub opacity: f32,
+    /// Per-window override of `WindowManager::resize_margin`, `None` to
+    /// just inherit it. Hyprland's `extend_border_grab_area` is per-window
+    /// (a `windowrule`); this is the equivalent, set via a rule's
+    /// `resize_margin` action or `srd.window.set_resize_margin()`.
+    pub resize_margin: Option<i32>,
     pub workspace: usize,
     pub monitor: u32,
     /// Whether `WindowManager`'s class/title-matched rules have already
@@ -143,6 +148,7 @@ impl Window {
             border_color: (136, 192, 208), // Nord accent, matches legacy theme default
             border_width: 2,
             opacity: 1.0,
+            resize_margin: None,
             workspace: 0,
             monitor: 0,
             rules_applied: false,

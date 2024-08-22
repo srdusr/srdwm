@@ -220,6 +220,10 @@ srd.rule(matcher, actions)
 - `pinned` (bool) - always-on-top
 - `opacity` (number, `0.0`..=`1.0`) - content opacity; srdwm's own
   titlebar/border/shadow always stay fully opaque regardless
+- `resize_margin` (number, logical pixels) - per-window override of
+  `general.resize_margin` (Hyprland's per-window `extend_border_grab_area`).
+  Also settable live via `srd.window.set_resize_margin(n)` on the focused
+  window.
 
 ```lua
 srd.rule({ class = "pavucontrol" }, { floating = true })
