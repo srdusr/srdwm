@@ -109,8 +109,17 @@ impl CompState {
             } else {
                 self.border_top_decorations.remove(&id);
             }
+            if strips[1].width > 0 && strips[1].height > 0 {
+                let data = decoration::render_border_bottom(strips[1].width, w.border_width, color);
+                let buffer =
+                    MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (strips[1].width as i32, w.border_width as i32), 1, Transform::Normal, None);
+                self.border_bottom_decorations.insert(id, buffer);
+            } else {
+                self.border_bottom_decorations.remove(&id);
+            }
         } else {
             self.border_top_decorations.remove(&id);
+            self.border_bottom_decorations.remove(&id);
         }
         // No shadow for a maximized/fullscreen window: it already reaches
         // (or, for fullscreen, exceeds) the monitor's own edge, so there is
@@ -138,6 +147,7 @@ impl CompState {
         }
         self.decorations.remove(&id);
         self.border_top_decorations.remove(&id);
+        self.border_bottom_decorations.remove(&id);
         self.shadow_buffers.remove(&id);
         self.border_side_buffers.remove(&id);
         self.last_synced_size.remove(&id);

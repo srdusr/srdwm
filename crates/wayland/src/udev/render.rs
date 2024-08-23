@@ -236,12 +236,13 @@ impl CompState {
                     if w.border_width > 0 {
                         let color = crate::state::effective_border_color(w.border_color, focused == Some(id));
                         let strips = decoration::border_strips(geom, w.border_width);
-                        // Strip 0 (top) rounded to match the titlebar under
-                        // it - see `render_border_top`'s doc comment - so
-                        // it's a cached bitmap (rebuilt only in
+                        // Strips 0/1 (top/bottom) rounded on their own two
+                        // corners - see `render_border_top`/
+                        // `render_border_bottom`'s doc comments - so both
+                        // are cached bitmaps (rebuilt only in
                         // `redraw_decoration_buffer`, same as the titlebar
                         // itself), not rasterized fresh here every frame.
-                        // Not fragment-clipped like the other three strips
+                        // Not fragment-clipped like the left/right strips
                         // below - cropping a bitmap's source rect per
                         // fragment is real extra work for a strip that's
                         // only `border_width` pixels tall to begin with, so
@@ -257,9 +258,21 @@ impl CompState {
                                 }
                             }
                         }
-                        // The other three strips are persistent
-                        // `SolidColorBuffer`s updated in place, not rebuilt
-                        // with a fresh `Id` every frame - see
+                        // Same all-or-nothing bitmap treatment as the top
+                        // strip, for its own two corners - see
+                        // `decoration::render_border_bottom`'s doc comment.
+                        if strips[1].width > 0 && strips[1].height > 0 && !strips[1].subtract_all(&occluders).is_empty() {
+                            if let Some(buffer) = self.border_bottom_decorations.get(&id) {
+                                let pos = ((strips[1].x - origin.x) as f64, (strips[1].y - origin.y) as f64);
+                                match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, None, None, Kind::Unspecified) {
+                                    Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                                    Err(e) => log::warn!("udev: failed to import bottom border buffer: {e}"),
+                                }
+                            }
+                        }
+                        // The remaining two strips (left/right) are
+                        // persistent `SolidColorBuffer`s updated in place,
+                        // not rebuilt with a fresh `Id` every frame - see
                         // `elements::border_side_render_element`'s doc
                         // comment for why that distinction is load-bearing
                         // for damage tracking, not cosmetic. Each strip is
@@ -269,7 +282,7 @@ impl CompState {
                         // here.
                         let pool = self.border_side_buffers.entry(id).or_default();
                         let mut buf_index = 0;
-                        for strip in &strips[1..] {
+                        for strip in &strips[2..] {
                             if strip.width == 0 || strip.height == 0 {
                                 continue;
                             }

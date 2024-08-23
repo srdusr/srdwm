@@ -149,6 +149,7 @@ impl WaylandPlatform {
             dead_layer_surfaces: HashSet::new(),
             decorations: HashMap::new(),
             border_top_decorations: HashMap::new(),
+            border_bottom_decorations: HashMap::new(),
             shadow_buffers: HashMap::new(),
             rounded_corners_program,
             content_epoch: HashMap::new(),

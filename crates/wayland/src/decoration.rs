@@ -276,9 +276,13 @@ fn edge_distance(pos: u32, margin: u32, extent: u32) -> u32 {
 /// too, at a radius `width` pixels larger than the titlebar's (so the cut
 /// continues outward from the titlebar's own, rather than starting over),
 /// is what makes a bordered window's corner read as one continuous curve
-/// instead of a rounded titlebar sitting inside a square frame. The other
-/// three strips (bottom/left/right) don't participate in any visible
-/// corner and stay plain solid fills - see their render call sites.
+/// instead of a rounded titlebar sitting inside a square frame.
+///
+/// [`render_border_bottom`] gives the bottom strip the matching treatment
+/// for its own two corners. The left/right strips don't participate in any
+/// visible corner at all (`border_strips`' geometry has them span only the
+/// height *between* the top and bottom strips) and stay plain solid fills
+/// - see their render call sites.
 pub fn render_border_top(width: u32, thickness: u32, color: (u8, u8, u8)) -> Vec<u8> {
     let (width, thickness) = (width.max(1) as usize, thickness.max(1) as usize);
     let bg = rgb_to_bgra(color, 255);
@@ -287,6 +291,29 @@ pub fn render_border_top(width: u32, thickness: u32, color: (u8, u8, u8)) -> Vec
         px.copy_from_slice(&bg);
     }
     round_top_corners(&mut buf, width, thickness, CORNER_RADIUS + thickness as u32);
+    buf
+}
+
+/// [`render_border_top`]'s mirror for the bottom strip - same construction,
+/// its own two corners (bottom-left/bottom-right) cut instead. Reported
+/// live, alongside the top-corner work: a bordered window's bottom two
+/// corners still read as square next to the now-rounded top ones, the same
+/// "inconsistently square" complaint that motivated rounding the top strip
+/// in the first place.
+///
+/// Handled as one all-or-nothing bitmap rather than folded into the
+/// left/right strips' per-fragment occlusion splitting (`visible_border_
+/// fragments`) - the same trade-off `render_border_top`'s own call site
+/// already makes and for the same reason: cropping a rounded bitmap's
+/// source rect per fragment is real extra work for a strip this thin.
+pub fn render_border_bottom(width: u32, thickness: u32, color: (u8, u8, u8)) -> Vec<u8> {
+    let (width, thickness) = (width.max(1) as usize, thickness.max(1) as usize);
+    let bg = rgb_to_bgra(color, 255);
+    let mut buf = vec![0u8; width * thickness * 4];
+    for px in buf.chunks_exact_mut(4) {
+        px.copy_from_slice(&bg);
+    }
+    round_bottom_corners(&mut buf, width, thickness, CORNER_RADIUS + thickness as u32);
     buf
 }
 
@@ -397,6 +424,37 @@ fn round_top_corners(buf: &mut [u8], width: usize, height: usize, radius: u32) {
         }
         for x in (width - r)..width {
             if is_outside_corner(x, y, width - r - 1, r) {
+                buf[(y * width + x) * 4 + 3] = 0;
+            }
+        }
+    }
+}
+
+/// [`round_top_corners`]'s mirror for the bottom two corners - same
+/// construction, corner centres `r` *up* from the bottom instead of down
+/// from the top.
+fn round_bottom_corners(buf: &mut [u8], width: usize, height: usize, radius: u32) {
+    let r = (radius as usize).min(width / 2).min(height);
+    if r == 0 {
+        return;
+    }
+    // `cy` as a signed offset, not a `usize` - `height - r` can be exactly
+    // `0` (a strip whose radius clamp landed on its own full height, same
+    // as `round_top_corners` allows for `r == height`), which would
+    // underflow a plain `usize` subtraction one step further below.
+    let is_outside_corner = |x: usize, y: usize, cx: usize, cy: i64| -> bool {
+        let (dx, dy) = (x as i64 - cx as i64, y as i64 - cy);
+        (dx * dx + dy * dy) as u64 > (r * r) as u64
+    };
+    let cy = height as i64 - r as i64 - 1;
+    for y in (height - r)..height {
+        for x in 0..r {
+            if is_outside_corner(x, y, r, cy) {
+                buf[(y * width + x) * 4 + 3] = 0;
+            }
+        }
+        for x in (width - r)..width {
+            if is_outside_corner(x, y, width - r - 1, cy) {
                 buf[(y * width + x) * 4 + 3] = 0;
             }
         }
@@ -684,6 +742,17 @@ mod tests {
         // the bottom row, at least at the strip's horizontal centre, must
         // stay opaque or there would be no border left to see at all.
         assert_eq!(alpha_at(width as usize / 2, thickness as usize - 1), 255, "centre of the strip must stay opaque");
+    }
+
+    #[test]
+    fn border_bottom_rounds_its_own_bottom_corners() {
+        let color = (0x40, 0x50, 0x60);
+        let (width, thickness) = (60, 2);
+        let buf = render_border_bottom(width, thickness, color);
+        let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
+        assert_eq!(alpha_at(0, thickness as usize - 1), 0, "bottom-left corner pixel should be clipped");
+        assert_eq!(alpha_at(width as usize - 1, thickness as usize - 1), 0, "bottom-right corner pixel should be clipped");
+        assert_eq!(alpha_at(width as usize / 2, 0), 255, "centre of the strip must stay opaque");
     }
 
     #[test]

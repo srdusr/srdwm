@@ -162,17 +162,18 @@ impl WaylandPlatform {
             if w.border_width > 0 {
                 let color = crate::state::effective_border_color(w.border_color, focused == Some(id));
                 let strips = decoration::border_strips(geom, w.border_width);
-                // Strip 0 (top) is rounded to match the titlebar underneath
-                // it - see `render_border_top`'s doc comment - so it's a
-                // cached bitmap (rebuilt only in `redraw_decoration_buffer`,
-                // same as the titlebar itself), not rasterized fresh here
-                // every frame; the other three don't touch a rounded corner
-                // and stay persistent solid-colour buffers instead - see
-                // `elements::border_side_render_element`'s doc comment for
-                // why a per-frame rebuild of either was a real, continuous
-                // cost, not a cosmetic one. Not fragment-clipped like the
-                // other three below - see the matching comment in
-                // `udev/render.rs` for why the top strip only gets the cheaper
+                // Strips 0/1 (top/bottom) are rounded on their own two
+                // corners - see `render_border_top`/`render_border_bottom`'s
+                // doc comments - so both are cached bitmaps (rebuilt only in
+                // `redraw_decoration_buffer`, same as the titlebar itself),
+                // not rasterized fresh here every frame; the remaining two
+                // (left/right) never touch a corner and stay persistent
+                // solid-colour buffers instead - see `elements::
+                // border_side_render_element`'s doc comment for why a
+                // per-frame rebuild of either was a real, continuous cost,
+                // not a cosmetic one. Not fragment-clipped like the left/
+                // right strips below - see the matching comment in
+                // `udev/render.rs` for why top/bottom only get the cheaper
                 // all-or-nothing occlusion check.
                 if strips[0].width > 0 && strips[0].height > 0 && !strips[0].subtract_all(&occluders).is_empty() {
                     if let Some(buffer) = self.state.border_top_decorations.get(&id) {
@@ -182,9 +183,20 @@ impl WaylandPlatform {
                         }
                     }
                 }
+                // Same all-or-nothing bitmap treatment as the top strip,
+                // for its own two corners - see `decoration::
+                // render_border_bottom`'s doc comment.
+                if strips[1].width > 0 && strips[1].height > 0 && !strips[1].subtract_all(&occluders).is_empty() {
+                    if let Some(buffer) = self.state.border_bottom_decorations.get(&id) {
+                        match MemoryRenderBufferRenderElement::from_buffer(renderer, (strips[1].x as f64, strips[1].y as f64), buffer, None, None, None, Kind::Unspecified) {
+                            Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
+                            Err(e) => log::warn!("failed to import bottom border buffer for window {id}: {e}"),
+                        }
+                    }
+                }
                 let pool = self.state.border_side_buffers.entry(id).or_default();
                 let mut buf_index = 0;
-                for strip in &strips[1..] {
+                for strip in &strips[2..] {
                     if strip.width == 0 || strip.height == 0 {
                         continue;
                     }

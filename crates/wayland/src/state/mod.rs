@@ -237,6 +237,9 @@ pub(crate) struct CompState {
     /// `elements::border_side_render_element`'s doc comment for the damage-
     /// tracking reason a per-frame rebuild was wrong in the first place.
     pub(crate) border_top_decorations: HashMap<WindowId, MemoryRenderBuffer>,
+    /// [`Self::border_top_decorations`]'s mirror for the bottom strip's own
+    /// two corners - same cache, same trigger points, same reasoning.
+    pub(crate) border_bottom_decorations: HashMap<WindowId, MemoryRenderBuffer>,
     /// A window's drop-shadow bitmap (`decoration::shadow_bitmap`), cached
     /// the same way and at the same trigger points as `border_top_decorations`
     /// - rebuilt only on creation or a real size change, not per frame, for
