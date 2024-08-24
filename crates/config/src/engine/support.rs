@@ -152,9 +152,12 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     // apart from "user explicitly chose a value" and hand the *unset* case
     // to whichever backend ends up connecting instead of deciding for it.
     set("general.focus_follows_mouse", Bool(false));
-    set("general.mouse_follows_focus", Bool(true));
     set("general.auto_raise", Bool(false));
-    set("general.auto_focus", Bool(true));
+    // `mouse_follows_focus` (warp the pointer to match a keybinding-driven
+    // focus change, the reverse of the two above) and `auto_focus` (no
+    // clear distinct meaning found beyond what plain click-to-focus already
+    // does) are deliberately not seeded - neither is implemented, same
+    // reasoning as `workspace.auto_switch`'s own absence.
 
     set("monitor.primary_layout", String("dynamic".into()));
     set("monitor.secondary_layout", String("tiling".into()));
@@ -166,14 +169,15 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     // "this monitor's workspace count" describe a design that doesn't
     // exist. `workspace.count` is the one knob that actually does anything.
 
-    set("window.focus_follows_mouse", Bool(false));
-    set("window.mouse_follows_focus", Bool(true));
-    set("window.auto_raise", Bool(false));
-    set("window.auto_focus", Bool(true));
-    set("window.raise_on_focus", Bool(true));
-    set("window.remember_position", Bool(true));
-    set("window.remember_size", Bool(true));
-    set("window.remember_state", Bool(true));
+    // The `window.*` namespace this codebase's own `docs/DEFAULTS.md`
+    // documented (focus_follows_mouse/mouse_follows_focus/auto_raise/
+    // auto_focus/raise_on_focus/remember_position/remember_size/
+    // remember_state) was a full, entirely unimplemented duplicate of
+    // `general.*`'s own focus keys plus three genuinely unbuilt
+    // per-app-window-state-persistence features - removed rather than
+    // seeded, same reasoning as everything else in this comment block.
+    // `general.focus_follows_mouse`/`general.auto_raise` above are the
+    // real, working versions of the one pair that *is* implemented.
 
     set("workspace.count", Number(10.0));
     set("workspace.names", List(["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"].map(|s| s.to_string()).to_vec()));

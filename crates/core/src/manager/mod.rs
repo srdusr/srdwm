@@ -86,6 +86,17 @@ pub struct WindowManager {
     /// redraws constantly - see `crates/wayland/src/rounded_corners.rs`).
     /// `Some(_)` only when the user explicitly set it, and wins either way.
     pub rounded_corners_enabled: Option<bool>,
+    /// Whether hovering a window (no click needed) focuses it, read from
+    /// `general.focus_follows_mouse`. Off by default - matches
+    /// `general.focus_follows_mouse`'s own documented default, and every
+    /// desktop's convention of click-to-focus unless a user explicitly
+    /// opts into the classic X11 sloppy-focus behaviour.
+    pub focus_follows_mouse: bool,
+    /// Whether hover-driven focus (above) also raises the window, not just
+    /// focuses it - read from `general.auto_raise`. Meaningless (never
+    /// consulted) while `focus_follows_mouse` is off, since a plain click
+    /// already raises unconditionally regardless of this.
+    pub auto_raise: bool,
     /// Default decoration colours and border width, read from `theme.colors.*`/
     /// `theme.decorations.*`. See `ThemeConfig`'s own doc comment.
     pub theme: ThemeConfig,
@@ -131,6 +142,8 @@ impl WindowManager {
             shadows_enabled: true,
             resize_margin: RESIZE_MARGIN,
             rounded_corners_enabled: None,
+            focus_follows_mouse: false,
+            auto_raise: false,
             theme: ThemeConfig::default(),
             drag: None,
             resize: None,

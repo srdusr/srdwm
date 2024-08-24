@@ -8,19 +8,23 @@ This document describes all default configuration values and available options f
 ### Global Settings (`general.*`)
 ```lua
 srd.set("general.default_layout", "dynamic")           -- Default: "dynamic"
-srd.set("general.smart_placement", true)               -- Default: true
 srd.set("general.window_gap", 8)                       -- Default: 8
-srd.set("general.border_width", 2)                     -- Default: 2
 srd.set("general.animations", true)                    -- Default: true
 srd.set("general.animation_duration", 200)             -- Default: 200ms
 srd.set("general.shadows", true)                       -- Default: true
 srd.set("general.resize_margin", 6)                    -- Default: 6px
 srd.set("general.rounded_corners", true)               -- Default: true on GLES/winit, false on udev/Pixman (opt-in there)
-srd.set("general.focus_follows_mouse", false)          -- Default: false
-srd.set("general.mouse_follows_focus", true)           -- Default: true
-srd.set("general.auto_raise", false)                   -- Default: false
-srd.set("general.auto_focus", true)                    -- Default: true
+srd.set("general.focus_follows_mouse", false)          -- Default: false - hover a window to focus it, no click needed
+srd.set("general.auto_raise", false)                   -- Default: false - also raise on hover-focus, not just focus
 ```
+`general.smart_placement`/`general.border_width` are not listed: neither
+is implemented - new-window placement always uses smart placement
+unconditionally (no toggle exists), and the real, working border-width
+setting is `theme.decorations.border.width` below.
+`general.mouse_follows_focus` (warp the pointer to match a keybinding-
+driven focus change) and `general.auto_focus` (no clear distinct meaning
+found beyond what plain click-to-focus already does) aren't implemented
+either.
 
 ### Monitor Settings (`monitor.*`)
 ```lua
@@ -34,15 +38,12 @@ workspace"/"this monitor's workspace count" to configure. `workspace.count`
 below is the actual knob.
 
 ### Window Behavior (`window.*`)
-```lua
-srd.set("window.focus_follows_mouse", false)           -- Default: false
-srd.set("window.mouse_follows_focus", true)            -- Default: true
-srd.set("window.auto_raise", false)                    -- Default: false
-srd.set("window.auto_focus", true)                     -- Default: true
-srd.set("window.raise_on_focus", true)                 -- Default: true
-srd.set("window.remember_position", true)              -- Default: true
-srd.set("window.remember_size", true)                  -- Default: true
-srd.set("window.remember_state", true)                 -- Default: true
+Not implemented: this whole namespace duplicated `general.*`'s own focus
+keys (see above for the two of those that are real) plus three genuinely
+unbuilt per-app-window-state-persistence keys (`remember_position`/
+`remember_size`/`remember_state` - no window remembers anything about a
+previous run; every new window starts at a hardcoded size, see
+`crates/wayland/src/xwayland.rs`/`state/lifecycle.rs`'s `new_managed_window`).
 ```
 
 ### Workspace Settings (`workspace.*`)

@@ -133,6 +133,12 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
     let hit = state.wm.borrow().hit_test(pos.x as i32, pos.y as i32);
     let under = state.space.element_under(pos).map(|(w, loc)| (w.clone(), loc));
     let over_content = under.is_some();
+    // Whichever core window the pointer is over right now, decoration or
+    // content, for `general.focus_follows_mouse` below - `None` while over
+    // a layer-shell surface or bare desktop, same as everything else here.
+    let hovered_id = hit
+        .map(|(id, _)| id)
+        .or_else(|| under.as_ref().and_then(|(window, _)| dwindow_wl_surface(window)).and_then(|s| state.surface_to_id.get(&s).copied()));
 
     let Some(pointer) = state.seat.get_pointer() else { return };
     if let Some((surface, loc)) = layer_hit {
@@ -198,7 +204,33 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
         wm.update_resize(pos.x as i32, pos.y as i32);
     }
     let focused = wm.focused_id();
+    // `general.focus_follows_mouse`: hovering a *different* window focuses
+    // it, no click needed - classic X11 sloppy focus. Gated on `hit`/
+    // `under` actually landing on a window (not a layer surface or bare
+    // desktop) and on not already being mid-drag/resize, where the pointer
+    // sweeps over unrelated windows constantly and none of that should
+    // steal focus from whatever's actually being dragged. `hovered_id !=
+    // focused` both skips redundant work on every one of the many motion
+    // events a stationary pointer over an already-focused window still
+    // generates, and is what makes `auto_raise` (below) only fire on an
+    // actual focus change rather than every motion tick too.
+    let focus_follow_target =
+        (wm.focus_follows_mouse && !dragging_or_resizing && !over_layer_surface).then_some(hovered_id).flatten().filter(|id| Some(*id) != focused);
+    if let Some(id) = focus_follow_target {
+        if wm.auto_raise {
+            // `raise_window` alone here, not `focus_window` - the actual
+            // core + real Wayland/X11 keyboard focus change happens once,
+            // below, through the same `focus_window` free function every
+            // click-driven focus change already goes through (sets real
+            // keyboard focus too, which `WindowManager::focus_window`
+            // alone does not).
+            wm.raise_window(id);
+        }
+    }
     drop(wm);
+    if let Some(id) = focus_follow_target {
+        focus_window(state, id);
+    }
     if dragging_or_resizing {
         if let Some(id) = focused {
             state.sync_geometry(id);

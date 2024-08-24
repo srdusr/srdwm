@@ -155,6 +155,8 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     // - see `WindowManager::rounded_corners_enabled`'s doc comment for why
     // this can't just be `get_bool(..., true)` like every other flag here.
     let rounded_corners = engine.get("general.rounded_corners").and_then(|v| v.as_bool());
+    let focus_follows_mouse = engine.get_bool("general.focus_follows_mouse", false);
+    let auto_raise = engine.get_bool("general.auto_raise", false);
 
     // Only the three `theme.*` keys with an unambiguous, already-rendered
     // counterpart are wired - see `srdwm_core::ThemeConfig`'s doc comment.
@@ -185,6 +187,8 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     wm.shadows_enabled = shadows;
     wm.resize_margin = resize_margin;
     wm.rounded_corners_enabled = rounded_corners;
+    wm.focus_follows_mouse = focus_follows_mouse;
+    wm.auto_raise = auto_raise;
     wm.theme = theme;
     wm.auto_back_and_forth = engine.get_bool("workspace.auto_back_and_forth", false);
 }
