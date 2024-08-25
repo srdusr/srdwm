@@ -256,17 +256,22 @@ impl EwmhState {
     /// at all - the paths are meaningless without it - so this returns
     /// `None` rather than a `GlobalMenu` with an empty `bus_name`.
     ///
-    /// Which atom actually won is recorded as `source` - a consumer needs
-    /// it to pick the right D-Bus action-group prefix (`app`/`win` for a
-    /// real `GMenuModel`, `unity` for the older export), and
-    /// `appmenu-gtk-module` is known to set the `_GTK_*` atoms *and*
-    /// `_UNITY_OBJECT_PATH` simultaneously in some configurations - a
-    /// consumer with only the resolved path string, and no record of
-    /// which one it came from, can't tell the two cases apart even though
-    /// picking the wrong prefix means every menu item renders permanently
-    /// insensitive (a silent failure that reads exactly like a broken
-    /// app, not a wiring bug). Reported by the AGS peer session building
-    /// the consumer, from hitting exactly this live.
+    /// Which export flavour actually applies is recorded as `source` - a
+    /// consumer needs it to pick the right D-Bus action-group prefix
+    /// (`app`/`win` for a real `GMenuModel`, `unity` for the older export).
+    /// This is *not* simply "which atom was set": `appmenu-gtk-module`
+    /// exports a plain `Gtk.Window`'s menu (one with no `GtkApplication`,
+    /// so no `_GTK_APPLICATION_OBJECT_PATH`/`_GTK_WINDOW_OBJECT_PATH`)
+    /// through its Unity-compatibility shim, `unity.`-prefixed actions and
+    /// all, while still setting `_GTK_MENUBAR_OBJECT_PATH` - so `source`
+    /// is `Unity` whenever `app_path`/`window_path` are both absent, even
+    /// if a GTK menubar path resolved (see `is_real_gtk_application`
+    /// below). Getting this wrong means every menu item renders
+    /// permanently insensitive against action groups the app never
+    /// inserted - a silent failure that reads exactly like a broken app,
+    /// not a wiring bug. Root-caused by an AGS peer session building the
+    /// consumer, from hitting exactly this live and reading the actual
+    /// exported menu content off the bus to confirm it.
     fn read_global_menu(&self, xid: u32) -> Option<srdwm_core::GlobalMenu> {
         use smithay::reexports::x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
 
@@ -280,16 +285,27 @@ impl EwmhState {
         };
 
         let bus_name = read_string(self.gtk_unique_bus_name)?;
-        let gtk_menu_path = read_string(self.gtk_menubar_object_path).or_else(|| read_string(self.gtk_app_menu_object_path));
-        let (menu_path, source) = match gtk_menu_path {
-            Some(path) => (Some(path), srdwm_core::MenuSource::Gtk),
-            None => match read_string(self.unity_object_path) {
-                Some(path) => (Some(path), srdwm_core::MenuSource::Unity),
-                None => (None, srdwm_core::MenuSource::Gtk),
-            },
-        };
         let app_path = read_string(self.gtk_application_object_path);
         let window_path = read_string(self.gtk_window_object_path);
+        // A real `GMenuModel` export (`app.`/`win.`-prefixed actions) only
+        // ever comes from a `GtkApplication`, which always also sets
+        // `_GTK_APPLICATION_OBJECT_PATH`/`_GTK_WINDOW_OBJECT_PATH` - if
+        // both are absent despite a GTK menubar path existing,
+        // `appmenu-gtk-module` is exporting a plain `Gtk.Window`'s menu
+        // through its Unity-compatibility shim instead: real content, at
+        // this same path, but under `unity.`-prefixed actions. Confirmed
+        // live by an AGS peer session reading the actual exported menu
+        // content off the bus for exactly this case (`_GTK_MENUBAR_OBJECT_
+        // PATH` set, `app_path`/`window_path` both empty, every action
+        // `unity.*`) - unconditionally trusting "a GTK path exists", which
+        // is all the code here used to do, is exactly what silently
+        // mislabeled `source` as `Gtk`, leaving every item in every
+        // affected menu permanently insensitive against `app`/`win` action
+        // groups the app never inserted.
+        let is_real_gtk_application = app_path.is_some() || window_path.is_some();
+        let gtk_menu_path = read_string(self.gtk_menubar_object_path).or_else(|| read_string(self.gtk_app_menu_object_path));
+        let unity_path = read_string(self.unity_object_path);
+        let (menu_path, source) = classify_menu_source(gtk_menu_path, is_real_gtk_application, unity_path);
         Some(srdwm_core::GlobalMenu { bus_name, menu_path, app_path, window_path, source })
     }
 
@@ -325,6 +341,23 @@ impl EwmhState {
             }
         }
         let _ = self.conn.flush();
+    }
+}
+
+/// The decision `read_global_menu` needs, pulled out as a pure function so
+/// it's unit-testable without a real X connection (matching this codebase's
+/// existing "no smithay/X11 dependency" convention for logic that doesn't
+/// actually need one, e.g. `decoration.rs`) - see that method's own doc
+/// comment for the full reasoning behind why `is_real_gtk_application`
+/// overrides "a GTK path exists" rather than the reverse.
+fn classify_menu_source(gtk_menu_path: Option<String>, is_real_gtk_application: bool, unity_path: Option<String>) -> (Option<String>, srdwm_core::MenuSource) {
+    match gtk_menu_path {
+        Some(path) if !is_real_gtk_application => (Some(path), srdwm_core::MenuSource::Unity),
+        Some(path) => (Some(path), srdwm_core::MenuSource::Gtk),
+        None => match unity_path {
+            Some(path) => (Some(path), srdwm_core::MenuSource::Unity),
+            None => (None, srdwm_core::MenuSource::Gtk),
+        },
     }
 }
 
@@ -423,6 +456,39 @@ mod tests {
     fn shell_single_quote_handles_embedded_quotes() {
         assert_eq!(shell_single_quote("/usr/bin/Xwayland"), "'/usr/bin/Xwayland'");
         assert_eq!(shell_single_quote("/it's/here"), r"'/it'\''s/here'");
+    }
+
+    #[test]
+    fn appmenu_gtk_module_shim_is_classified_as_unity_not_gtk() {
+        // The exact live case that motivated this: a GTK menubar path
+        // present, but no application/window object path - confirmed by
+        // an AGS peer session reading the actual exported menu content off
+        // the bus and finding `unity.`-prefixed actions despite the GTK
+        // atom being what resolved the path.
+        let (path, source) = classify_menu_source(Some("/org/appmenu/gtk/window/0".to_string()), false, None);
+        assert_eq!(path.as_deref(), Some("/org/appmenu/gtk/window/0"), "the path itself is still correct - only the label was wrong");
+        assert_eq!(source, srdwm_core::MenuSource::Unity);
+    }
+
+    #[test]
+    fn real_gtk_application_export_is_still_classified_as_gtk() {
+        let (path, source) = classify_menu_source(Some("/org/gtk/menus/window/1".to_string()), true, None);
+        assert_eq!(path.as_deref(), Some("/org/gtk/menus/window/1"));
+        assert_eq!(source, srdwm_core::MenuSource::Gtk);
+    }
+
+    #[test]
+    fn plain_unity_object_path_with_no_gtk_atom_is_unaffected() {
+        let (path, source) = classify_menu_source(None, false, Some("/com/canonical/menu/1".to_string()));
+        assert_eq!(path.as_deref(), Some("/com/canonical/menu/1"));
+        assert_eq!(source, srdwm_core::MenuSource::Unity);
+    }
+
+    #[test]
+    fn neither_path_present_is_none() {
+        let (path, source) = classify_menu_source(None, false, None);
+        assert_eq!(path, None);
+        assert_eq!(source, srdwm_core::MenuSource::Gtk);
     }
 }
 
