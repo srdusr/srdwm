@@ -63,9 +63,32 @@ pub(crate) fn register_session_notifier(handle: &LoopHandle<'static, CompState>,
                 SessionEvent::ActivateSession => {
                     log::info!("udev: session resumed (VT switch back)");
                     udev.active = true;
+                    let card = udev.card.clone();
+
+                    // A flip issued right before the VT switch away may
+                    // never have completed while inactive (nothing was
+                    // scanning out), and its completion event can still be
+                    // sitting undelivered on the DRM fd. The kernel refuses
+                    // a new page flip on a CRTC with one already
+                    // unacknowledged (EBUSY) - drain and apply any such
+                    // events now, before reasserting crtcs, so a stale flip
+                    // from before the switch can't collide with the fresh
+                    // one `render_udev_frame` is about to issue below.
+                    match card.receive_events() {
+                        Ok(events) => {
+                            for event in events {
+                                let DrmEvent::PageFlip(flip) = event else { continue };
+                                if let Some(head) = udev.heads.iter_mut().find(|h| h.crtc == flip.crtc) {
+                                    head.front = 1 - head.front;
+                                    head.flip_pending = false;
+                                }
+                            }
+                        }
+                        Err(e) => log::debug!("udev: no pending flip events to drain on resume: {e}"),
+                    }
+
                     // Some drivers reset mode-setting state across a VT
                     // switch; reassert every head before rendering again.
-                    let card = udev.card.clone();
                     for head in &mut udev.heads {
                         let fb = head.buffers[head.front].fb;
                         if let Err(e) = card.set_crtc(head.crtc, Some(fb), (0, 0), &[], None) {
