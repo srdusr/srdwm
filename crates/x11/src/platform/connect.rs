@@ -94,6 +94,7 @@ impl X11Platform {
             keyboard_mapping,
             numlock_mask,
             ipc,
+            appmenu_registrar: Some(srdwm_platform::AppmenuRegistrarState::new()),
         })
     }
 

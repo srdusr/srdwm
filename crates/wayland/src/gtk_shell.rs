@@ -86,16 +86,37 @@ impl Dispatch<GtkSurface1, GtkSurfaceData> for CompState {
         // (or never had one) - matches `xwayland.rs`'s `read_global_menu`
         // returning `None` for the same case, so a panel sees the same
         // shape regardless of which backend a window came from.
-        // Always `MenuSource::Gtk`: this protocol has no Unity-style
-        // equivalent to carry, unlike XWayland's `_UNITY_OBJECT_PATH` --
-        // see `xwayland.rs`'s `read_global_menu` for the case that needs
-        // the other variant.
+        //
+        // `source` used to be hardcoded `MenuSource::Gtk` unconditionally
+        // here, on the reasoning that this protocol "has no Unity-style
+        // equivalent to carry" - true of the *wire message*, but not of
+        // what's actually behind it: `appmenu-gtk-module` is the same
+        // module regardless of whether it signals its address via X11
+        // atoms (`xwayland.rs`) or `gtk_surface1.set_dbus_properties`
+        // (here), and exports a plain `Gtk.Window`'s menu (no
+        // `GtkApplication`) through its Unity-compatibility shim --
+        // `unity.`-prefixed actions and all - on *either* path. That's
+        // exactly the misclassification `classify_menu_source` was written
+        // to fix for the X11 side (see its own doc comment and
+        // `xwayland.rs::read_global_menu`); this call site just never
+        // adopted it, so a native-Wayland GTK window hitting the same
+        // shim case stayed permanently mislabeled `Gtk` while its XWayland
+        // counterpart got the fix. Confirmed live: Nemo (native Wayland,
+        // not XWayland - only Spotify was in `_NET_CLIENT_LIST` at the
+        // time) reported `source: "gtk"` here, but its actual exported
+        // menu content, read directly off the bus, used `unity.`-prefixed
+        // actions throughout (File/Edit/View/Go/Bookmarks/Help) - the
+        // exact "every item renders, none of them are ever clickable"
+        // failure `classify_menu_source`'s own tests exist to catch.
+        let is_real_gtk_application = application_object_path.as_deref().is_some_and(|s| !s.is_empty()) || window_object_path.as_deref().is_some_and(|s| !s.is_empty());
+        let gtk_menu_path = menubar_path.filter(|s| !s.is_empty()).or_else(|| app_menu_path.filter(|s| !s.is_empty()));
+        let (menu_path, source) = srdwm_core::classify_menu_source(gtk_menu_path, is_real_gtk_application, None);
         let menu = unique_bus_name.filter(|s| !s.is_empty()).map(|bus_name| srdwm_core::GlobalMenu {
             bus_name,
-            menu_path: menubar_path.filter(|s| !s.is_empty()).or_else(|| app_menu_path.filter(|s| !s.is_empty())),
+            menu_path,
             app_path: application_object_path.filter(|s| !s.is_empty()),
             window_path: window_object_path.filter(|s| !s.is_empty()),
-            source: srdwm_core::MenuSource::Gtk,
+            source,
         });
         if let Some(w) = state.wm.borrow_mut().window_mut(id) {
             w.global_menu = menu;

@@ -45,16 +45,78 @@ pub struct GlobalMenu {
 ///   `app.xxx`/`win.xxx`; a consumer must insert two action groups, under
 ///   prefixes `"app"` and `"win"`, from [`GlobalMenu::app_path`]/
 ///   [`GlobalMenu::window_path`] respectively.
-/// - [`MenuSource::Unity`]: the older Ubuntu Unity-era export
-///   (`_UNITY_OBJECT_PATH`, still relevant for some Qt platform-theme
-///   builds). Items reference actions as `unity.xxx`, all against one
-///   group at the menu's own path - a consumer inserts a single group
-///   under prefix `"unity"` instead.
+/// - [`MenuSource::Unity`]: still a `GMenuModel` underneath - same
+///   `org.gtk.Menus`/`Gio.DBusMenuModel`-compatible wire content as
+///   [`MenuSource::Gtk`] - but from `appmenu-gtk-module`'s Unity-
+///   compatibility shim (a plain `Gtk.Window` with no `GtkApplication`),
+///   which serves it under one `unity.xxx`-prefixed action group at the
+///   menu's own path instead of separate `app.xxx`/`win.xxx` groups.
+///   Confirmed live by an AGS peer session reading the actual bus content
+///   for this exact case: `_GTK_MENUBAR_OBJECT_PATH` and
+///   `_UNITY_OBJECT_PATH` set to the *same* `org.gtk.Menus` object, real
+///   content, `unity.File`/`unity.Edit` actions - not a different wire
+///   protocol, just a different action-group prefix. A consumer that
+///   already speaks `Gio.DBusMenuModel` for [`Self::Gtk`] needs nothing
+///   more than reading this variant to also handle this one.
+/// - [`MenuSource::DbusMenu`]: a genuinely different wire protocol,
+///   `com.canonical.dbusmenu` - what a client sets `_UNITY_OBJECT_PATH`
+///   for *without* any `_GTK_*` atom alongside it (the original pre-GTK3.4
+///   Ubuntu Unity export this atom was created for, and what `appmenu-
+///   qt5`'s classic Unity-registrar model still uses), or what the
+///   Wayland-native `org_kde_kwin_appmenu` protocol always carries.
+///   `Gio.DBusMenuModel` cannot read this at all - pointed at a
+///   `com.canonical.dbusmenu` object it silently returns an empty model,
+///   the same class of silent failure as every other menu-source bug this
+///   session - a consumer needs an actual dbusmenu client for this one,
+///   not a differently-prefixed `GMenuModel` read.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MenuSource {
     #[default]
     Gtk,
     Unity,
+    DbusMenu,
+}
+
+/// The decision every X11-property-reading global-menu source needs --
+/// pulled out as a pure function, shared by the Wayland backend's
+/// `xwayland.rs::read_global_menu` and the native X11 backend, so it's
+/// unit-testable without a real X connection and can't drift into two
+/// differently-behaving copies.
+///
+/// `gtk_menu_path` present (real `GtkApplication` or not) always means
+/// `org.gtk.Menus` - that's the only thing `_GTK_MENUBAR_OBJECT_PATH`/
+/// `_GTK_APP_MENU_OBJECT_PATH` ever address, GTK-module shim included (see
+/// [`MenuSource::Unity`]'s own doc comment for the live evidence). Only a
+/// bare `unity_path`, with no GTK atom at all, gets [`MenuSource::DbusMenu`]:
+/// that's `_UNITY_OBJECT_PATH` doing the job it was actually created for --
+/// the original pre-GTK3.4 Unity/`libdbusmenu` export, and what a non-GTK
+/// client (`appmenu-qt5`'s classic model) still uses it for - rather than
+/// `appmenu-gtk-module` setting it as a compatibility alias alongside a GTK
+/// atom that already answers the question on its own.
+///
+/// `is_real_gtk_application` overrides "a GTK path exists" rather than the
+/// reverse: a real `GMenuModel` export (`app.`/`win.`-prefixed actions)
+/// only ever comes from a `GtkApplication`, which always also sets
+/// `_GTK_APPLICATION_OBJECT_PATH`/`_GTK_WINDOW_OBJECT_PATH` (or their
+/// `gtk_shell1` equivalents) - if both are absent despite a GTK menubar
+/// path existing, `appmenu-gtk-module` is exporting a plain window's menu
+/// through its Unity-compatibility shim instead: real content, at this
+/// same path, but under `unity.`-prefixed actions. Getting this wrong means
+/// every menu item renders permanently insensitive against action groups
+/// the app never inserted - a silent failure that reads exactly like a
+/// broken app, not a wiring bug. Confirmed live by an AGS peer session
+/// reading the actual exported menu content off the bus for exactly this
+/// case (`_GTK_MENUBAR_OBJECT_PATH` set, `app_path`/`window_path` both
+/// empty, every action `unity.*`).
+pub fn classify_menu_source(gtk_menu_path: Option<String>, is_real_gtk_application: bool, unity_path: Option<String>) -> (Option<String>, MenuSource) {
+    match gtk_menu_path {
+        Some(path) if !is_real_gtk_application => (Some(path), MenuSource::Unity),
+        Some(path) => (Some(path), MenuSource::Gtk),
+        None => match unity_path {
+            Some(path) => (Some(path), MenuSource::DbusMenu),
+            None => (None, MenuSource::Gtk),
+        },
+    }
 }
 
 /// State of a single managed window. This is platform-independent: backends
@@ -90,6 +152,11 @@ pub struct Window {
     pub always_on_top: bool,
     pub border_color: (u8, u8, u8),
     pub border_width: u32,
+    /// Titlebar/border-strip corner radius, in logical pixels. Copied from
+    /// `ThemeConfig::default_corner_radius` at creation (see `WindowManager
+    /// ::add_window`), same as `border_color`/`border_width`; a rule's own
+    /// `corner_radius` action still wins afterward.
+    pub corner_radius: u32,
     /// This window's own content opacity, `0.0`..=`1.0`. Only the content
     /// (the client's own surface tree) is affected - srdwm's own
     /// decoration (titlebar/border/shadow) always renders fully opaque
@@ -147,6 +214,7 @@ impl Window {
             always_on_top: false,
             border_color: (136, 192, 208), // Nord accent, matches legacy theme default
             border_width: 2,
+            corner_radius: 6,
             opacity: 1.0,
             resize_margin: None,
             workspace: 0,
@@ -393,6 +461,39 @@ mod tests {
 
     fn frame() -> Rect {
         Rect::new(100, 100, 400, 300)
+    }
+
+    #[test]
+    fn appmenu_gtk_module_shim_is_classified_as_unity_not_gtk() {
+        // The exact live case that motivated this: a GTK menubar path
+        // present, but no application/window object path - confirmed by
+        // an AGS peer session reading the actual exported menu content off
+        // the bus and finding `unity.`-prefixed actions despite the GTK
+        // atom being what resolved the path.
+        let (path, source) = classify_menu_source(Some("/org/appmenu/gtk/window/0".to_string()), false, None);
+        assert_eq!(path.as_deref(), Some("/org/appmenu/gtk/window/0"), "the path itself is still correct - only the label was wrong");
+        assert_eq!(source, MenuSource::Unity);
+    }
+
+    #[test]
+    fn real_gtk_application_export_is_still_classified_as_gtk() {
+        let (path, source) = classify_menu_source(Some("/org/gtk/menus/window/1".to_string()), true, None);
+        assert_eq!(path.as_deref(), Some("/org/gtk/menus/window/1"));
+        assert_eq!(source, MenuSource::Gtk);
+    }
+
+    #[test]
+    fn plain_unity_object_path_with_no_gtk_atom_is_real_dbusmenu() {
+        let (path, source) = classify_menu_source(None, false, Some("/com/canonical/menu/1".to_string()));
+        assert_eq!(path.as_deref(), Some("/com/canonical/menu/1"));
+        assert_eq!(source, MenuSource::DbusMenu);
+    }
+
+    #[test]
+    fn neither_path_present_is_none() {
+        let (path, source) = classify_menu_source(None, false, None);
+        assert_eq!(path, None);
+        assert_eq!(source, MenuSource::Gtk);
     }
 
     #[test]

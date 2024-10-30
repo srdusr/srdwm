@@ -34,6 +34,7 @@ impl Platform for X11Platform {
                 out.push(e);
             }
         }
+        self.apply_registrar_events();
         if let Some(ipc) = self.ipc.as_mut() {
             if ipc.poll(&self.wm) {
                 out.push(Event::WorkspaceChanged);
@@ -106,9 +107,11 @@ impl Platform for X11Platform {
 
     fn focus(&mut self, window: WindowId) -> PlatformResult<()> {
         if let Some(frame) = self.frames.get(&window) {
-            self.conn.set_input_focus(x11rb::protocol::xproto::InputFocus::POINTER_ROOT, frame.client, x11rb::CURRENT_TIME).map_err(err)?;
-            self.conn.change_property32(x11rb::protocol::xproto::PropMode::REPLACE, self.root, self.atoms._NET_ACTIVE_WINDOW, x11rb::protocol::xproto::AtomEnum::WINDOW, &[frame.client]).map_err(err)?;
+            let client = frame.client;
+            self.conn.set_input_focus(x11rb::protocol::xproto::InputFocus::POINTER_ROOT, client, x11rb::CURRENT_TIME).map_err(err)?;
+            self.conn.change_property32(x11rb::protocol::xproto::PropMode::REPLACE, self.root, self.atoms._NET_ACTIVE_WINDOW, x11rb::protocol::xproto::AtomEnum::WINDOW, &[client]).map_err(err)?;
             self.conn.flush().map_err(err)?;
+            self.refresh_focused_global_menu(window, client);
         }
         Ok(())
     }
@@ -216,5 +219,13 @@ impl Platform for X11Platform {
     fn ungrab_keyboard(&mut self) -> PlatformResult<()> {
         self.conn.ungrab_key(0, self.root, ModMask::ANY).map_err(err)?;
         Ok(())
+    }
+
+    fn keyboard_layout(&mut self) -> PlatformResult<String> {
+        Err(PlatformError::Unsupported("keyboard_layout"))
+    }
+
+    fn cycle_keyboard_layout(&mut self) -> PlatformResult<String> {
+        Err(PlatformError::Unsupported("cycle_keyboard_layout"))
     }
 }

@@ -55,6 +55,26 @@ x11rb::atom_manager! {
         _NET_CLIENT_LIST,
         _NET_ACTIVE_WINDOW,
         UTF8_STRING,
+        // Global-menu properties - see `read_global_menu`'s doc comment.
+        // A native X11 client is exactly the same GTK/Qt app the Wayland
+        // backend's `xwayland.rs::read_global_menu` already reads these
+        // from (XWayland is just another X server as far as a toolkit is
+        // concerned), so this is the identical atom set for the identical
+        // reason.
+        _GTK_UNIQUE_BUS_NAME,
+        _GTK_APPLICATION_OBJECT_PATH,
+        _GTK_WINDOW_OBJECT_PATH,
+        _GTK_MENUBAR_OBJECT_PATH,
+        _GTK_APP_MENU_OBJECT_PATH,
+        _UNITY_OBJECT_PATH,
+        // KWin's own global-menu property pair - what `libdbusmenu-qt`'s
+        // KDE integration sets. Already a complete, unambiguous
+        // `com.canonical.dbusmenu` address on its own (no classification
+        // needed the way the GTK/Unity atoms above need), and checked
+        // first in `read_global_menu` for exactly that reason - see that
+        // method's doc comment.
+        _KDE_NET_WM_APPMENU_SERVICE_NAME,
+        _KDE_NET_WM_APPMENU_OBJECT_PATH,
     }
 }
 
@@ -121,6 +141,15 @@ pub struct X11Platform {
     /// itself still starts either way, matching how the Wayland backends
     /// already treat this as non-fatal.
     ipc: Option<srdwm_platform::IpcServer>,
+    /// `com.canonical.AppMenu.Registrar` - the classic Qt/`appmenu-qt5`
+    /// global-menu source, see `srdwm_platform::appmenu_registrar`'s module
+    /// doc comment. Unlike the Wayland backend (where this is `None` until
+    /// XWayland finishes starting up), a native X11 session always has a
+    /// real X server the moment this struct exists, so it's started
+    /// unconditionally in `connect` - still `Option` because starting the
+    /// D-Bus service itself can independently fail (see that module's own
+    /// `None` handling).
+    appmenu_registrar: Option<srdwm_platform::AppmenuRegistrarState>,
 }
 
 
@@ -139,6 +168,7 @@ impl ClonedForRender for Option<&CoreWindow> {
 mod actions;
 mod connect;
 mod events;
+mod global_menu;
 mod trait_impl;
 mod window;
 
