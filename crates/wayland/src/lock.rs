@@ -44,6 +44,18 @@ pub(crate) struct SessionLock {
     /// Outputs that have presented a client-content-free frame since the
     /// lock request, keyed the same way.
     pub(crate) presented: HashSet<String>,
+    /// `Some` while srdwm is its own locker - see `native_lock.rs`'s
+    /// module doc comment for why this is a separate mode from the fields
+    /// above rather than folded into them: those exist for an *external*
+    /// locker client talking `ext-session-lock-v1`; this is srdwm drawing
+    /// and authenticating its own lock UI directly, with no client
+    /// surface involved at all. The two are mutually exclusive by
+    /// construction - `srd dispatch lock` never creates a `LockSurface`,
+    /// and nothing here stops a *real* external locker from also
+    /// connecting, but nothing in this session's scope needed to reconcile
+    /// that edge case, and `locked` alone still gates input/rendering
+    /// regardless of which mode set it.
+    pub(crate) native: Option<crate::native_lock::NativeLock>,
 }
 
 impl CompState {
