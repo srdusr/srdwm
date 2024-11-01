@@ -74,6 +74,33 @@ impl CompState {
         let Some(w) = self.wm.borrow().window(id).cloned() else { return };
         let focused = self.wm.borrow().focused_id() == Some(id);
         let theme = self.wm.borrow().theme;
+        // `main.rs`'s `sync()` calls `Platform::redraw_decoration` - which
+        // always reaches here - for every visible window on every dirty
+        // tick, not only the window that actually changed (see `Comp
+        // State::decoration_signatures`'s own doc comment: a resize drag on
+        // one window re-renders every *other* open window's title text and
+        // border strips too, once per pointer-motion event, for pixels
+        // identical to what's already cached). Skipping the rebuild when
+        // nothing this function reads has actually changed since the last
+        // call turns those redundant calls into a cheap signature
+        // comparison instead of a full re-rasterization.
+        let signature = DecorationSignature {
+            width: w.geometry.width,
+            height: w.geometry.height,
+            decorated: w.decorated,
+            focused,
+            title: w.title.clone(),
+            border_color: w.border_color,
+            border_width: w.border_width,
+            corner_radius: w.corner_radius,
+            maximized: w.maximized,
+            fullscreen: w.fullscreen,
+            shadows_enabled: self.wm.borrow().shadows_enabled,
+        };
+        if self.decoration_signatures.get(&id) == Some(&signature) {
+            return;
+        }
+        self.decoration_signatures.insert(id, signature);
         if w.decorated {
             let fg = if focused { theme.titlebar_fg_focused } else { theme.titlebar_fg_unfocused };
             let width = w.geometry.width.max(1);
@@ -82,7 +109,7 @@ impl CompState {
             // cut, so there's no more square-frame-around-a-round-titlebar
             // clash to avoid. See `render_titlebar`'s `round_corners` doc
             // comment.
-            let data = decoration::render_titlebar(width, TITLEBAR_HEIGHT, &w.title, theme.titlebar_bg, fg, true);
+            let data = decoration::render_titlebar(width, TITLEBAR_HEIGHT, &w.title, theme.titlebar_bg, fg, true, w.corner_radius);
             let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (width as i32, TITLEBAR_HEIGHT as i32), 1, Transform::Normal, None);
             self.decorations.insert(id, buffer);
         } else {
@@ -102,7 +129,7 @@ impl CompState {
             let color = effective_border_color(w.border_color, focused);
             let strips = decoration::border_strips(w.geometry, w.border_width);
             if strips[0].width > 0 && strips[0].height > 0 {
-                let data = decoration::render_border_top(strips[0].width, w.border_width, color);
+                let data = decoration::render_border_top(strips[0].width, w.border_width, color, w.corner_radius);
                 let buffer =
                     MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (strips[0].width as i32, w.border_width as i32), 1, Transform::Normal, None);
                 self.border_top_decorations.insert(id, buffer);
@@ -110,7 +137,7 @@ impl CompState {
                 self.border_top_decorations.remove(&id);
             }
             if strips[1].width > 0 && strips[1].height > 0 {
-                let data = decoration::render_border_bottom(strips[1].width, w.border_width, color);
+                let data = decoration::render_border_bottom(strips[1].width, w.border_width, color, w.corner_radius);
                 let buffer =
                     MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (strips[1].width as i32, w.border_width as i32), 1, Transform::Normal, None);
                 self.border_bottom_decorations.insert(id, buffer);
@@ -150,6 +177,7 @@ impl CompState {
         self.border_bottom_decorations.remove(&id);
         self.shadow_buffers.remove(&id);
         self.border_side_buffers.remove(&id);
+        self.decoration_signatures.remove(&id);
         self.last_synced_size.remove(&id);
         self.content_epoch.remove(&id);
         self.rounded_content_buffers.remove(&id);
@@ -160,6 +188,11 @@ impl CompState {
         // longer exists, with no indication anything went wrong.
         if self.context_menu.as_ref().is_some_and(|m| m.window == id) {
             self.close_context_menu();
+        }
+        // Same reasoning as the context menu above, for the Snap-Layouts
+        // flyout.
+        if self.snap_flyout.as_ref().is_some_and(|f| f.window == id) {
+            self.close_snap_flyout();
         }
         self.wm.borrow_mut().remove_window(id);
         self.pending.borrow_mut().push(CoreEvent::WindowDestroyed(id));

@@ -56,6 +56,34 @@ impl CompState {
         }
     }
 
+    /// Opens the Snap-Layouts flyout for `window`, top-left corner at `pos`
+    /// (global space, by convention the maximize button's own titlebar
+    /// position). Same build-once-on-open pattern as `open_context_menu`.
+    pub(crate) fn open_snap_flyout(&mut self, window: WindowId, pos: (i32, i32)) {
+        let flyout = crate::snap_flyout::SnapFlyout::open(window, pos);
+        let theme = self.wm.borrow().theme;
+        let labels: Vec<&str> = flyout.cells().iter().map(|z| z.label()).collect();
+        let data = decoration::render_snap_flyout(3, flyout.cell_width, flyout.cell_height, &labels, theme.titlebar_bg, theme.titlebar_fg_focused, theme.default_border_color);
+        let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (flyout.width() as i32, flyout.height() as i32), 1, Transform::Normal, None);
+        self.snap_flyout_buffer = Some(buffer);
+        self.snap_flyout = Some(flyout);
+    }
+
+    pub(crate) fn close_snap_flyout(&mut self) {
+        self.snap_flyout = None;
+        self.snap_flyout_buffer = None;
+    }
+
+    /// Applies `zone` to `window` - the flyout's own equivalent of
+    /// `run_context_menu_action`, taking the target explicitly rather than
+    /// reading `self.snap_flyout` for the same borrow-conflict reason
+    /// documented on that function.
+    pub(crate) fn run_snap_flyout_action(&mut self, window: WindowId, zone: SnapZoneKind) {
+        self.wm.borrow_mut().apply_snap_zone(window, zone);
+        self.sync_geometry(window);
+        foreign_toplevel::send_state(self, window);
+    }
+
     /// True when this titlebar press is the second of a double-click on the
     /// same window. Threshold is the usual 400ms.
     pub(crate) fn is_double_click(&mut self, id: WindowId, time: u32) -> bool {

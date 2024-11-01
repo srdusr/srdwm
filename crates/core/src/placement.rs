@@ -51,6 +51,72 @@ impl Default for PlacementConfig {
     }
 }
 
+/// The six fixed screen positions offered by the Snap-Layouts flyout
+/// (`crates/wayland/src/snap_flyout.rs`, opened by right-clicking a
+/// titlebar's maximize button) - the click-driven equivalent of dragging a
+/// window to that same edge/corner and releasing near it, addressed
+/// directly by name instead of by proximity to a screen edge. Deliberately
+/// only this subset of what `SmartPlacement::snap_zone` below already
+/// computes from a drag position: full-maximize is excluded since it is
+/// already the maximize button's own direct left-click action one click
+/// away, and this scopes the flyout to "where should *this* window go" the
+/// way most third-party snap tools (e.g. macOS's Rectangle) work, rather
+/// than the full Windows 11 multi-window arrangement picker - a
+/// meaningfully bigger feature (choosing a preset that places *several*
+/// windows into complementary zones at once) that was not what was asked
+/// for here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapZoneKind {
+    LeftHalf,
+    RightHalf,
+    TopLeftQuarter,
+    TopRightQuarter,
+    BottomLeftQuarter,
+    BottomRightQuarter,
+}
+
+impl SnapZoneKind {
+    /// Grid order the flyout lays its cells out in - see
+    /// `snap_flyout.rs`'s own doc comment for the actual layout.
+    pub const ALL: [SnapZoneKind; 6] = [
+        SnapZoneKind::LeftHalf,
+        SnapZoneKind::RightHalf,
+        SnapZoneKind::TopLeftQuarter,
+        SnapZoneKind::TopRightQuarter,
+        SnapZoneKind::BottomLeftQuarter,
+        SnapZoneKind::BottomRightQuarter,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SnapZoneKind::LeftHalf => "Left Half",
+            SnapZoneKind::RightHalf => "Right Half",
+            SnapZoneKind::TopLeftQuarter => "Top Left",
+            SnapZoneKind::TopRightQuarter => "Top Right",
+            SnapZoneKind::BottomLeftQuarter => "Bottom Left",
+            SnapZoneKind::BottomRightQuarter => "Bottom Right",
+        }
+    }
+
+    /// The rect this zone resolves to on `area` (a monitor's *usable*,
+    /// exclusive-zone-shrunk geometry - matching `snap_zone` below, a
+    /// half/quarter snap sits beside a bar/dock like any other tiled or
+    /// deliberately-placed window, unlike maximize/fullscreen which
+    /// deliberately covers it).
+    pub fn rect(self, area: Rect) -> Rect {
+        let half_w = area.width / 2;
+        let half_h = area.height / 2;
+        match self {
+            SnapZoneKind::LeftHalf => Rect::new(area.x, area.y, half_w, area.height),
+            SnapZoneKind::RightHalf => Rect::new(area.x + half_w as i32, area.y, half_w, area.height),
+            SnapZoneKind::TopLeftQuarter => Rect::new(area.x, area.y, half_w, half_h),
+            SnapZoneKind::TopRightQuarter => Rect::new(area.x + half_w as i32, area.y, half_w, half_h),
+            SnapZoneKind::BottomLeftQuarter => Rect::new(area.x, area.y + half_h as i32, half_w, half_h),
+            SnapZoneKind::BottomRightQuarter => Rect::new(area.x + half_w as i32, area.y + half_h as i32, half_w, half_h),
+        }
+    }
+}
+
 pub struct SmartPlacement;
 
 impl SmartPlacement {
@@ -203,5 +269,41 @@ mod tests {
         let cfg = PlacementConfig::default();
         let dragged = Rect::new(700, 400, 400, 300);
         assert!(SmartPlacement::snap_zone(dragged, &monitor(), &cfg).is_none());
+    }
+
+    #[test]
+    fn snap_zone_kind_halves_split_the_area_down_the_middle() {
+        let area = monitor().geometry;
+        assert_eq!(SnapZoneKind::LeftHalf.rect(area), Rect::new(0, 0, 960, 1080));
+        assert_eq!(SnapZoneKind::RightHalf.rect(area), Rect::new(960, 0, 960, 1080));
+    }
+
+    #[test]
+    fn snap_zone_kind_quarters_tile_the_area_with_no_gap_or_overlap() {
+        let area = monitor().geometry;
+        let quarters = [
+            SnapZoneKind::TopLeftQuarter.rect(area),
+            SnapZoneKind::TopRightQuarter.rect(area),
+            SnapZoneKind::BottomLeftQuarter.rect(area),
+            SnapZoneKind::BottomRightQuarter.rect(area),
+        ];
+        for (i, a) in quarters.iter().enumerate() {
+            for b in &quarters[i + 1..] {
+                assert!(!a.overlaps(b), "{a:?} and {b:?} must not overlap");
+            }
+        }
+        let covered: u32 = quarters.iter().map(|r| r.width * r.height).sum();
+        assert_eq!(covered, area.width * area.height, "quarters must cover the whole area with no gap");
+    }
+
+    #[test]
+    fn snap_zone_kind_all_has_no_duplicates() {
+        let area = monitor().geometry;
+        let rects: Vec<_> = SnapZoneKind::ALL.iter().map(|z| z.rect(area)).collect();
+        for (i, a) in rects.iter().enumerate() {
+            for b in &rects[i + 1..] {
+                assert_ne!(a, b, "two different zones must not resolve to the same rect");
+            }
+        }
     }
 }
