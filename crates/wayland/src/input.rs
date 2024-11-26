@@ -11,12 +11,15 @@
 //! [`crate::lock`].
 
 use smithay::backend::input::{ButtonState as BackendButtonState, KeyState as BackendKeyState, KeyboardKeyEvent};
+use smithay::backend::session::Session as _;
 use smithay::desktop::{layer_map_for_output, Window as DWindow, WindowSurfaceType};
 use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer::{ButtonEvent, MotionEvent};
+use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
-use smithay::wayland::shell::wlr_layer::{KeyboardInteractivity, Layer};
+use smithay::wayland::compositor::with_states;
+use smithay::wayland::shell::wlr_layer::{Anchor, ExclusiveZone, KeyboardInteractivity, Layer, LayerSurfaceCachedState};
 use std::time::{Duration, Instant};
 
 use srdwm_core::{Event as CoreEvent, Modifiers, TitlebarHit, WindowId};
@@ -81,6 +84,29 @@ pub(crate) fn layer_surface_under(state: &CompState, pos: Point<f64, Logical>) -
 /// `layer_surface_under_layers`'s doc comment for the ordering rationale.
 pub(crate) fn background_layer_surface_under(state: &CompState, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<i32, Logical>)> {
     layer_surface_under_layers(state, pos, [Layer::Bottom, Layer::Background])
+}
+
+/// `full` with only a top-anchored layer surface's exclusive zone (a menu
+/// bar) subtracted back out - see `Monitor::maximize_geometry`'s own doc
+/// comment for why maximize needs this third rect, distinct from both
+/// `geometry` (every zone subtracted) and `full_geometry` (none). Shared by
+/// both backends' `monitors()`, same as everything else in this module.
+/// Deliberately re-derived from the layer list rather than reusing
+/// `non_exclusive_zone()`: that smithay helper folds every anchor
+/// together, with no way to ask it to skip a bottom-anchored dock while
+/// still respecting a top-anchored bar.
+pub(crate) fn maximize_geometry_for(output: &Output, full: srdwm_core::Rect) -> srdwm_core::Rect {
+    let mut rect = full;
+    for layer in layer_map_for_output(output).layers() {
+        let data = with_states(layer.wl_surface(), |states| *states.cached_state.get::<LayerSurfaceCachedState>().current());
+        let ExclusiveZone::Exclusive(amount) = data.exclusive_zone else { continue };
+        if data.anchor.contains(Anchor::TOP) && !data.anchor.contains(Anchor::BOTTOM) {
+            let shrink = (amount as i32 + data.margin.top).max(0);
+            rect.y += shrink;
+            rect.height = rect.height.saturating_sub(shrink as u32);
+        }
+    }
+    rect
 }
 
 /// `ext_idle_notify_v1`'s whole job is answering "has the user touched an

@@ -74,7 +74,10 @@ impl WindowManager {
                 continue;
             }
             let Some(monitor) = live.iter().find(|m| m.id == window.monitor) else { continue };
-            let target = if window.fullscreen { monitor.full_geometry } else { monitor.geometry };
+            // Maximize and fullscreen target different rects now - see
+            // `Monitor::maximize_geometry`'s doc comment for why a maximized
+            // window still stops at a top bar while fullscreen does not.
+            let target = if window.maximized { monitor.maximize_geometry } else { monitor.full_geometry };
             if window.geometry != target {
                 window.geometry = target;
             }
@@ -83,6 +86,35 @@ impl WindowManager {
 
     pub fn monitors(&self) -> &[Monitor] {
         &self.monitors
+    }
+
+    /// Queues a request to move output `id` to `(x, y)` in the shared
+    /// global space - the primitive monitor mirroring (and any other
+    /// output-arrangement UI) needs: position two outputs at the same
+    /// coordinates and they show the same desktop region, no separate
+    /// "mirror" concept required anywhere in this compositor. Core cannot
+    /// apply this itself (it doesn't own real output hardware - see this
+    /// field's own doc comment on `WindowManager`); the backend drains and
+    /// applies it on its own next poll via `drain_output_position_requests`.
+    ///
+    /// Replaces (not accumulates) any still-pending request for the same
+    /// `id`: only the *latest* requested position for a given output
+    /// matters if several arrive before the backend's next drain, the same
+    /// "last write wins" semantics `srd set`'s other live-config values
+    /// already have.
+    pub fn request_output_position(&mut self, id: MonitorId, x: i32, y: i32) {
+        self.output_position_requests.retain(|(existing, _, _)| *existing != id);
+        self.output_position_requests.push((id, x, y));
+    }
+
+    /// Takes every currently-queued output-position request, leaving the
+    /// queue empty. The backend calls this once per poll pass; requests
+    /// that arrive between two polls are still captured (nothing is lost
+    /// between drains, unlike a single `Option`), just coalesced to one
+    /// per output id per drain by `request_output_position`'s own
+    /// replace-not-accumulate behaviour.
+    pub fn drain_output_position_requests(&mut self) -> Vec<(MonitorId, i32, i32)> {
+        std::mem::take(&mut self.output_position_requests)
     }
 
     pub fn primary_monitor(&self) -> Option<&Monitor> {

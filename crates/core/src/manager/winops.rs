@@ -93,7 +93,19 @@ impl WindowManager {
     }
 
     pub fn toggle_maximize(&mut self, id: WindowId) {
-        let monitor_geom = self.windows.get(&id).and_then(|w| self.monitor_for(w.monitor)).map(|m| m.geometry);
+        // `maximize_geometry`, not `geometry` or `full_geometry`: maximize
+        // covers the whole monitor past a dock's reserved zone, same as
+        // `toggle_fullscreen` - but still stops at a top bar's, unlike
+        // fullscreen. Previously targeted `full_geometry` outright (past
+        // both), on the user's own request specifically about the dock;
+        // that also silently pulled maximize past the top bar, which
+        // wasn't part of that request and was reported back as its own
+        // bug once live-tested. See `Monitor::maximize_geometry`'s own doc
+        // comment for the exact rect this now is. The only remaining
+        // difference from fullscreen is `decorated` (maximize keeps
+        // whatever decoration state the window already had; fullscreen
+        // forces it off).
+        let monitor_geom = self.windows.get(&id).and_then(|w| self.monitor_for(w.monitor)).map(|m| m.maximize_geometry);
         let animations_enabled = self.animations_enabled;
         let Some(w) = self.windows.get_mut(&id) else { return };
         let from = w.geometry;
