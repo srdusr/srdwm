@@ -1,8 +1,9 @@
 use crate::geometry::Rect;
 use crate::layout::{Layout, MasterStackLayout, NoOpLayout, TilingConfig};
 use crate::monitor::{Monitor, MonitorId};
-use crate::placement::{PlacementConfig, SmartPlacement, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
+use crate::placement::{PlacementConfig, SmartPlacement, SnapZoneKind, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
 use crate::rules::WindowRule;
+use crate::lock_config::LockConfig;
 use crate::theme::ThemeConfig;
 use crate::window::{ResizeEdge, TitlebarHit, Window, WindowId, RESIZE_MARGIN};
 use crate::workspace::{Workspace, WorkspaceId};
@@ -40,6 +41,32 @@ pub struct WindowManager {
     order: Vec<WindowId>,
     focused: Option<WindowId>,
     monitors: Vec<Monitor>,
+    /// Backend-agnostic "please move this output" requests, queued by
+    /// `request_output_position` (an IPC `set_output_position` dispatch is
+    /// the only caller today) and drained by whichever backend actually
+    /// owns real output hardware (`drain_output_position_requests`) on its
+    /// own next poll. Core has no way to reposition a real `Output` itself
+    /// - monitor geometry flows one direction, backend into core, via
+    /// `set_monitors` - so a request from an IPC caller (an AGS display-
+    /// settings panel wanting to set up monitor mirroring, concretely) has
+    /// to cross back over that boundary the same indirect way window
+    /// geometry changes do in the other direction: queued here, applied by
+    /// the backend, and `set_monitors` reports the result back on the
+    /// backend's next monitor query, same as any other hotplug/reconfigure.
+    output_position_requests: Vec<(MonitorId, i32, i32)>,
+    /// Same cross-boundary-request pattern as `output_position_requests`
+    /// just above - core has no way to actually blank the screen and
+    /// start drawing srdwm's own lock UI itself (that's real compositor
+    /// rendering, backend-owned), so an IPC `"lock"` dispatch queues the
+    /// intent here via `request_lock` and whichever backend is running
+    /// drains it (`drain_lock_request`) on its own next poll.
+    lock_requested: bool,
+    /// Same cross-boundary-request pattern as `output_position_requests`
+    /// again - see `capture::CaptureRequest`'s own doc comment for why
+    /// this exists at all (a workspace switcher needing a thumbnail of a
+    /// workspace that isn't the one currently presented, which no Wayland
+    /// screencopy protocol can see).
+    capture_requests: Vec<capture::CaptureRequest>,
     workspaces: Vec<Workspace>,
     /// One flat value shared by every monitor - not per-output. Unlike
     /// Hyprland, srdwm has no notion of an independent workspace set per
@@ -100,6 +127,9 @@ pub struct WindowManager {
     /// Default decoration colours and border width, read from `theme.colors.*`/
     /// `theme.decorations.*`. See `ThemeConfig`'s own doc comment.
     pub theme: ThemeConfig,
+    /// Read from `theme.lock.*`. See `LockConfig`'s own doc comment for
+    /// why this isn't just folded into `theme` above.
+    pub lock: LockConfig,
     drag: Option<DragState>,
     resize: Option<ResizeState>,
     rules: Vec<WindowRule>,
@@ -108,6 +138,23 @@ pub struct WindowManager {
     /// because `WindowManager` is platform-agnostic and has no way to send
     /// a client its close request directly - see `close_window`.
     close_requests: Vec<WindowId>,
+    /// The active XKB layout's own name (e.g. `"English (US)"`, whatever
+    /// `xkb_keymap_layout_get_name` reports) - set by the platform once at
+    /// startup and again after every `take_keyboard_layout_cycle_requests`
+    /// is acted on. Empty until the platform has reported it at least once
+    /// (a nested/test `WindowManager::new()` with no real keyboard, most
+    /// of core's own tests). Read-only from an external caller's point of
+    /// view (an AGS peer session's keyboard-layout badge, over `srd`); the
+    /// only way to change it is a real layout cycle.
+    pub keyboard_layout: String,
+    /// How many `srd dispatch cycle_keyboard_layout` requests have arrived
+    /// since the last drain - a count, not a flag, so two IPC requests in
+    /// one tick both take effect rather than the second being silently
+    /// swallowed. Same "core records the intent, `main.rs`'s `sync()`
+    /// forwards it to the platform that can actually act on it" shape as
+    /// `close_requests`, for the same reason: `WindowManager` has no real
+    /// keyboard/seat handle of its own to cycle.
+    keyboard_layout_cycle_requests: u32,
 }
 
 impl Default for WindowManager {
@@ -128,6 +175,9 @@ impl WindowManager {
             order: Vec::new(),
             focused: None,
             monitors: Vec::new(),
+            output_position_requests: Vec::new(),
+            lock_requested: false,
+            capture_requests: Vec::new(),
             workspaces: vec![Workspace::new(0, "1", "dynamic")],
             current_workspace: 0,
             previous_workspace: 0,
@@ -145,10 +195,13 @@ impl WindowManager {
             focus_follows_mouse: false,
             auto_raise: false,
             theme: ThemeConfig::default(),
+            lock: LockConfig::default(),
             drag: None,
             resize: None,
             rules: Vec::new(),
             close_requests: Vec::new(),
+            keyboard_layout: String::new(),
+            keyboard_layout_cycle_requests: 0,
         }
     }
 
@@ -168,14 +221,18 @@ impl WindowManager {
 
 }
 
+mod capture;
 mod dragresize;
 mod focus;
 mod hittest;
 mod layout;
+mod lock;
 mod monitors;
 mod windows;
 mod winops;
 mod workspaces;
+
+pub use capture::CaptureRequest;
 
 #[cfg(test)]
 mod tests;

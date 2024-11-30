@@ -86,6 +86,7 @@ pub struct WindowRuleActions {
     pub decorated: Option<bool>,
     pub border_color: Option<(u8, u8, u8)>,
     pub border_width: Option<u32>,
+    pub corner_radius: Option<u32>,
     /// Always-on-top (Hyprland's `pin`).
     pub pinned: Option<bool>,
     /// Content opacity, `0.0`..=`1.0` (Hyprland's `windowrule = opacity`).

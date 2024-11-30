@@ -40,7 +40,31 @@ pub enum MouseButton {
 
 /// A key combination, e.g. "Mod4+Shift+Return", used both as the canonical
 /// string form for Lua keybindings and as the lookup key at dispatch time.
+///
+/// Lowercases a single ASCII letter's name before building the string --
+/// `Shift+r` and `Shift+R` are genuinely different X11 keysyms (`XK_r`/
+/// `XK_R`), not case variants of one shared symbol, so a real Shift+<letter>
+/// keypress's `modified_sym()` (see `input.rs::handle_keyboard_key_event`)
+/// reports the uppercase name even though `Shift` is *also* tracked as its
+/// own bit in `modifiers` - meaning without this, "Super+Shift+r" (how
+/// every config writes it, lowercase) could never match a real Shift+R
+/// keypress's actual combo string ("Shift+Mod4+R"). `canonicalize_key_
+/// combo`'s own case-fixing (for named keys like "Space") explicitly
+/// leaves plain letters alone, so it doesn't catch this either - this is
+/// the one place both the config-registration path (`canonicalize_key_
+/// combo` calls this) and the real-dispatch path converge, so normalizing
+/// here is the single fix for both. Confirmed live: a real keypress
+/// reached srdwm fine (a sibling Alt+Tab binding in the same config
+/// fired), but every `Shift+<letter>` binding - including the reload key
+/// this was found chasing - silently never did.
 pub fn key_combo_string(modifiers: Modifiers, key_name: &str) -> String {
+    let lowercased;
+    let key_name = if key_name.chars().count() == 1 && key_name.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        lowercased = key_name.to_ascii_lowercase();
+        lowercased.as_str()
+    } else {
+        key_name
+    };
     format!("{modifiers}{key_name}")
 }
 
@@ -182,6 +206,30 @@ mod tests {
         // No ordering ambiguity with one modifier - this case always
         // worked, before and after the fix.
         assert_eq!(canonicalize_key_combo("Mod4+Return"), "Mod4+Return");
+    }
+
+    #[test]
+    fn a_real_shifted_letter_keypress_matches_the_lowercase_written_binding() {
+        // `Shift+r` and `Shift+R` are different X11 keysyms (`XK_r`/`XK_R`),
+        // not case variants of one shared symbol - a real Shift+<letter>
+        // keypress's dispatch-time key name is the *uppercase* one, even
+        // though Shift is also tracked as its own bit in `modifiers`. Every
+        // config writes bindings lowercase ("Super+Shift+r"), so the two
+        // sides have to agree despite that: this is what silently broke
+        // every `Shift+<letter>` binding (found chasing a dead reload key)
+        // until `key_combo_string` started normalizing single letters.
+        let config_side = canonicalize_key_combo("Mod4+Shift+r");
+        let dispatch_side = key_combo_string(Modifiers::SHIFT | Modifiers::SUPER, "R");
+        assert_eq!(config_side, dispatch_side);
+        assert_eq!(config_side, "Shift+Mod4+r");
+    }
+
+    #[test]
+    fn named_keys_are_unaffected_by_the_letter_lowercasing() {
+        // Multi-character key names ("Space", "Return", ...) don't change
+        // identity with Shift the way a single letter's keysym does, so
+        // they must not be touched by the same normalization.
+        assert_eq!(key_combo_string(Modifiers::SHIFT, "Space"), "Shift+Space");
     }
 
     #[test]

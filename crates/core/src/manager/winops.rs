@@ -20,6 +20,28 @@ impl WindowManager {
         std::mem::take(&mut self.close_requests)
     }
 
+    /// Queues a real layout cycle - see `keyboard_layout_cycle_requests`'s
+    /// own doc comment for why this is a count `main.rs` drains rather than
+    /// something core does itself.
+    pub fn request_keyboard_layout_cycle(&mut self) {
+        self.keyboard_layout_cycle_requests += 1;
+    }
+
+    /// Drains the count queued by `request_keyboard_layout_cycle` since the
+    /// last call. The caller (`main.rs`) is expected to call `Platform::
+    /// cycle_keyboard_layout` this many times, then report the real result
+    /// back via `set_keyboard_layout`.
+    pub fn take_keyboard_layout_cycle_requests(&mut self) -> u32 {
+        std::mem::take(&mut self.keyboard_layout_cycle_requests)
+    }
+
+    /// Sets `keyboard_layout` to whatever the platform actually reports --
+    /// called once at startup and again after every real cycle, never
+    /// guessed at from within core, which has no seat/keyboard of its own.
+    pub fn set_keyboard_layout(&mut self, name: impl Into<String>) {
+        self.keyboard_layout = name.into();
+    }
+
     pub fn minimize_window(&mut self, id: WindowId) {
         if let Some(w) = self.windows.get_mut(&id) {
             w.minimized = true;
@@ -119,6 +141,38 @@ impl WindowManager {
             w.geometry = geom;
             w.maximized = true;
         }
+        if animations_enabled && w.geometry != from {
+            w.anim_from = Some(from);
+        }
+    }
+
+    /// Applies one of the Snap-Layouts flyout's fixed half/quarter
+    /// positions directly (`crates/wayland/src/snap_flyout.rs`) - the
+    /// click-driven equivalent of dragging the window to that same edge or
+    /// corner and releasing near it, which is what `SmartPlacement::
+    /// snap_zone` (used by `end_drag`) already computes from a live drag
+    /// position instead of an explicit choice.
+    ///
+    /// Clears `maximized`/`fullscreen` first if either was set - opening
+    /// the flyout from an already-maximized window (via its own maximize
+    /// button) and picking a half is a real, expected use, and without this
+    /// the window would keep reporting itself maximized while visually only
+    /// occupying half the screen. `restore_geometry` is cleared alongside
+    /// rather than left stale: it only means anything while `maximized` is
+    /// still true, and the next real `toggle_maximize` sets it fresh anyway.
+    pub fn apply_snap_zone(&mut self, id: WindowId, zone: SnapZoneKind) {
+        let monitor_geom = self.windows.get(&id).and_then(|w| self.monitor_for(w.monitor)).map(|m| m.geometry);
+        let animations_enabled = self.animations_enabled;
+        let Some(area) = monitor_geom else { return };
+        let target = zone.rect(area);
+        let Some(w) = self.windows.get_mut(&id) else { return };
+        let from = w.geometry;
+        if w.maximized || w.fullscreen {
+            w.maximized = false;
+            w.fullscreen = false;
+            w.restore_geometry = None;
+        }
+        w.geometry = target;
         if animations_enabled && w.geometry != from {
             w.anim_from = Some(from);
         }

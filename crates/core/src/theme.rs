@@ -17,6 +17,34 @@ pub struct ThemeConfig {
     pub titlebar_fg_unfocused: (u8, u8, u8),
     pub default_border_color: (u8, u8, u8),
     pub default_border_width: u32,
+    /// Titlebar/border-strip corner radius, in logical pixels - the same
+    /// value `Window::corner_radius` copies onto every window at creation
+    /// (see `WindowManager::add_window`), which a rule's own `corner_radius`
+    /// action can still override afterward, same as `default_border_width`.
+    pub default_corner_radius: u32,
+    /// Whether a newly created window gets srdwm's own titlebar
+    /// (server-side decoration) by default, before any `xdg-decoration`
+    /// negotiation or rule gets a say. Also what the Wayland backend
+    /// initially *offers* a client that creates a decoration object but
+    /// has no strong preference of its own (`XdgDecorationHandler::
+    /// new_decoration`) - a client that explicitly asks for the other
+    /// mode is still honored regardless of this value (see that handler's
+    /// own doc comment).
+    ///
+    /// `true` (server-side) is srdwm's own longstanding default, matching
+    /// the Windows/macOS-style consistent OS-drawn chrome this compositor
+    /// is going for - and, among real desktop environments that still
+    /// have titlebars at all, KDE/KWin's own choice too (confirmed via
+    /// research, not assumed: KWin supports both and defaults to
+    /// server-side). `false` (client-side) matches GNOME/Mutter's
+    /// approach instead - srdwm steps back and lets every window draw its
+    /// own chrome, including ones with no titlebar opinion of their own,
+    /// which then get none at all. Live-settable (`srd set decoration_mode
+    /// server|client`) specifically so both can be A/B tested against a
+    /// real, broad set of installed apps rather than guessed at from two
+    /// examples - see `theme.decorations.default_mode` in the Lua config
+    /// for the persistent equivalent.
+    pub default_decorated: bool,
 }
 
 impl Default for ThemeConfig {
@@ -27,6 +55,8 @@ impl Default for ThemeConfig {
             titlebar_fg_unfocused: (0x4c, 0x56, 0x6a),
             default_border_color: (136, 192, 208), // Nord accent, matches legacy theme default
             default_border_width: 2,
+            default_corner_radius: 6,
+            default_decorated: true,
         }
     }
 }

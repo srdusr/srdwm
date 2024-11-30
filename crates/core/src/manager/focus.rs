@@ -17,7 +17,34 @@ impl WindowManager {
     }
 
     pub fn focus_window(&mut self, id: WindowId) {
-        if self.windows.contains_key(&id) {
+        if let Some(workspace) = self.windows.get(&id).map(|w| w.workspace) {
+            // Switch to the target's workspace first if it isn't already
+            // the active one - without this, focusing a window elsewhere
+            // (Alt-Tab, a dock icon, anything that ends up calling this)
+            // marked it focused while leaving it genuinely off-screen:
+            // `visible_windows`/rendering both gate on `workspace ==
+            // current_workspace`, so keyboard focus landed on a window the
+            // user could not see, while whatever was actually on screen
+            // kept looking focused-ish. Reported live (relayed from the
+            // AGS peer session, who measured it directly over IPC):
+            // `srd dispatch focus` on a window from a different workspace
+            // left `current_workspace` unchanged and the target `visible:
+            // false`. Every caller of `focus_window` gets this for free
+            // rather than each one remembering to switch workspaces
+            // itself first - matches the convention the AGS shell was
+            // already built against (Hyprland's `focuswindow` switches
+            // workspace as a side effect of focusing). Guarded on
+            // `w.workspace != self.current_workspace` specifically, not
+            // just always calling `switch_workspace`: that function's own
+            // `auto_back_and_forth` handling treats being asked to
+            // "switch" to the *already*-current workspace as a deliberate
+            // toggle-to-previous gesture, which an ordinary redundant
+            // focus call (the common case: re-focusing whatever is
+            // already focused and already visible) must not trigger as a
+            // surprise workspace jump.
+            if workspace != self.current_workspace {
+                self.switch_workspace(workspace);
+            }
             self.focused = Some(id);
             self.raise_window(id);
         }

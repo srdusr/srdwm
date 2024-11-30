@@ -25,6 +25,8 @@ impl WindowManager {
         // whatever a backend's `Window::new` happened to hardcode.
         window.border_color = self.theme.default_border_color;
         window.border_width = self.theme.default_border_width;
+        window.corner_radius = self.theme.default_corner_radius;
+        window.decorated = self.theme.default_decorated;
         let actions = self.rules.iter().find(|r| r.matcher.matches(&window)).map(|r| r.actions.clone());
         // See `Window::rules_applied`'s doc comment: a native Wayland window
         // still has empty title/app_id at this point, so a real (if
@@ -45,6 +47,9 @@ impl WindowManager {
             }
             if let Some(width) = a.border_width {
                 window.border_width = width;
+            }
+            if let Some(radius) = a.corner_radius {
+                window.corner_radius = radius;
             }
             if let Some(pinned) = a.pinned {
                 window.always_on_top = pinned;

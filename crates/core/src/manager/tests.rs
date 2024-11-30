@@ -23,6 +23,30 @@
     }
 
     #[test]
+    fn add_window_picks_up_the_configured_default_decoration_mode() {
+        let mut wm = wm_with_monitor();
+        wm.theme.default_decorated = false;
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "a"));
+        assert!(!wm.window(id).unwrap().decorated, "must pick up the live theme default, not Window::new's own hardcoded one");
+    }
+
+    #[test]
+    fn a_rules_decorated_action_still_overrides_the_theme_default() {
+        let mut wm = wm_with_monitor();
+        wm.theme.default_decorated = false;
+        wm.add_rule(WindowRule {
+            matcher: crate::rules::WindowMatch { class: Some("nemo".into()), ..Default::default() },
+            actions: crate::rules::WindowRuleActions { decorated: Some(true), ..Default::default() },
+        });
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "a");
+        w.app_id = "nemo".into();
+        wm.add_window(w);
+        assert!(wm.window(id).unwrap().decorated, "an explicit rule must still win over the theme-wide default");
+    }
+
+    #[test]
     fn tiling_workspace_arranges_two_windows_side_by_side() {
         let mut wm = wm_with_monitor();
         wm.set_layout(wm.current_workspace(), "tiling");
@@ -141,6 +165,30 @@
         assert_eq!(wm.window(a).unwrap().geometry, Rect::new(0, 0, 1920, 1080));
         wm.toggle_maximize(a);
         assert_eq!(wm.window(a).unwrap().geometry, original);
+    }
+
+    #[test]
+    fn apply_snap_zone_resizes_to_the_named_zones_rect() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.geometry = Rect::new(50, 50, 300, 200);
+        wm.add_window(w);
+        wm.apply_snap_zone(a, SnapZoneKind::LeftHalf);
+        assert_eq!(wm.window(a).unwrap().geometry, Rect::new(0, 0, 960, 1080));
+    }
+
+    #[test]
+    fn apply_snap_zone_on_a_maximized_window_un_maximizes_it() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        wm.toggle_maximize(a);
+        assert!(wm.window(a).unwrap().maximized);
+        wm.apply_snap_zone(a, SnapZoneKind::TopRightQuarter);
+        let w = wm.window(a).unwrap();
+        assert!(!w.maximized, "snapping a maximized window must clear the maximized flag");
+        assert_eq!(w.geometry, Rect::new(960, 0, 960, 540));
     }
 
     #[test]
@@ -357,6 +405,51 @@
     }
 
     #[test]
+    fn focusing_a_window_on_another_workspace_switches_to_it() {
+        // Regression test: `focus_window` used to mark the target focused
+        // without ever touching `current_workspace` - reported live
+        // (relayed from the AGS peer session, measured directly over IPC):
+        // `srd dispatch focus <id>` on a window from a different workspace
+        // left the active workspace unchanged and the newly-"focused"
+        // window `visible: false`, so keyboard input had nowhere visible
+        // to go while whatever was actually on screen kept looking
+        // focused. Reachable by ordinary Alt-Tab, a dock icon, or anything
+        // else that ends up calling `focus_window` on a window that isn't
+        // on the current workspace.
+        let mut wm = wm_with_monitor();
+        let ws2 = wm.add_workspace("2", "dynamic");
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "a"));
+        wm.move_window_to_workspace(id, ws2);
+        assert_eq!(wm.current_workspace(), 0, "sanity: still on the default workspace");
+
+        wm.focus_window(id);
+        assert_eq!(wm.current_workspace(), ws2, "focusing a window must bring its workspace along");
+        assert_eq!(wm.focused_id(), Some(id));
+    }
+
+    #[test]
+    fn refocusing_an_already_visible_window_does_not_trigger_auto_back_and_forth() {
+        // The fix above must not call `switch_workspace` unconditionally --
+        // `switch_workspace`'s own `auto_back_and_forth` handling treats
+        // being asked to "switch" to the *already*-current workspace as a
+        // deliberate toggle-to-previous gesture. An ordinary redundant
+        // `focus_window` call (re-focusing something already focused and
+        // already visible - ordinary mouse click traffic, not a workspace
+        // switch request) must not be misread as that gesture and jump the
+        // user to `previous_workspace` as a surprise side effect.
+        let mut wm = wm_with_monitor();
+        wm.auto_back_and_forth = true;
+        let ws2 = wm.add_workspace("2", "dynamic");
+        wm.switch_workspace(ws2);
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "a"));
+
+        wm.focus_window(id);
+        assert_eq!(wm.current_workspace(), ws2, "must stay put - this is not a workspace-switch request");
+    }
+
+    #[test]
     fn switching_to_a_nonexistent_workspace_does_not_move_or_touch_previous() {
         let mut wm = wm_with_monitor();
         let ws2 = wm.add_workspace("2", "dynamic");
@@ -369,6 +462,31 @@
         wm.auto_back_and_forth = true;
         wm.switch_workspace(ws2);
         assert_eq!(wm.current_workspace(), 0);
+    }
+
+    #[test]
+    fn output_position_requests_drain_in_arrival_order() {
+        let mut wm = wm_with_monitor();
+        wm.request_output_position(0, 100, 0);
+        wm.request_output_position(1, 0, 0);
+        assert_eq!(wm.drain_output_position_requests(), vec![(0, 100, 0), (1, 0, 0)]);
+        // Draining empties the queue - a second drain with nothing new
+        // queued in between must come back empty, not repeat the same
+        // requests the backend already applied.
+        assert!(wm.drain_output_position_requests().is_empty());
+    }
+
+    #[test]
+    fn a_second_output_position_request_for_the_same_output_replaces_the_first() {
+        // Only the latest requested position for a given output should
+        // survive to the next drain - e.g. a display-settings panel
+        // dragging a monitor preview around fires many requests for the
+        // same output before the user lets go; the backend only needs to
+        // apply where it ended up, not replay the whole drag.
+        let mut wm = wm_with_monitor();
+        wm.request_output_position(0, 100, 0);
+        wm.request_output_position(0, 200, 50);
+        assert_eq!(wm.drain_output_position_requests(), vec![(0, 200, 50)]);
     }
 
     #[test]
@@ -416,6 +534,29 @@
         wm.scratchpad_show(); // toggles back off
         assert!(wm.window(a).unwrap().minimized);
         assert!(!wm.visible_windows().any(|w| w.id == a));
+    }
+
+    #[test]
+    fn scratchpad_show_brings_it_back_even_when_minimized_through_a_different_path() {
+        // A scratchpad window can be minimized several ways besides the
+        // `scratchpad_show` toggle-off branch itself - a titlebar minimize
+        // button, a client's own `minimize_request` (both ultimately call
+        // this same `minimize_window`). `scratchpad` is pool membership,
+        // tracked independently of *how* the window ended up minimized, so
+        // pressing the scratchpad binding afterward must still find and
+        // show it - not treat it as "already handled" just because
+        // something other than `scratchpad_show` did the hiding.
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "term"));
+        wm.scratchpad_add(a);
+        wm.scratchpad_show(); // shown + focused
+        wm.minimize_window(a); // hidden via the generic path, not the toggle
+        assert!(wm.window(a).unwrap().scratchpad, "must still be pool-managed after an ordinary minimize");
+        wm.scratchpad_show();
+        let w = wm.window(a).unwrap();
+        assert!(!w.minimized, "the binding must show it again, not treat it as already visible");
+        assert_eq!(wm.focused_id(), Some(a));
     }
 
     #[test]
@@ -630,8 +771,14 @@
         let id = wm.alloc_window_id();
         let mut w = Window::new(id, "firefox");
         w.geometry = Rect::new(100, 100, 400, 300);
-        w.decorated = false;
         wm.add_window(w);
+        // Set after `add_window`, not before - `add_window` now applies
+        // `theme.default_decorated` unconditionally (same as `corner_radius`/
+        // `border_color` already did), matching how a real client's
+        // negotiated CSD mode actually lands in production too:
+        // `set_decorated_from_mode` runs against an already-added window,
+        // never folded into the `Window` passed into `add_window` itself.
+        wm.window_mut(id).unwrap().decorated = false;
 
         wm.toggle_fullscreen(id);
         assert!(!wm.window(id).unwrap().decorated, "fullscreen itself must still drop the titlebar");
@@ -647,6 +794,22 @@
     fn monitor_with_dock() -> Monitor {
         let mut m = Monitor::new(0, "primary", Rect::new(0, 0, 1920, 1020));
         m.full_geometry = Rect::new(0, 0, 1920, 1080);
+        // No top bar in this fixture - maximize ignores the dock the same
+        // way fullscreen does, so it's the same rect as `full_geometry`.
+        m.maximize_geometry = Rect::new(0, 0, 1920, 1080);
+        m.primary = true;
+        m
+    }
+
+    /// A monitor with *both* a bottom dock's exclusive zone and a top bar's,
+    /// distinguishing `maximize_geometry` (stops at the bar, ignores the
+    /// dock) from `full_geometry` (ignores both) and `geometry` (stops at
+    /// both) - `monitor_with_dock` alone can't tell these apart since it
+    /// has no bar to stop at.
+    fn monitor_with_dock_and_bar() -> Monitor {
+        let mut m = Monitor::new(0, "primary", Rect::new(0, 34, 1920, 986));
+        m.full_geometry = Rect::new(0, 0, 1920, 1080);
+        m.maximize_geometry = Rect::new(0, 34, 1920, 1046);
         m.primary = true;
         m
     }
@@ -654,12 +817,14 @@
     #[test]
     fn fullscreen_covers_the_full_monitor_ignoring_a_dock_reservation() {
         // Regression test: fullscreen used to target `Monitor::geometry`
-        // (the usable, exclusive-zone-shrunk area), the same field maximize
-        // correctly uses - so a fullscreened window stopped short of a
-        // dock's reserved strip instead of covering (or going under) it
-        // like fullscreen does everywhere else. `full_geometry` is what
-        // fixes that; `geometry` must stay untouched so maximize keeps
-        // respecting the dock.
+        // (the usable, exclusive-zone-shrunk area) - so a fullscreened
+        // window stopped short of a dock's reserved strip instead of
+        // covering (or going under) it like fullscreen does everywhere
+        // else. `full_geometry` is what fixes that. `toggle_maximize` now
+        // targets the same rect (see `maximize_also_covers_the_full_monitor_
+        // ignoring_a_dock_reservation` below) - on the user's own request,
+        // not a bug fix - so this is no longer the one place `full_geometry`
+        // matters, just the first.
         let mut wm = WindowManager::new();
         wm.set_monitors(vec![monitor_with_dock()]);
         let id = wm.alloc_window_id();
@@ -670,42 +835,78 @@
     }
 
     #[test]
-    fn maximize_still_respects_the_dock_reservation() {
+    fn maximize_also_covers_the_full_monitor_ignoring_a_dock_reservation() {
+        // `toggle_maximize` used to target `Monitor::geometry` (the usable,
+        // exclusive-zone-shrunk area), deliberately different from
+        // fullscreen's `full_geometry` - several desktops' convention of a
+        // maximized window stopping short of a persistent dock. Changed on
+        // the user's own request ("maximize should still go past dock
+        // area/no dock in that mode"): maximize now covers the same full
+        // rect fullscreen does, the only remaining difference being
+        // `decorated`. A layer-shell client with its own overlap-based
+        // auto-hide (AGS's dock) can react to the window now genuinely
+        // overlapping its band - nothing here forces the dock/bar to hide.
         let mut wm = WindowManager::new();
         wm.set_monitors(vec![monitor_with_dock()]);
         let id = wm.alloc_window_id();
         wm.add_window(Window::new(id, "a"));
 
         wm.toggle_maximize(id);
-        assert_eq!(wm.window(id).unwrap().geometry, Rect::new(0, 0, 1920, 1020), "maximize must still stop at the dock, unlike fullscreen");
+        assert_eq!(wm.window(id).unwrap().geometry, Rect::new(0, 0, 1920, 1080), "maximize must reach the true monitor edge, past the dock, same as fullscreen");
     }
 
     #[test]
-    fn maximized_window_grows_when_the_dock_drops_its_reservation_live() {
-        // Regression test: a dock that hides/reduces its exclusive zone
-        // while a window is already maximized (an auto-hide dock reacting
-        // to monocle/maximize, exactly the scenario an AGS peer session hit
-        // live) used to leave that window stuck at its stale, dock-shrunk
-        // size - `set_monitors` updated `Monitor::geometry` correctly but
-        // never touched already-maximized/fullscreen windows' `geometry`,
-        // so nothing re-grew until the window was manually un-maximized and
-        // re-maximized.
+    fn maximize_covers_a_dock_but_still_stops_at_a_top_bar() {
+        // Live-tested regression: making maximize target `full_geometry`
+        // (the test above) fixed "maximize stops at the dock" but as a side
+        // effect also let it extend behind a top bar's reserved strip,
+        // which was never asked for and was reported back once the user
+        // actually tried it. `maximize_geometry` is the fix - distinct
+        // from both `geometry` (stops at everything) and `full_geometry`
+        // (stops at nothing).
+        let mut wm = WindowManager::new();
+        wm.set_monitors(vec![monitor_with_dock_and_bar()]);
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "a"));
+
+        wm.toggle_maximize(id);
+        assert_eq!(
+            wm.window(id).unwrap().geometry,
+            Rect::new(0, 34, 1920, 1046),
+            "maximize must cover the dock's strip but still stop at the top bar's"
+        );
+    }
+
+    #[test]
+    fn maximized_window_live_tracks_a_monitor_geometry_change() {
+        // Regression test: `set_monitors` updated `Monitor::geometry`/
+        // `full_geometry` correctly but never touched already-maximized/
+        // fullscreen windows' own `geometry`, so an already-maximized
+        // window stayed stuck at its stale size until manually
+        // un-maximized and re-maximized - reported live as "maximize does
+        // not extend past the dock" even after the dock's own zone change
+        // (or, now, monitor resize/reconnect) had already taken effect in
+        // every other respect.
         let mut wm = WindowManager::new();
         wm.set_monitors(vec![monitor_with_dock()]);
         let id = wm.alloc_window_id();
         wm.add_window(Window::new(id, "a"));
         wm.toggle_maximize(id);
-        assert_eq!(wm.window(id).unwrap().geometry, Rect::new(0, 0, 1920, 1020));
+        assert_eq!(wm.window(id).unwrap().geometry, Rect::new(0, 0, 1920, 1080));
 
-        // The dock drops its exclusive zone to 0.
-        let mut freed = Monitor::new(0, "primary", Rect::new(0, 0, 1920, 1080));
-        freed.full_geometry = Rect::new(0, 0, 1920, 1080);
-        freed.primary = true;
-        wm.set_monitors(vec![freed]);
+        // The monitor's real geometry changes (a resize, a reconnect at a
+        // different resolution - the same code path a dock dropping its
+        // exclusive zone used to exercise before maximize stopped
+        // respecting that zone at all).
+        let mut resized = Monitor::new(0, "primary", Rect::new(0, 0, 2560, 1420));
+        resized.full_geometry = Rect::new(0, 0, 2560, 1440);
+        resized.maximize_geometry = Rect::new(0, 0, 2560, 1440);
+        resized.primary = true;
+        wm.set_monitors(vec![resized]);
 
         assert_eq!(
             wm.window(id).unwrap().geometry,
-            Rect::new(0, 0, 1920, 1080),
+            Rect::new(0, 0, 2560, 1440),
             "an already-maximized window must live-track a monitor geometry change, not just windows placed afterward"
         );
     }
