@@ -8,8 +8,16 @@
 //! pump, macOS's event taps) into the common [`srdwm_core::Event`] queue -
 //! everything downstream of that is platform-independent.
 
+mod appmenu_registrar;
+pub use appmenu_registrar::{AppmenuRegistrarState, RegistrarEvent};
+
 mod ipc;
 pub use ipc::IpcServer;
+
+#[cfg(unix)]
+mod pam_auth;
+#[cfg(unix)]
+pub use pam_auth::authenticate;
 
 use srdwm_core::{Monitor, Rect, Window, WindowId};
 
@@ -146,4 +154,22 @@ pub trait Platform {
 
     fn grab_keyboard(&mut self) -> Result<()>;
     fn ungrab_keyboard(&mut self) -> Result<()>;
+
+    /// The active XKB layout's own human-readable name (e.g. `"English
+    /// (US)"`) - read once at startup so `WindowManager::keyboard_layout`
+    /// (surfaced over `srd`, for an AGS peer session's keyboard-layout
+    /// badge) has a real value before the first cycle, not an empty string
+    /// until the user cycles once. `Err(Unsupported)` on a backend with no
+    /// real XKB-backed seat to ask (X11, and the honest-stub Windows/macOS
+    /// backends) - same convention `grab_keyboard` already uses for "this
+    /// capability genuinely doesn't exist here" rather than inventing a
+    /// second one.
+    fn keyboard_layout(&mut self) -> Result<String>;
+
+    /// Cycles to the next configured XKB layout (wrapping past the last
+    /// one back to the first) and returns its name. A no-op that returns
+    /// the same name back is correct, not a bug, when only one layout is
+    /// configured - there's nothing to cycle *to*, same as every other
+    /// desktop's layout switcher under the same condition.
+    fn cycle_keyboard_layout(&mut self) -> Result<String>;
 }

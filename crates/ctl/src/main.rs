@@ -6,14 +6,40 @@
 //!
 //! Usage:
 //!   srd clients                        list windows, one JSON object
+//!   srd workspaces                     list workspaces, one JSON object
+//!   srd keyboard layout                active XKB layout name, one JSON object
 //!   srd subscribe                      like `clients`, then one JSON
 //!                                       object per line forever, each time
-//!                                       the window list actually changes
-//!   srd dispatch toggle_visibility ID  hide/show a window
+//!                                       the window list, workspace list, or
+//!                                       keyboard layout actually changes
+//!                                       (one "clients"/"workspaces"/
+//!                                       "keyboard_layout"-tagged line per
+//!                                       event)
+//!
+//! `dispatch` reads as a real verb phrase, not a joined identifier --
+//! `toggle floating`, not `toggle_floating`. Multi-word actions are
+//! genuinely separate arguments (ordinary shell word-splitting), matched
+//! here on the words that follow the leading verb rather than one fused
+//! snake_case token:
 //!   srd dispatch focus ID
 //!   srd dispatch close ID
-//!   srd dispatch toggle_maximize ID
-//!   srd dispatch toggle_fullscreen ID
+//!   srd dispatch toggle visibility ID   hide/show a window
+//!   srd dispatch toggle maximize ID
+//!   srd dispatch toggle fullscreen ID
+//!   srd dispatch toggle floating ID
+//!   srd dispatch toggle pinned ID
+//!   srd dispatch move window ID left|right|up|down
+//!   srd dispatch move workspace ID WORKSPACE
+//!   srd dispatch activate workspace ID
+//!   srd dispatch cycle keyboard layout  no ID - there's only ever one keyboard
+//!   srd set border_width 3          live theme values, applied immediately
+//!   srd set border_color '#cba6f7'  (hex string)
+//!   srd set corner_radius 10
+//!   srd set gap_inner 8
+//!   srd set gap_outer 16
+//!   srd set shadows true
+//!   srd set rounded_corners true
+//!   srd set decoration_mode server|client
 //!
 //! The socket is Unix-domain; on platforms without one this always fails
 //! cleanly rather than not building at all, since it's one binary in a
@@ -31,9 +57,40 @@ fn main() {
         }
     };
 
-    let result = if args.first().map(String::as_str) == Some("subscribe") { unix::stream(&request) } else { unix::send(&request).map(|r| println!("{r}")) };
-    if let Err(e) = result {
-        eprintln!("srd: {e}");
+    if args.first().map(String::as_str) == Some("subscribe") {
+        if let Err(e) = unix::stream(&request) {
+            eprintln!("srd: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let response = match unix::send(&request) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("srd: {e}");
+            std::process::exit(1);
+        }
+    };
+    println!("{response}");
+    // A rejected `dispatch`/`set` (a bad key, a malformed value, a window
+    // id that doesn't exist) is still a *successful* request/response --
+    // `unix::send` returns `Ok` either way, since nothing went wrong at
+    // the transport level - so a caller checking only the exit code, not
+    // the JSON body, saw every rejection as a success. Reported live by an
+    // AGS peer session: it memoizes the last value sent per `srd set` key
+    // to avoid re-spawning a process on every option change, and a
+    // rejected write counted as a success would have pinned that setting
+    // permanently. `{"ok":false,...}` is the one response shape that ever
+    // contains a literal `"ok":` field at all - every query command
+    // (`clients`/`monitors`/`workspaces`/`keyboard_layout`) returns a
+    // differently-shaped body with no such field, so this can't misfire
+    // against one of those. A plain substring check, not real JSON
+    // parsing, on purpose: `crates/platform/src/ipc.rs`'s `err`/`ok`
+    // helpers always emit this exact literal (`serde_json` preserves
+    // struct field declaration order), and this binary is deliberately
+    // dumb/dependency-free - see this file's own module doc comment.
+    if response.contains(r#""ok":false"#) {
         std::process::exit(1);
     }
 }
@@ -48,16 +105,150 @@ fn build_request(args: &[String]) -> Result<String, String> {
     match args.first().map(String::as_str) {
         Some("clients") => Ok(r#"{"cmd":"clients"}"#.to_string()),
         Some("monitors") => Ok(r#"{"cmd":"monitors"}"#.to_string()),
+        Some("workspaces") => Ok(r#"{"cmd":"workspaces"}"#.to_string()),
+        Some("keyboard") if args.get(1).map(String::as_str) == Some("layout") => Ok(r#"{"cmd":"keyboard_layout"}"#.to_string()),
+        Some("keyboard") => Err("did you mean 'srd keyboard layout'?".to_string()),
         Some("subscribe") => Ok(r#"{"cmd":"subscribe"}"#.to_string()),
-        Some("dispatch") => {
-            let action = args.get(1).ok_or("dispatch needs an action (toggle_visibility/focus/close/toggle_maximize/toggle_fullscreen)")?;
-            if !matches!(action.as_str(), "toggle_visibility" | "focus" | "close" | "toggle_maximize" | "toggle_fullscreen") {
-                return Err(format!("unknown dispatch action '{action}'"));
+        Some("dispatch") => build_dispatch(&args[1..]),
+        // `srd capture workspace <id> <path> [<width>x<height>]` - an
+        // off-screen render of that workspace's window tree, written to
+        // `path` as a PPM image. Not under `dispatch`: every `dispatch`
+        // action mutates window/workspace state, this only reads it. Sits
+        // next to `clients`/`monitors` in spirit, just backend-owned
+        // (needs a renderer) rather than answerable from core state alone
+        // - see `WindowManager::request_capture_workspace`'s own doc
+        // comment for why this exists (a workspace switcher's thumbnail
+        // for a workspace that isn't the one currently on screen, which no
+        // screencopy protocol can see).
+        Some("capture") => {
+            if args.get(1).map(String::as_str) != Some("workspace") {
+                return Err("'capture' only supports 'workspace' - usage: srd capture workspace <id> <path> [<width>x<height>]".to_string());
             }
-            let id: u64 = args.get(2).ok_or("dispatch needs a window id")?.parse().map_err(|_| "window id must be a number".to_string())?;
-            Ok(format!(r#"{{"cmd":"{action}","id":{id}}}"#))
+            let id: u64 = args.get(2).ok_or("capture needs a workspace id")?.parse().map_err(|_| "id must be a number".to_string())?;
+            let path = args.get(3).ok_or("capture needs an output path")?;
+            let size = match args.get(4) {
+                None => String::new(),
+                Some(spec) => {
+                    let (w, h) = spec.split_once('x').ok_or("size must look like <width>x<height>")?;
+                    let w: u64 = w.parse().map_err(|_| "width must be a number".to_string())?;
+                    let h: u64 = h.parse().map_err(|_| "height must be a number".to_string())?;
+                    format!(r#","width":{w},"height":{h}"#)
+                }
+            };
+            Ok(format!(r#"{{"cmd":"capture_workspace","id":{id},"path":{path:?}{size}}}"#))
         }
-        _ => Err("expected 'clients', 'monitors', 'subscribe', or 'dispatch <action> <id>'".to_string()),
+        // Value encoding is picked per key rather than guessed from the
+        // string's shape (e.g. treating anything that parses as a number
+        // as one): `border_color` is a hex string that happens to start
+        // with punctuation, not a bare word, and JSON's `true`/`false`
+        // need to land unquoted for the server's `as_bool()` to see them
+        // as booleans at all, not a string it then has to reject.
+        Some("set") => {
+            let key = args
+                .get(1)
+                .ok_or("set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/shadows/rounded_corners/decoration_mode)")?;
+            let raw = args.get(2).ok_or("set needs a value")?;
+            let value = match key.as_str() {
+                "border_width" | "corner_radius" | "gap_inner" | "gap_outer" => {
+                    raw.parse::<u64>().map_err(|_| format!("{key} needs a numeric value"))?.to_string()
+                }
+                "shadows" | "rounded_corners" => match raw.as_str() {
+                    "true" | "false" => raw.clone(),
+                    _ => return Err(format!("{key} needs 'true' or 'false'")),
+                },
+                "decoration_mode" => match raw.as_str() {
+                    "server" | "client" => format!("{:?}", raw),
+                    _ => return Err(format!("{key} needs 'server' or 'client'")),
+                },
+                "border_color" => format!("{:?}", raw),
+                _ => return Err(format!("unknown set key '{key}'")),
+            };
+            Ok(format!(r#"{{"cmd":"set","key":"{key}","value":{value}}}"#))
+        }
+        _ => Err(
+            "expected 'clients', 'monitors', 'workspaces', 'keyboard layout', 'subscribe', 'dispatch <action> <id>', 'capture workspace <id> <path>', or 'set <key> <value>'"
+                .to_string(),
+        ),
+    }
+}
+
+/// `dispatch`'s own verb-phrase parser, split out of `build_request` for
+/// its own sake - reads like a real command (`toggle floating`, `move
+/// window`), not a single joined snake_case token (`toggle_floating`).
+/// Live report: a joined identifier reads as an internal detail leaking
+/// into the CLI surface, not a real command a person would type.
+///
+/// `set`'s keys (`corner_radius`, `border_color`, ...) deliberately keep
+/// their existing snake_case names, unlike `dispatch`'s actions - they're
+/// property/setting names, not verb phrases (the same distinction `git
+/// config user.name` or `systemctl set-property CPUQuota=` draw: a key
+/// stays an identifier, a command reads like English), and renaming them
+/// would break the AGS peer's already-working live Settings panel, which
+/// calls `srd set` directly today. `dispatch`'s actions carry no such
+/// cost yet - the peer's own integration for these is either brand new
+/// (the four just added) or already being migrated to `zwlr-foreign-
+/// toplevel` instead of `srd dispatch` entirely, so this is the moment to
+/// fix the syntax before more depends on it, not after.
+fn build_dispatch(args: &[String]) -> Result<String, String> {
+    let verb = args.first().ok_or("dispatch needs an action, e.g. 'focus', 'close', 'toggle maximize', 'move window'")?;
+    let usage_hint =
+        "expected one of: focus, close, lock, toggle visibility/maximize/fullscreen/floating/pinned, move window/workspace, activate workspace, cycle keyboard layout";
+    match verb.as_str() {
+        "focus" | "close" => {
+            let id: u64 = args.get(1).ok_or("dispatch needs an id")?.parse().map_err(|_| "id must be a number".to_string())?;
+            Ok(format!(r#"{{"cmd":"{verb}","id":{id}}}"#))
+        }
+        // No id - there's only ever one session to lock.
+        "lock" => Ok(r#"{"cmd":"lock"}"#.to_string()),
+        "toggle" => {
+            let noun = args.get(1).ok_or("'toggle' needs a target: visibility, maximize, fullscreen, floating, or pinned")?;
+            let cmd = match noun.as_str() {
+                "visibility" => "toggle_visibility",
+                "maximize" => "toggle_maximize",
+                "fullscreen" => "toggle_fullscreen",
+                "floating" => "toggle_floating",
+                "pinned" => "toggle_pinned",
+                _ => return Err(format!("unknown 'toggle' target '{noun}' - {usage_hint}")),
+            };
+            let id: u64 = args.get(2).ok_or("dispatch needs an id")?.parse().map_err(|_| "id must be a number".to_string())?;
+            Ok(format!(r#"{{"cmd":"{cmd}","id":{id}}}"#))
+        }
+        "move" => {
+            let noun = args.get(1).ok_or("'move' needs a target: window or workspace")?;
+            let id: u64 = args.get(2).ok_or("dispatch needs an id")?.parse().map_err(|_| "id must be a number".to_string())?;
+            match noun.as_str() {
+                "window" => {
+                    let direction = args.get(3).ok_or("'move window' needs a direction (left/right/up/down)")?;
+                    if !matches!(direction.as_str(), "left" | "right" | "up" | "down") {
+                        return Err(format!("direction must be one of: left, right, up, down (got '{direction}')"));
+                    }
+                    Ok(format!(r#"{{"cmd":"move_window","id":{id},"direction":"{direction}"}}"#))
+                }
+                "workspace" => {
+                    let workspace: u64 =
+                        args.get(3).ok_or("'move workspace' needs a target workspace")?.parse().map_err(|_| "workspace must be a number".to_string())?;
+                    Ok(format!(r#"{{"cmd":"move_to_workspace","id":{id},"workspace":{workspace}}}"#))
+                }
+                _ => Err(format!("unknown 'move' target '{noun}' - {usage_hint}")),
+            }
+        }
+        "activate" => {
+            if args.get(1).map(String::as_str) != Some("workspace") {
+                return Err(format!("'activate' only supports 'workspace' - {usage_hint}"));
+            }
+            let id: u64 = args.get(2).ok_or("dispatch needs an id")?.parse().map_err(|_| "id must be a number".to_string())?;
+            Ok(format!(r#"{{"cmd":"activate_workspace","id":{id}}}"#))
+        }
+        // No id - there's only ever one keyboard as far as this IPC is
+        // concerned, unlike every other action here which targets a
+        // specific window or workspace.
+        "cycle" => {
+            if args.get(1).map(String::as_str) != Some("keyboard") || args.get(2).map(String::as_str) != Some("layout") {
+                return Err(format!("'cycle' only supports 'keyboard layout' - {usage_hint}"));
+            }
+            Ok(r#"{"cmd":"cycle_keyboard_layout"}"#.to_string())
+        }
+        _ => Err(format!("unknown dispatch action '{verb}' - {usage_hint}")),
     }
 }
 
@@ -65,12 +256,117 @@ fn print_usage() {
     eprintln!("usage:");
     eprintln!("  srd clients");
     eprintln!("  srd monitors");
+    eprintln!("  srd workspaces");
+    eprintln!("  srd keyboard layout");
     eprintln!("  srd subscribe");
-    eprintln!("  srd dispatch toggle_visibility <id>");
     eprintln!("  srd dispatch focus <id>");
+    eprintln!("  srd dispatch lock");
     eprintln!("  srd dispatch close <id>");
-    eprintln!("  srd dispatch toggle_maximize <id>");
-    eprintln!("  srd dispatch toggle_fullscreen <id>");
+    eprintln!("  srd dispatch toggle visibility <id>");
+    eprintln!("  srd dispatch toggle maximize <id>");
+    eprintln!("  srd dispatch toggle fullscreen <id>");
+    eprintln!("  srd dispatch toggle floating <id>");
+    eprintln!("  srd dispatch toggle pinned <id>");
+    eprintln!("  srd dispatch move window <id> <left|right|up|down>");
+    eprintln!("  srd dispatch move workspace <id> <workspace>");
+    eprintln!("  srd dispatch activate workspace <id>");
+    eprintln!("  srd dispatch cycle keyboard layout");
+    eprintln!("  srd capture workspace <id> <path> [<width>x<height>]");
+    eprintln!("  srd set border_width <n>");
+    eprintln!("  srd set border_color <#hex>");
+    eprintln!("  srd set corner_radius <n>");
+    eprintln!("  srd set gap_inner <n>");
+    eprintln!("  srd set gap_outer <n>");
+    eprintln!("  srd set shadows <true|false>");
+    eprintln!("  srd set rounded_corners <true|false>");
+    eprintln!("  srd set decoration_mode <server|client>");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_request;
+
+    fn args(strs: &[&str]) -> Vec<String> {
+        strs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn toggle_floating_and_toggle_pinned_read_as_two_words() {
+        assert_eq!(build_request(&args(&["dispatch", "toggle", "floating", "42"])).unwrap(), r#"{"cmd":"toggle_floating","id":42}"#);
+        assert_eq!(build_request(&args(&["dispatch", "toggle", "pinned", "42"])).unwrap(), r#"{"cmd":"toggle_pinned","id":42}"#);
+    }
+
+    #[test]
+    fn toggle_with_an_unknown_target_is_rejected_client_side() {
+        assert!(build_request(&args(&["dispatch", "toggle", "sideways", "42"])).is_err());
+    }
+
+    #[test]
+    fn capture_workspace_with_and_without_a_size() {
+        assert_eq!(
+            build_request(&args(&["capture", "workspace", "1", "/tmp/ws1.ppm"])).unwrap(),
+            r#"{"cmd":"capture_workspace","id":1,"path":"/tmp/ws1.ppm"}"#
+        );
+        assert_eq!(
+            build_request(&args(&["capture", "workspace", "1", "/tmp/ws1.ppm", "200x120"])).unwrap(),
+            r#"{"cmd":"capture_workspace","id":1,"path":"/tmp/ws1.ppm","width":200,"height":120}"#
+        );
+        assert!(build_request(&args(&["capture", "workspace", "1", "/tmp/ws1.ppm", "bogus"])).is_err());
+        assert!(build_request(&args(&["capture", "workspace", "1"])).is_err(), "missing path must error");
+        assert!(build_request(&args(&["capture", "monitor", "1", "/tmp/x.ppm"])).is_err(), "only 'workspace' is a valid capture target");
+    }
+
+    #[test]
+    fn move_window_needs_a_direction_and_validates_it() {
+        assert_eq!(build_request(&args(&["dispatch", "move", "window", "42", "left"])).unwrap(), r#"{"cmd":"move_window","id":42,"direction":"left"}"#);
+        assert!(build_request(&args(&["dispatch", "move", "window", "42"])).is_err(), "missing direction must error, not silently omit it");
+        assert!(build_request(&args(&["dispatch", "move", "window", "42", "sideways"])).is_err(), "an invalid direction must be rejected client-side");
+    }
+
+    #[test]
+    fn move_workspace_needs_a_numeric_workspace() {
+        assert_eq!(build_request(&args(&["dispatch", "move", "workspace", "42", "2"])).unwrap(), r#"{"cmd":"move_to_workspace","id":42,"workspace":2}"#);
+        assert!(build_request(&args(&["dispatch", "move", "workspace", "42"])).is_err(), "missing workspace must error");
+        assert!(build_request(&args(&["dispatch", "move", "workspace", "42", "not-a-number"])).is_err());
+    }
+
+    #[test]
+    fn lock_needs_no_id() {
+        assert_eq!(build_request(&args(&["dispatch", "lock"])).unwrap(), r#"{"cmd":"lock"}"#);
+    }
+
+    #[test]
+    fn focus_and_close_stay_single_word_verbs() {
+        assert_eq!(build_request(&args(&["dispatch", "focus", "42"])).unwrap(), r#"{"cmd":"focus","id":42}"#);
+        assert_eq!(build_request(&args(&["dispatch", "close", "42"])).unwrap(), r#"{"cmd":"close","id":42}"#);
+    }
+
+    #[test]
+    fn activate_workspace_and_cycle_keyboard_layout_read_as_real_phrases() {
+        assert_eq!(build_request(&args(&["dispatch", "activate", "workspace", "1"])).unwrap(), r#"{"cmd":"activate_workspace","id":1}"#);
+        assert_eq!(build_request(&args(&["dispatch", "cycle", "keyboard", "layout"])).unwrap(), r#"{"cmd":"cycle_keyboard_layout"}"#);
+    }
+
+    #[test]
+    fn a_joined_snake_case_action_is_no_longer_accepted() {
+        // The old single-token spelling must not silently keep working --
+        // a caller still using it should get a clear error, not a wrong
+        // command reaching the server.
+        assert!(build_request(&args(&["dispatch", "toggle_floating", "42"])).is_err());
+    }
+
+    #[test]
+    fn keyboard_layout_query_reads_as_two_words_too() {
+        assert_eq!(build_request(&args(&["keyboard", "layout"])).unwrap(), r#"{"cmd":"keyboard_layout"}"#);
+        assert!(build_request(&args(&["keyboard_layout"])).is_err());
+    }
+
+    #[test]
+    fn set_decoration_mode_accepts_only_server_or_client() {
+        assert_eq!(build_request(&args(&["set", "decoration_mode", "server"])).unwrap(), r#"{"cmd":"set","key":"decoration_mode","value":"server"}"#);
+        assert_eq!(build_request(&args(&["set", "decoration_mode", "client"])).unwrap(), r#"{"cmd":"set","key":"decoration_mode","value":"client"}"#);
+        assert!(build_request(&args(&["set", "decoration_mode", "both"])).is_err());
+    }
 }
 
 #[cfg(unix)]

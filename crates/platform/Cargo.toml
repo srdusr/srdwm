@@ -11,6 +11,28 @@ log.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `appmenu_registrar.rs`: owns `com.canonical.AppMenu.Registrar`, the
+# classic Qt/`appmenu-qt5` global-menu D-Bus service every X11-capable
+# backend needs - see that module's doc comment for why it lives here
+# rather than in one specific backend crate. Default features (`async-io` +
+# `blocking-api`) are already the lightest option zbus has - `async-io` is
+# a small reactor, not a full runtime like tokio (which this compositor has
+# no other reason to depend on) - and `blocking-api` is what lets that
+# module drive it from a plain background thread with no `async`/`await`
+# of its own.
+zbus = "5"
+
+# `native_lock_auth.rs`: PAM authentication for srdwm's own session-lock UI
+# (`crates/wayland/src/native_lock.rs`) - Unix-only (PAM itself is a
+# Linux/BSD concept with no Windows/macOS equivalent, and this whole crate
+# is also linked into the Windows/macOS backend crates), so gated the same
+# way `crates/ctl`'s socket code already is rather than pulling libpam into
+# builds that will never call this. `default-features = false`: the `cli`
+# feature (and its `rpassword` dependency) is for reading a password
+# interactively off a terminal, which nothing here needs - the password
+# already comes from srdwm's own lock UI, not a TTY prompt.
+[target.'cfg(unix)'.dependencies]
+pam-client = { version = "0.5", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
