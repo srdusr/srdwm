@@ -43,8 +43,26 @@ impl Platform for WaylandPlatform {
         if let Some(ipc) = self.ipc.as_mut() {
             if ipc.poll(&self.wm) {
                 self.pending.borrow_mut().push(CoreEvent::WorkspaceChanged);
+                // Same re-sync as `udev/platform.rs`'s matching block - see
+                // its own comment. `handle_request` only ever touches core's
+                // `WindowManager`, never `state.space`, so an IPC focus
+                // change left rendering/hit-testing on the stale topmost
+                // window until something else happened to raise it.
+                let focused = self.wm.borrow().focused_id();
+                if let Some(id) = focused {
+                    crate::input::focus_window(&mut self.state, id);
+                }
             }
         }
+        // Same lock-request draining as `udev/platform.rs`'s matching
+        // block - see its own comment. Exercised here too (not just on
+        // the real udev backend) specifically so a native lock can be
+        // tested against this nested dev session without ever touching
+        // the live tty1 one.
+        if self.wm.borrow_mut().drain_lock_request() {
+            self.state.begin_native_lock();
+        }
+        self.state.poll_native_lock_auth();
         let wait = TARGET_FRAME_TIME.saturating_sub(self.last_frame.elapsed());
         let _ = self.idle_event_loop.dispatch(Some(wait), &mut self.state);
         self.last_frame = Instant::now();
@@ -69,6 +87,7 @@ impl Platform for WaylandPlatform {
             // "usable, shrunk rect" `toggle_maximize` targets.
             let full = self.backend.window_size();
             m.full_geometry = srdwm_core::Rect::new(0, 0, full.w as u32, full.h as u32);
+            m.maximize_geometry = crate::input::maximize_geometry_for(&self.output, m.full_geometry);
             m.primary = true;
             m
         }])
@@ -144,5 +163,24 @@ impl Platform for WaylandPlatform {
 
     fn ungrab_keyboard(&mut self) -> PlatformResult<()> {
         Ok(())
+    }
+
+    fn keyboard_layout(&mut self) -> PlatformResult<String> {
+        let Some(keyboard) = self.state.seat.get_keyboard() else { return Ok(String::new()) };
+        Ok(keyboard.with_xkb_state(&mut self.state, |ctx| {
+            let xkb = ctx.xkb().lock().unwrap();
+            let layout = xkb.active_layout();
+            xkb.layout_name(layout).to_string()
+        }))
+    }
+
+    fn cycle_keyboard_layout(&mut self) -> PlatformResult<String> {
+        let Some(keyboard) = self.state.seat.get_keyboard() else { return Ok(String::new()) };
+        Ok(keyboard.with_xkb_state(&mut self.state, |mut ctx| {
+            ctx.cycle_next_layout();
+            let xkb = ctx.xkb().lock().unwrap();
+            let layout = xkb.active_layout();
+            xkb.layout_name(layout).to_string()
+        }))
     }
 }

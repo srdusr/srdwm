@@ -11,10 +11,20 @@ srdwm-platform.workspace = true
 log.workspace = true
 thiserror.workspace = true
 fontdue = "0.9"
+# `udev/capture.rs`: builds a `pixman::Image` off-screen render target
+# directly (`PixmanRenderer::create_buffer`/`Offscreen` hand one back, but
+# nothing constructs one standalone). Pinned to the same version smithay
+# itself depends on (see Cargo.lock), so both see one set of types.
+pixman = "0.2.1"
 # smithay 0.7 ships no wlr-screencopy helper, so `src/screencopy.rs`
 # implements that protocol directly against these server bindings. Pinned to
 # the same version smithay itself depends on, so both see one set of types.
 wayland-protocols-wlr = { version = "0.3.12", features = ["server"] }
+# `appmenu.rs`: `org_kde_kwin_appmenu` (global menu for Wayland-native
+# clients - the equivalent of `xwayland.rs`'s X11-property reading, for
+# windows that never go through XWayland at all). Same sibling-crate/no
+# smithay-helper situation as the wlr protocols above, pinned the same way.
+wayland-protocols-plasma = { version = "0.3.12", features = ["server"] }
 # `ext-workspace-v1` (`src/workspace.rs`): staging-tree protocol, not
 # wlr-specific - lives in the plain `wayland-protocols` crate instead, and
 # (like the wlr protocol above) has no smithay helper to delegate to.
@@ -34,6 +44,14 @@ memmap2 = "0.9"
 wayland-scanner = "0.31.10"
 wayland-backend = { version = "0.3.15", features = ["server_system"] }
 xcursor = "0.3.11"
+# `native_lock.rs`: converts a pressed key's `Keysym` (from `KeysymHandle::
+# modified_sym()`) into the printable character it represents, for the
+# lock screen's own password field - smithay has no helper for this
+# itself, only the raw `Keysym`. Pinned to the same version smithay itself
+# depends on (with the same `wayland` feature), same reasoning as every
+# other "pinned to smithay's own version" dependency above - both need to
+# see one identical `Keysym` type, not two incompatible ones.
+xkbcommon = { version = "0.8", features = ["wayland"] }
 
 [dependencies.smithay]
 version = "0.7"

@@ -49,6 +49,7 @@ use smithay::backend::renderer::utils::{with_renderer_surface_state, RendererSur
 use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::Transform;
+use smithay::wayland::compositor::get_children;
 use smithay::wayland::shm::{with_buffer_contents, BufferData};
 
 /// Builds a rounded-corner-masked copy of `surface`'s own committed content,
@@ -57,6 +58,21 @@ use smithay::wayland::shm::{with_buffer_contents, BufferData};
 /// in the same logical-pixel units as `decoration::CORNER_RADIUS`; scaled
 /// up to buffer pixels internally using the surface's own buffer scale.
 pub(crate) fn masked_content_buffer(surface: &WlSurface, radius: f32, corners: RoundedCorners) -> Option<MemoryRenderBuffer> {
+    // The module doc comment above has always claimed "only a window's main
+    // surface (no subsurfaces)... falls back to None" - but nothing here
+    // actually checked that; this function read `surface`'s own buffer
+    // unconditionally regardless of whether it had children. A window whose
+    // real content is painted into a subsurface (a common GTK4/WebRender
+    // pattern - confirmed live: Firefox does this) has its own root
+    // surface holding only a blank/background buffer, so masking succeeded
+    // and produced a buffer, just the wrong one - the actual page content
+    // in the child subsurface was never read at all, and the window
+    // rendered as blank with rounded corners on instead of falling back to
+    // the unmasked path (`surface_content_elements`), which does walk the
+    // full surface tree and shows real content correctly.
+    if !get_children(surface).is_empty() {
+        return None;
+    }
     let (buffer, scale, transform) = with_renderer_surface_state(surface, |state: &mut RendererSurfaceState| {
         let buffer = state.buffer()?.clone();
         Some((buffer, state.buffer_scale(), state.buffer_transform()))

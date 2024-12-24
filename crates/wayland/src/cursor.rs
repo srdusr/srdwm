@@ -12,23 +12,32 @@
 //! 1. **The client's own cursor surface** (`CursorImageStatus::Surface`) --
 //!    a terminal's I-beam, a browser's hand, an app's resize arrows. Drawn
 //!    from its surface tree, offset by the hotspot the client declared.
-//! 2. **The system's real XCursor theme arrow** (`load_theme_arrow`),
-//!    resolved from `XCURSOR_THEME`/`XCURSOR_SIZE` or, failing that, GTK's
-//!    own `gtk-cursor-theme-name`/`-size` - for when no client has set an
-//!    image (over srdwm's own decorations and the desktop) or asked for a
-//!    named shape we have no art for.
-//! 3. **A built-in hand-rasterized arrow**, only if theme loading found
-//!    nothing at all - no theme installed, an unreadable file, whatever.
-//!    A cursor that is always present beats a prettier one that sometimes
-//!    isn't there, the same reasoning as `decoration.rs`'s font fallback;
-//!    this is the same bitmap that used to be the *only* arrow.
+//! 2. **The system's real XCursor theme** (`load_theme_cursor`), resolved
+//!    from `XCURSOR_THEME`/`XCURSOR_SIZE` or, failing that, GTK's own
+//!    `gtk-cursor-theme-name`/`-size` - for when no client has set an
+//!    image (over srdwm's own decorations and the desktop), tried for
+//!    every shape below, not just the plain arrow.
+//! 3. **A built-in hand-rasterized shape**, only if theme loading found
+//!    nothing at all for that specific shape - no theme installed, an
+//!    unreadable file, or the theme genuinely has no icon under any of
+//!    the names tried. A cursor that is always present beats a prettier
+//!    one that sometimes isn't there, the same reasoning as `decoration.
+//!    rs`'s font fallback; this is the same set of bitmaps that used to
+//!    be the *only* option for every shape but the arrow.
 //!
 //! `CursorImageStatus::Hidden` is honoured, so a client that hides the
 //! pointer still gets its way. Named shapes we have dedicated art for
 //! (text entry, the four resize directions, crosshair, move, and the
-//! pointing-hand link-hover shape) still render as that hand-drawn shape,
-//! not a theme lookup - only the plain default arrow goes through theme
-//! resolution.
+//! pointing-hand link-hover shape) go through the *same* theme resolution
+//! the arrow does - each tries a short list of the theme's own names for
+//! that shape (`ew-resize`, `sb_h_double_arrow`, ... for the horizontal
+//! resize cursor, say) before falling back to the hand-drawn bitmap.
+//! Every shape used to skip straight to the hand-drawn version regardless
+//! of what the theme actually shipped, which is what made them look
+//! noticeably cruder than the arrow next to them - reported live as the
+//! resize cursor in particular looking "hideous", and the pointer/move
+//! shapes barely visible at all, while the plain arrow (already theme-
+//! resolved) looked fine.
 
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::utils::{Logical, Point};
@@ -170,18 +179,28 @@ fn add_white_halo(buf: &mut [u8]) {
 #[derive(Clone)]
 pub(crate) struct CursorBuffers {
     pub(crate) arrow: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
-    /// `arrow`'s hotspot - (0, 0), the bitmap's top-left tip, for the
-    /// built-in fallback, but a real XCursor theme's own `xhot`/`yhot` when
-    /// `load_theme_arrow` found one. See that function's doc comment.
+    /// Every shape's hotspot travels with its buffer now, not just the
+    /// arrow's: a real theme cursor's `xhot`/`yhot` when `load_theme_
+    /// cursor` found one for this shape, or the fixed built-in value
+    /// (`CENTERED_HOTSPOT`/`POINTER_HOTSPOT`/`(0, 0)`) when it fell back
+    /// to the hand-drawn bitmap - see `make_buffers`.
     pub(crate) arrow_hotspot: (i32, i32),
     pub(crate) text: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    pub(crate) text_hotspot: (i32, i32),
     pub(crate) ns_resize: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    pub(crate) ns_resize_hotspot: (i32, i32),
     pub(crate) ew_resize: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    pub(crate) ew_resize_hotspot: (i32, i32),
     pub(crate) nesw_resize: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    pub(crate) nesw_resize_hotspot: (i32, i32),
     pub(crate) nwse_resize: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    pub(crate) nwse_resize_hotspot: (i32, i32),
     pub(crate) crosshair: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    pub(crate) crosshair_hotspot: (i32, i32),
     pub(crate) move_icon: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    pub(crate) move_icon_hotspot: (i32, i32),
     pub(crate) pointer: smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    pub(crate) pointer_hotspot: (i32, i32),
 }
 
 /// Sets one pixel to opaque white-on-black-outline isn't needed here (these
@@ -368,35 +387,85 @@ fn upload(data: Vec<u8>) -> smithay::backend::renderer::element::memory::MemoryR
     MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (CURSOR_SIZE, CURSOR_SIZE), 1, Transform::Normal, None)
 }
 
-/// The centered shapes' hotspot: dead center of the bitmap, unlike the
-/// arrow's tip-at-origin. Shared by every shape built here except the
-/// arrow itself.
+/// Tries each of `names` against the resolved theme in order, uploads the
+/// first that resolves; falls back to `built_in()` (drawn at the fixed
+/// `hotspot_fallback`) if none of them do. One helper for all nine shapes
+/// `make_buffers` builds, so every one of them gets the same "real theme
+/// cursor first, hand-drawn shape only if the theme genuinely has nothing"
+/// treatment the arrow alone used to get.
+fn load_or_draw(
+    theme: &xcursor::CursorTheme,
+    size: u32,
+    names: &[&str],
+    built_in: impl Fn() -> Vec<u8>,
+    hotspot_fallback: (i32, i32),
+) -> (smithay::backend::renderer::element::memory::MemoryRenderBuffer, (i32, i32)) {
+    use smithay::backend::allocator::Fourcc;
+    use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
+    use smithay::utils::Transform;
+    match load_theme_cursor(theme, size, names) {
+        Some(tc) => (MemoryRenderBuffer::from_slice(&tc.bgra, Fourcc::Argb8888, tc.size, 1, Transform::Normal, None), tc.hotspot),
+        None => (upload(built_in()), hotspot_fallback),
+    }
+}
+
+/// The centered shapes' fallback hotspot: dead center of the built-in
+/// bitmap, unlike the arrow's tip-at-origin. Only used when a shape falls
+/// back to the hand-drawn bitmap - a real theme cursor carries its own
+/// `xhot`/`yhot` regardless of where that happens to fall.
 pub(crate) const CENTERED_HOTSPOT: (i32, i32) = (CURSOR_SIZE / 2, CURSOR_SIZE / 2);
 
 pub(crate) fn make_buffers() -> CursorBuffers {
-    let (arrow, arrow_hotspot) = match load_theme_arrow() {
-        Some(theme_arrow) => {
-            use smithay::backend::allocator::Fourcc;
-            use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
-            use smithay::utils::Transform;
-            (
-                MemoryRenderBuffer::from_slice(&theme_arrow.bgra, Fourcc::Argb8888, theme_arrow.size, 1, Transform::Normal, None),
-                theme_arrow.hotspot,
-            )
-        }
-        None => (make_buffer(), (0, 0)),
-    };
+    // Resolved once, not once per shape: `CursorTheme::load` re-walks the
+    // theme's `index.theme` inheritance chain and search paths every call,
+    // real (if small) work worth not repeating nine times over for what is
+    // - for every shape's own lookup - the exact same theme and size.
+    let (theme_name, size) = theme_and_size();
+    let theme = xcursor::CursorTheme::load(&theme_name);
+
+    let (arrow, arrow_hotspot) = load_or_draw(&theme, size, &["left_ptr", "default", "arrow"], arrow_bitmap, (0, 0));
+    let (text, text_hotspot) = load_or_draw(&theme, size, &["text", "xterm"], text_bitmap, CENTERED_HOTSPOT);
+    let (ns_resize, ns_resize_hotspot) = load_or_draw(
+        &theme,
+        size,
+        &["ns-resize", "sb_v_double_arrow", "v_double_arrow", "size_ver", "size-ver", "row-resize"],
+        || straight_resize_bitmap(false),
+        CENTERED_HOTSPOT,
+    );
+    let (ew_resize, ew_resize_hotspot) = load_or_draw(
+        &theme,
+        size,
+        &["ew-resize", "sb_h_double_arrow", "h_double_arrow", "size_hor", "size-hor", "col-resize"],
+        || straight_resize_bitmap(true),
+        CENTERED_HOTSPOT,
+    );
+    let (nesw_resize, nesw_resize_hotspot) =
+        load_or_draw(&theme, size, &["nesw-resize", "size_bdiag", "size-bdiag", "ne-resize", "sw-resize"], || diagonal_resize_bitmap(false), CENTERED_HOTSPOT);
+    let (nwse_resize, nwse_resize_hotspot) =
+        load_or_draw(&theme, size, &["nwse-resize", "size_fdiag", "size-fdiag", "nw-resize", "se-resize"], || diagonal_resize_bitmap(true), CENTERED_HOTSPOT);
+    let (crosshair, crosshair_hotspot) = load_or_draw(&theme, size, &["crosshair", "cross", "tcross"], crosshair_bitmap, CENTERED_HOTSPOT);
+    let (move_icon, move_icon_hotspot) = load_or_draw(&theme, size, &["move", "fleur", "size_all", "all-scroll"], move_bitmap, CENTERED_HOTSPOT);
+    let (pointer, pointer_hotspot) = load_or_draw(&theme, size, &["pointer", "hand2", "pointing_hand", "hand1", "link"], pointer_bitmap, POINTER_HOTSPOT);
+
     CursorBuffers {
         arrow,
         arrow_hotspot,
-        text: upload(text_bitmap()),
-        ns_resize: upload(straight_resize_bitmap(false)),
-        ew_resize: upload(straight_resize_bitmap(true)),
-        nesw_resize: upload(diagonal_resize_bitmap(false)),
-        nwse_resize: upload(diagonal_resize_bitmap(true)),
-        crosshair: upload(crosshair_bitmap()),
-        move_icon: upload(move_bitmap()),
-        pointer: upload(pointer_bitmap()),
+        text,
+        text_hotspot,
+        ns_resize,
+        ns_resize_hotspot,
+        ew_resize,
+        ew_resize_hotspot,
+        nesw_resize,
+        nesw_resize_hotspot,
+        nwse_resize,
+        nwse_resize_hotspot,
+        crosshair,
+        crosshair_hotspot,
+        move_icon,
+        move_icon_hotspot,
+        pointer,
+        pointer_hotspot,
     }
 }
 
@@ -461,39 +530,30 @@ where
         return render_elements_from_surface_tree(renderer, surface, at, 1.0, 1.0, Kind::Cursor);
     }
 
-    // No client image. A named shape we have dedicated art for gets it
-    // (centered on the pointer - these are all symmetric shapes, unlike
-    // the arrow); anything else (Default, or one of the many shapes we
-    // still don't draw, e.g. Grab/Wait/Help/NotAllowed) falls back to the
-    // arrow.
-    // The arrow's own hotspot is `buffers.arrow_hotspot` - (0, 0), the
-    // bitmap's tip, for the built-in fallback, but a real theme's `xhot`/
-    // `yhot` (not necessarily the top-left corner at all) when
-    // `load_theme_arrow` found one.
-    let (buffer, at) = match status {
+    // No client image. A named shape we have dedicated art for gets it;
+    // anything else (Default, or one of the many shapes we still don't
+    // draw, e.g. Grab/Wait/Help/NotAllowed) falls back to the arrow.
+    // Every shape's hotspot travels with its own buffer now (`make_buffers`)
+    // - a real theme cursor's `xhot`/`yhot` when one was found for that
+    // specific shape, the fixed `CENTERED_HOTSPOT`/`POINTER_HOTSPOT`/
+    // `(0, 0)` fallback otherwise - rather than every non-arrow shape
+    // assuming the same centered point regardless of what actually got
+    // drawn.
+    let (buffer, hotspot) = match status {
         CursorImageStatus::Named(icon) => match icon {
-            CursorIcon::Text | CursorIcon::VerticalText => {
-                (&buffers.text, (local.0 - CENTERED_HOTSPOT.0, local.1 - CENTERED_HOTSPOT.1))
-            }
-            CursorIcon::EResize | CursorIcon::WResize | CursorIcon::EwResize | CursorIcon::ColResize => {
-                (&buffers.ew_resize, (local.0 - CENTERED_HOTSPOT.0, local.1 - CENTERED_HOTSPOT.1))
-            }
-            CursorIcon::NResize | CursorIcon::SResize | CursorIcon::NsResize | CursorIcon::RowResize => {
-                (&buffers.ns_resize, (local.0 - CENTERED_HOTSPOT.0, local.1 - CENTERED_HOTSPOT.1))
-            }
-            CursorIcon::NeResize | CursorIcon::SwResize | CursorIcon::NeswResize => {
-                (&buffers.nesw_resize, (local.0 - CENTERED_HOTSPOT.0, local.1 - CENTERED_HOTSPOT.1))
-            }
-            CursorIcon::NwResize | CursorIcon::SeResize | CursorIcon::NwseResize | CursorIcon::AllResize => {
-                (&buffers.nwse_resize, (local.0 - CENTERED_HOTSPOT.0, local.1 - CENTERED_HOTSPOT.1))
-            }
-            CursorIcon::Crosshair => (&buffers.crosshair, (local.0 - CENTERED_HOTSPOT.0, local.1 - CENTERED_HOTSPOT.1)),
-            CursorIcon::Move => (&buffers.move_icon, (local.0 - CENTERED_HOTSPOT.0, local.1 - CENTERED_HOTSPOT.1)),
-            CursorIcon::Pointer => (&buffers.pointer, (local.0 - POINTER_HOTSPOT.0, local.1 - POINTER_HOTSPOT.1)),
-            _ => (&buffers.arrow, (local.0 - buffers.arrow_hotspot.0, local.1 - buffers.arrow_hotspot.1)),
+            CursorIcon::Text | CursorIcon::VerticalText => (&buffers.text, buffers.text_hotspot),
+            CursorIcon::EResize | CursorIcon::WResize | CursorIcon::EwResize | CursorIcon::ColResize => (&buffers.ew_resize, buffers.ew_resize_hotspot),
+            CursorIcon::NResize | CursorIcon::SResize | CursorIcon::NsResize | CursorIcon::RowResize => (&buffers.ns_resize, buffers.ns_resize_hotspot),
+            CursorIcon::NeResize | CursorIcon::SwResize | CursorIcon::NeswResize => (&buffers.nesw_resize, buffers.nesw_resize_hotspot),
+            CursorIcon::NwResize | CursorIcon::SeResize | CursorIcon::NwseResize | CursorIcon::AllResize => (&buffers.nwse_resize, buffers.nwse_resize_hotspot),
+            CursorIcon::Crosshair => (&buffers.crosshair, buffers.crosshair_hotspot),
+            CursorIcon::Move => (&buffers.move_icon, buffers.move_icon_hotspot),
+            CursorIcon::Pointer => (&buffers.pointer, buffers.pointer_hotspot),
+            _ => (&buffers.arrow, buffers.arrow_hotspot),
         },
-        _ => (&buffers.arrow, (local.0 - buffers.arrow_hotspot.0, local.1 - buffers.arrow_hotspot.1)),
+        _ => (&buffers.arrow, buffers.arrow_hotspot),
     };
+    let at = (local.0 - hotspot.0, local.1 - hotspot.1);
     let at = (at.0 as f64, at.1 as f64);
     match MemoryRenderBufferRenderElement::from_buffer(renderer, at, buffer, None, None, None, Kind::Cursor) {
         Ok(e) => vec![OverlayElement::Memory(e)],
@@ -505,7 +565,7 @@ where
 }
 
 
-/// Resolves which XCursor theme to load the real arrow from, and at what
+/// Resolves which XCursor theme to load real cursors from, and at what
 /// size.
 ///
 /// `XCURSOR_THEME`/`XCURSOR_SIZE` are the standard override, but nothing
@@ -547,15 +607,24 @@ fn theme_and_size() -> (String, u32) {
 }
 
 /// A loaded XCursor image, converted to what `make_buffers` needs to upload
-/// it: BGRA8888 pixels, pixel dimensions, and hotspot.
-struct ThemeArrow {
+/// it: BGRA8888 pixels, pixel dimensions, and hotspot. Generic over which
+/// shape it came from - was arrow-only (`ThemeArrow`) before every shape
+/// started resolving through the theme.
+struct ThemeCursor {
     bgra: Vec<u8>,
     size: (i32, i32),
     hotspot: (i32, i32),
 }
 
-/// Loads the real arrow cursor (`left_ptr`) from the resolved XCursor theme,
-/// picking whichever bundled nominal size is closest to the target.
+/// Loads one named cursor (trying each of `names` in order, using the
+/// first that resolves) from an already-resolved theme, picking whichever
+/// bundled nominal size is closest to the target. Was arrow-only
+/// (`load_theme_arrow`, a single hardcoded `"left_ptr"`) before every
+/// shape started resolving through the theme - several themes only ship
+/// the legacy X11 name for a given shape (`sb_h_double_arrow` rather than
+/// the modern `ew-resize`, say), so trying a short list rather than one
+/// fixed name is what makes this actually portable across themes, not
+/// just the one installed here.
 ///
 /// Converts pixels from the crate's RGBA byte order (`Image::pixels_rgba`,
 /// straight off disk) to the BGRA order every buffer in this file uses for
@@ -564,20 +633,20 @@ struct ThemeArrow {
 /// spec, same as every bitmap built here, so only the channel order needs
 /// converting, not the alpha itself.
 ///
-/// Returns `None` on any failure - theme or icon not found, corrupt file,
+/// Returns `None` on any failure - none of `names` found, a corrupt file,
 /// a pixel count that doesn't match the declared dimensions - so the
-/// caller falls back to the built-in bitmap arrow, which is the entire
-/// reason that fallback exists: see this module's own doc comment.
-fn load_theme_arrow() -> Option<ThemeArrow> {
-    let (theme, size) = theme_and_size();
-    let path = xcursor::CursorTheme::load(&theme).load_icon("left_ptr")?;
+/// caller (`load_or_draw`) falls back to that shape's own hand-drawn
+/// bitmap, which is the entire reason that fallback exists: see this
+/// module's own doc comment.
+fn load_theme_cursor(theme: &xcursor::CursorTheme, size: u32, names: &[&str]) -> Option<ThemeCursor> {
+    let path = names.iter().find_map(|name| theme.load_icon(name))?;
     let bytes = std::fs::read(&path).ok()?;
     let images = xcursor::parser::parse_xcursor(&bytes)?;
     let image = images.into_iter().min_by_key(|img| (img.size as i64 - size as i64).abs())?;
     if image.width == 0 || image.height == 0 || image.pixels_rgba.len() != (image.width * image.height * 4) as usize {
         return None;
     }
-    Some(ThemeArrow {
+    Some(ThemeCursor {
         bgra: rgba_to_bgra(&image.pixels_rgba),
         size: (image.width as i32, image.height as i32),
         hotspot: (image.xhot as i32, image.yhot as i32),
@@ -599,17 +668,6 @@ fn rgba_to_bgra(pixels_rgba: &[u8]) -> Vec<u8> {
         bgra.push(px[3]);
     }
     bgra
-}
-
-/// The built-in arrow as an uploadable buffer. Built once at startup rather
-/// than per frame - the bitmap never changes. Kept as a fallback for when
-/// `load_theme_arrow` finds nothing - see this module's doc comment on why
-/// a cursor that's always present beats a prettier one that sometimes isn't.
-pub(crate) fn make_buffer() -> smithay::backend::renderer::element::memory::MemoryRenderBuffer {
-    use smithay::backend::allocator::Fourcc;
-    use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
-    use smithay::utils::Transform;
-    MemoryRenderBuffer::from_slice(&arrow_bitmap(), Fourcc::Argb8888, (CURSOR_SIZE, CURSOR_SIZE), 1, Transform::Normal, None)
 }
 
 #[cfg(test)]

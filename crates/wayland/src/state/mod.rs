@@ -40,10 +40,10 @@ use smithay::wayland::dmabuf::DmabufState;
 use smithay::wayland::shm::ShmState;
 use smithay::wayland::xdg_activation::XdgActivationState;
 
-use srdwm_core::{Event as CoreEvent, Window as CoreWindow, WindowId, WindowManager, TITLEBAR_HEIGHT};
+use srdwm_core::{Event as CoreEvent, SnapZoneKind, Window as CoreWindow, WindowId, WindowManager, TITLEBAR_HEIGHT};
 
 use crate::lock::SessionLock;
-use crate::{decoration, foreign_toplevel, gamma_control, output_management, output_power, screencopy, udev, workspace, xwayland};
+use crate::{appmenu, decoration, foreign_toplevel, gamma_control, output_management, output_power, screencopy, udev, workspace, xwayland};
 
 #[derive(Default)]
 pub(crate) struct ClientState {
@@ -85,6 +85,34 @@ impl OutputEntry {
     pub(crate) fn geometry(&self) -> Rectangle<i32, Logical> {
         Rectangle::new(self.location, self.size())
     }
+}
+
+/// Every input `redraw_decoration_buffer` reads to decide what a window's
+/// titlebar/border pixels look like - see `CompState::decoration_
+/// signatures`'s own doc comment for why this exists. `title` is the one
+/// field worth noting the cost of cloning: short in practice (a window
+/// title), and only compared/cloned once per call to this already-more-
+/// expensive-than-a-string-clone rasterization function, not once per
+/// frame.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct DecorationSignature {
+    pub(crate) width: u32,
+    /// The shadow bitmap's own inputs (`height`, `maximized`, `fullscreen`,
+    /// and the global `shadows_enabled` setting) belong here too, even
+    /// though nothing above the titlebar/border needs them - one
+    /// signature covering every input this function reads, not one that
+    /// only happens to match the titlebar/border's inputs and silently
+    /// skips a shadow update a real state change needed.
+    pub(crate) height: u32,
+    pub(crate) decorated: bool,
+    pub(crate) focused: bool,
+    pub(crate) title: String,
+    pub(crate) border_color: (u8, u8, u8),
+    pub(crate) border_width: u32,
+    pub(crate) corner_radius: u32,
+    pub(crate) maximized: bool,
+    pub(crate) fullscreen: bool,
+    pub(crate) shadows_enabled: bool,
 }
 
 /// Everything smithay's protocol handlers need `&mut` access to. This is the
@@ -154,6 +182,14 @@ pub(crate) struct CompState {
     /// Captures requested via `wlr-screencopy` but not yet serviced; drained
     /// inside the render pass (see `screencopy::service_pending`).
     pub(crate) screencopy_pending: Vec<screencopy::PendingCapture>,
+    /// `org_kde_kwin_appmenu_manager` - not `Option`-gated, same reasoning
+    /// as `_output_management_state` below: exporting a menu D-Bus address
+    /// straight from a Wayland-native client has nothing GPU/DRM-specific
+    /// about it, so both backends advertise it. See `appmenu.rs`'s module
+    /// doc comment for why this exists alongside `xwayland.rs::read_global_
+    /// menu` rather than instead of it - they cover disjoint sets of
+    /// windows (XWayland-backed vs. Wayland-native), not the same one.
+    pub(crate) _appmenu_state: appmenu::AppmenuManagerState,
     pub(crate) _foreign_toplevel_state: foreign_toplevel::ForeignToplevelState,
     /// Every bound `zwlr_foreign_toplevel_manager_v1` (one per dock/switcher
     /// client), so a newly-created window can be announced to all of them --
@@ -207,6 +243,19 @@ pub(crate) struct CompState {
     pub(crate) cursor_buffers: crate::cursor::CursorBuffers,
     /// Last titlebar press, for double-click detection.
     pub(crate) last_titlebar_click: Option<(WindowId, u32)>,
+    /// Finger count and accumulated horizontal offset of an in-progress
+    /// touchpad swipe (`GestureSwipeBegin`..`GestureSwipeUpdate`*..
+    /// `GestureSwipeEnd`) - `None` between gestures. Finger count is only
+    /// ever reported on the `Begin` event, so it has to be carried forward
+    /// to be checked at `End`. `GestureSwipeUpdateEvent::delta_x` is a
+    /// per-update offset, not a running total (see the smithay struct's own
+    /// doc comment: "relative to the previous event"), so the offset half
+    /// has to sum across every update itself; only the total at `End`
+    /// decides whether the swipe crossed the switch-workspace threshold.
+    /// Never forwarded to a client - see `input::handle_gesture_swipe_end`'s
+    /// doc comment for why 3+-finger swipe is claimed entirely by the
+    /// compositor.
+    pub(crate) gesture_swipe: Option<(u32, f64)>,
     /// The right-click titlebar window menu, if one is currently open --
     /// see `context_menu.rs`. `None` almost always; a click anywhere while
     /// `Some` resolves (selects a row) or dismisses it, never falls
@@ -217,6 +266,16 @@ pub(crate) struct CompState {
     /// `decorations`/`border_top_decorations` already use, not rebuilt
     /// per frame.
     pub(crate) context_menu_buffer: Option<MemoryRenderBuffer>,
+    /// The Snap-Layouts flyout, if one is currently open - see
+    /// `snap_flyout.rs`. Same lifecycle as `context_menu` above (mutually
+    /// exclusive in practice, since both close on any click elsewhere), just
+    /// a separate field rather than an enum of the two: they render
+    /// differently, are triggered by different clicks, and nothing needs to
+    /// treat them uniformly.
+    pub(crate) snap_flyout: Option<crate::snap_flyout::SnapFlyout>,
+    /// Rasterised pixels for the currently-open `snap_flyout`, same
+    /// build-once-on-open pattern as `context_menu_buffer`.
+    pub(crate) snap_flyout_buffer: Option<MemoryRenderBuffer>,
     pub(crate) wm: Rc<RefCell<WindowManager>>,
     pub(crate) surface_to_id: HashMap<WlSurface, WindowId>,
     pub(crate) id_to_window: HashMap<WindowId, DWindow>,
@@ -229,6 +288,21 @@ pub(crate) struct CompState {
     /// after the client destroys it too and Rust never reuses the id while
     /// any handle (including this one) still exists.
     pub(crate) dead_layer_surfaces: HashSet<WlSurface>,
+    /// Layer surfaces this compositor has unmapped itself in response to a
+    /// null-buffer commit - `wlr-layer-shell-unstable-v1.xml`'s own text:
+    /// "Attaching a null buffer to a layer surface unmaps it", but nothing
+    /// in smithay's `LayerMap` does that automatically (`arrange()` walks
+    /// every layer in its list unconditionally, buffer or not; only an
+    /// explicit `unmap_layer` call removes one). `layer_destroyed` already
+    /// did this for the surface-destroyed case; `sync_layer_visibility`
+    /// (state/layers.rs) does it for the hide-without-destroying one --
+    /// AGS's dock, hiding for a fullscreen window, being the live case
+    /// that surfaced this. Stores the output it was unmapped from plus the
+    /// `LayerSurface` handle itself: `unmap_layer` removes it from
+    /// `LayerMap`'s own list, so `layer_for_surface` can never find it
+    /// again on its own - this is the only way `sync_layer_visibility`
+    /// can re-map it once the client commits real content again.
+    pub(crate) hidden_layer_surfaces: HashMap<WlSurface, (smithay::output::Output, smithay::desktop::LayerSurface)>,
     pub(crate) decorations: HashMap<WindowId, MemoryRenderBuffer>,
     /// The top border strip's rounded-corner bitmap, cached the same way
     /// and at the same trigger points as `decorations` (built in
@@ -240,6 +314,24 @@ pub(crate) struct CompState {
     /// [`Self::border_top_decorations`]'s mirror for the bottom strip's own
     /// two corners - same cache, same trigger points, same reasoning.
     pub(crate) border_bottom_decorations: HashMap<WindowId, MemoryRenderBuffer>,
+    /// What `redraw_decoration_buffer` last actually rendered for a window
+    /// - every input its own rasterization reads (width, `decorated`,
+    /// focus, title text, border colour/width) - so a call that would
+    /// rebuild the exact same pixels can skip doing so instead.
+    ///
+    /// Exists because `main.rs`'s `sync()` calls `Platform::redraw_
+    /// decoration` - which always reaches this - for *every visible
+    /// window*, on *every* tick that has anything at all marked dirty, not
+    /// only the window whose state actually changed: a resize drag alone
+    /// fires this for every other open window too, once per pointer-motion
+    /// event, each one re-rendering title text and re-rasterizing border
+    /// strips into a freshly allocated buffer for no visible difference.
+    /// The `decorations`/`border_*_decorations` doc comments already
+    /// establish "only rebuild at real trigger points" as the intended
+    /// contract; this closes the gap between that intent and `sync()`'s
+    /// own blanket call, which never actually checked whether this
+    /// specific window was one of the windows that triggered the tick.
+    pub(crate) decoration_signatures: HashMap<WindowId, DecorationSignature>,
     /// A window's drop-shadow bitmap (`decoration::shadow_bitmap`), cached
     /// the same way and at the same trigger points as `border_top_decorations`
     /// - rebuilt only on creation or a real size change, not per frame, for
@@ -272,13 +364,18 @@ pub(crate) struct CompState {
     pub(crate) content_epoch: HashMap<WindowId, u64>,
     /// The udev/Pixman-backend rounded-corner masked copy of a window's own
     /// content (`rounded_corners_pixman::masked_content_buffer`), paired
-    /// with the `content_epoch` value it was built from - see
-    /// `elements::rounded_content_buffer`, which owns rebuilding this.
+    /// with the `content_epoch` value and the `corner_radius` (in bit-cast
+    /// `u32` form - `f32` has no `Eq`) it was built from - see
+    /// `elements::rounded_content_buffer`, which owns rebuilding this. The
+    /// radius half exists because `corner_radius` is now live-settable
+    /// (`srd set corner_radius`/a rule) without any client commit - content
+    /// epoch alone wouldn't notice that change, leaving a stale mask built
+    /// from the old radius on screen until the client's next real repaint.
     /// Always empty on the winit backend (GLES rounds via a shader instead,
     /// `rounded_corners_program`), but costs nothing to declare here
     /// unconditionally, the same call `rounded_corners_program` itself
     /// already makes.
-    pub(crate) rounded_content_buffers: HashMap<WindowId, (u64, MemoryRenderBuffer)>,
+    pub(crate) rounded_content_buffers: HashMap<WindowId, (u64, u32, MemoryRenderBuffer)>,
     /// Persistent solid-colour buffers backing a window's other three
     /// border strips (bottom, left, right - `decoration::border_strips`'
     /// order past index 0), reused by position every frame rather than
@@ -325,6 +422,13 @@ pub(crate) struct CompState {
     /// module docs for why this needs its own connection rather than going
     /// through `X11Wm`. `None` until XWayland is ready, same as `xwm`.
     pub(crate) ewmh: Option<xwayland::EwmhState>,
+    /// `com.canonical.AppMenu.Registrar` - the classic Qt/`appmenu-qt5`
+    /// global-menu source, see `srdwm_platform::appmenu_registrar`'s module
+    /// doc comment for why it lives in the shared platform crate rather
+    /// than here. `None` until XWayland is ready, same as `ewmh`/`xwm` --
+    /// constructed alongside `ewmh` in `xwayland.rs::spawn`'s `XWaylandEvent
+    /// ::Ready` handler, since a raw X11 window id is meaningless without it.
+    pub(crate) appmenu_registrar: Option<srdwm_platform::AppmenuRegistrarState>,
     /// `ext_idle_notify_v1` - lets a client (a lock daemon, a bar's idle
     /// indicator) ask to be told after N seconds of no real input. Both
     /// this and `_idle_inhibit_manager_state` below use smithay's own

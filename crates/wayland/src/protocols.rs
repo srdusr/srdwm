@@ -131,6 +131,12 @@ impl CompositorHandler for CompState {
             *self.content_epoch.entry(id).or_insert(0) += 1;
             crate::state::sync_toplevel_metadata(self, id, surface);
         }
+        // Before `ensure_layer_initial_configure`: if this commit just
+        // hid or re-showed a layer surface, `sync_layer_visibility` needs
+        // to unmap/re-map it first, so the lookup that function does via
+        // `layer_for_surface` sees the corrected state rather than acting
+        // on stale membership in `LayerMap`'s own list.
+        self.sync_layer_visibility(surface);
         self.ensure_layer_initial_configure(surface);
         // Advances a just-created popup from unmapped to mapped (needed for
         // `PopupManager::popups_for_surface`, which `popup_render_elements`
@@ -173,9 +179,18 @@ impl XdgShellHandler for CompState {
     /// needed here at all, just the same start call from a different
     /// trigger.
     fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        if let Some(&id) = self.surface_to_id.get(surface.wl_surface()) {
-            let pos = crate::input::last_pointer_pos(self);
-            self.wm.borrow_mut().start_drag(id, pos.x as i32, pos.y as i32);
+        // Temporary: added to trace a live report that dragging a CSD
+        // window (Firefox) by its own tab strip/header bar does nothing --
+        // this is the only way to tell "the client never sent xdg_toplevel
+        // ::move at all" apart from "it sent it and something downstream
+        // of here didn't follow through." Remove once that's settled.
+        match self.surface_to_id.get(surface.wl_surface()) {
+            Some(&id) => {
+                let pos = crate::input::last_pointer_pos(self);
+                log::info!("move_request: window {id:?} at pointer {pos:?}");
+                self.wm.borrow_mut().start_drag(id, pos.x as i32, pos.y as i32);
+            }
+            None => log::warn!("move_request: surface has no tracked window id"),
         }
     }
 
@@ -356,9 +371,17 @@ impl XdgShellHandler for CompState {
 }
 
 impl XdgDecorationHandler for CompState {
+    /// Offers whichever mode `theme.decorations.default_mode`/`srd set
+    /// decoration_mode` currently prefers - a client with a real opinion
+    /// of its own still overrides this via `request_mode` below regardless
+    /// of what's offered here; this only decides what a client with *no*
+    /// preference ends up with. See `srdwm_core::ThemeConfig::
+    /// default_decorated`'s own doc comment for why this is configurable
+    /// rather than hardcoded to one mode.
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        let offer = if self.wm.borrow().theme.default_decorated { DecorationMode::ServerSide } else { DecorationMode::ClientSide };
         toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(DecorationMode::ServerSide);
+            state.decoration_mode = Some(offer);
         });
     }
 
@@ -386,17 +409,19 @@ impl XdgDecorationHandler for CompState {
     }
 
     /// The client dropped its decoration-mode preference. `new_decoration`
-    /// already offered `ServerSide` as the default the next configure will
-    /// carry, so mirror that same default here rather than leaving
-    /// whatever mode was negotiated before this - otherwise a client that
-    /// requests `ClientSide`, then later unsets it expecting the default
-    /// back, would stay undecorated by us forever.
+    /// already offers the configured default as the mode the next
+    /// configure will carry, so mirror that same default here rather than
+    /// leaving whatever mode was negotiated before this - otherwise a
+    /// client that requests one mode, then later unsets it expecting the
+    /// default back, would stay stuck in that mode forever.
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        let default_decorated = self.wm.borrow().theme.default_decorated;
+        let mode = if default_decorated { DecorationMode::ServerSide } else { DecorationMode::ClientSide };
         toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(DecorationMode::ServerSide);
+            state.decoration_mode = Some(mode);
         });
         toplevel.send_configure();
-        self.set_decorated_from_mode(toplevel.wl_surface(), true);
+        self.set_decorated_from_mode(toplevel.wl_surface(), default_decorated);
     }
 }
 
@@ -667,8 +692,23 @@ impl WlrLayerShellHandler for CompState {
         // A lock/launcher surface holding exclusive keyboard focus just
         // vanished (crash, or a normal close) - don't leave focus dangling
         // on a dead surface.
+        //
+        // `sync_keyboard_focus`, not a bare `set_keyboard_focus(None)`: an
+        // `OnDemand` layer surface (a launcher/quicksettings/datemenu
+        // popup, per `wlr-layer-shell`) claiming focus on click
+        // (`input.rs`'s `on_demand` branch) goes straight through
+        // `set_keyboard_focus` without ever touching `WindowManager::
+        // focused` - core has no concept of a layer surface to focus, so
+        // it still correctly points at whatever real toplevel was focused
+        // before the popup opened. Hardcoding `None` here threw that away
+        // regardless, leaving nothing focused until the user happened to
+        // click a window again - reported live (an AGS peer session's
+        // user) as "focus never returns after using the bar". `sync_
+        // keyboard_focus` reads that still-correct core state and restores
+        // real Wayland focus to it, falling through to `None` only if core
+        // genuinely has nothing focused either.
         if self.seat.get_keyboard().and_then(|k| k.current_focus()).as_ref() == Some(surface.wl_surface()) {
-            self.set_keyboard_focus(None);
+            crate::input::sync_keyboard_focus(self);
         }
     }
 }

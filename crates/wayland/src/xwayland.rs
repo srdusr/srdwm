@@ -29,7 +29,7 @@ use smithay::xwayland::xwm::{Reorder, ResizeEdge as X11ResizeEdge, WmWindowPrope
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler};
 use smithay::{delegate_xwayland_shell, desktop::Window as DWindow};
 
-use srdwm_core::{Event as CoreEvent, ResizeEdge, Window as CoreWindow, TITLEBAR_HEIGHT};
+use srdwm_core::{classify_menu_source, Event as CoreEvent, ResizeEdge, Window as CoreWindow, TITLEBAR_HEIGHT};
 
 use crate::state::CompState;
 
@@ -79,6 +79,7 @@ pub(crate) fn spawn(handle: &LoopHandle<'static, CompState>, display_handle: &sm
                         data.xwm = Some(wm);
                         fix_wm_name(display_number);
                         data.ewmh = EwmhState::connect(display_number);
+                        data.appmenu_registrar = Some(srdwm_platform::AppmenuRegistrarState::new());
                     }
                     Err(e) => log::error!("failed to start X11 window manager for XWayland: {e}"),
                 }
@@ -190,6 +191,18 @@ pub(crate) struct EwmhState {
     gtk_menubar_object_path: Option<u32>,
     gtk_app_menu_object_path: Option<u32>,
     unity_object_path: Option<u32>,
+    /// KWin's own global-menu property pair - what `libdbusmenu-qt`'s KDE
+    /// integration sets, and (unlike every other atom here) not something
+    /// `classify_menu_source` needs to disambiguate at all: unlike the GTK/
+    /// Unity atoms, which can legitimately overlap on one window (the
+    /// `appmenu-gtk-module` shim case), these two together are already a
+    /// complete, unambiguous `com.canonical.dbusmenu` address on their own
+    /// - checked first in `read_global_menu`, before the GTK/Unity atoms,
+    /// so a Qt app running under a KDE Plasma session (which sets these,
+    /// never any `_GTK_*` atom) isn't rejected by `bus_name`'s hard
+    /// requirement on `_GTK_UNIQUE_BUS_NAME` before ever reaching them.
+    kde_appmenu_service_name: Option<u32>,
+    kde_appmenu_object_path: Option<u32>,
 }
 
 impl EwmhState {
@@ -220,6 +233,8 @@ impl EwmhState {
         let gtk_menubar_object_path = intern("_GTK_MENUBAR_OBJECT_PATH");
         let gtk_app_menu_object_path = intern("_GTK_APP_MENU_OBJECT_PATH");
         let unity_object_path = intern("_UNITY_OBJECT_PATH");
+        let kde_appmenu_service_name = intern("_KDE_NET_WM_APPMENU_SERVICE_NAME");
+        let kde_appmenu_object_path = intern("_KDE_NET_WM_APPMENU_OBJECT_PATH");
         let state = Self {
             conn,
             root,
@@ -232,6 +247,8 @@ impl EwmhState {
             gtk_menubar_object_path,
             gtk_app_menu_object_path,
             unity_object_path,
+            kde_appmenu_service_name,
+            kde_appmenu_object_path,
         };
         // `_NET_CLIENT_LIST`/`_STACKING` are properties on the X root window,
         // which XWayland recreates fresh on every launch - but nothing
@@ -283,6 +300,15 @@ impl EwmhState {
             }
             String::from_utf8(reply.value).ok().filter(|s| !s.is_empty())
         };
+
+        // Checked before anything GTK-atom-related: these two, together,
+        // are already a complete address on their own - no classification
+        // needed - and a Qt app running under a KDE Plasma session never
+        // sets `_GTK_UNIQUE_BUS_NAME` at all, so falling through to that
+        // atom's hard requirement below would reject it outright.
+        if let (Some(bus_name), Some(menu_path)) = (read_string(self.kde_appmenu_service_name), read_string(self.kde_appmenu_object_path)) {
+            return Some(srdwm_core::GlobalMenu { bus_name, menu_path: Some(menu_path), app_path: None, window_path: None, source: srdwm_core::MenuSource::DbusMenu });
+        }
 
         let bus_name = read_string(self.gtk_unique_bus_name)?;
         let app_path = read_string(self.gtk_application_object_path);
@@ -344,22 +370,6 @@ impl EwmhState {
     }
 }
 
-/// The decision `read_global_menu` needs, pulled out as a pure function so
-/// it's unit-testable without a real X connection (matching this codebase's
-/// existing "no smithay/X11 dependency" convention for logic that doesn't
-/// actually need one, e.g. `decoration.rs`) - see that method's own doc
-/// comment for the full reasoning behind why `is_real_gtk_application`
-/// overrides "a GTK path exists" rather than the reverse.
-fn classify_menu_source(gtk_menu_path: Option<String>, is_real_gtk_application: bool, unity_path: Option<String>) -> (Option<String>, srdwm_core::MenuSource) {
-    match gtk_menu_path {
-        Some(path) if !is_real_gtk_application => (Some(path), srdwm_core::MenuSource::Unity),
-        Some(path) => (Some(path), srdwm_core::MenuSource::Gtk),
-        None => match unity_path {
-            Some(path) => (Some(path), srdwm_core::MenuSource::Unity),
-            None => (None, srdwm_core::MenuSource::Gtk),
-        },
-    }
-}
 
 impl CompState {
     /// Call on every focus change (from `set_keyboard_focus`, the single
@@ -383,6 +393,38 @@ impl CompState {
         // from a previous window that used to occupy this `id`.
         if let (Some(id), Some(xid)) = (id, xid) {
             let menu = ewmh.read_global_menu(xid);
+            if let Some(w) = self.wm.borrow_mut().window_mut(id) {
+                w.global_menu = menu;
+            }
+        }
+    }
+
+    /// Drains `AppmenuRegistrarState`'s channel and applies every event to
+    /// the matching `Window.global_menu` - call once per event-loop tick
+    /// (`poll_events`), same as `IpcServer::poll`.
+    ///
+    /// `RegisterWindow`/`UnregisterWindow`'s `window_id` is a raw X11 XID,
+    /// with nothing here already mapping XID back to `WindowId` (`xwm`'s
+    /// own maps go the other way) - a linear scan over `id_to_window` is
+    /// fine for it: this only runs when a registrar event actually arrives,
+    /// not every tick, and the number of open windows is never large enough
+    /// for a scan to matter.
+    pub(crate) fn apply_registrar_events(&mut self) {
+        let Some(registrar) = &self.appmenu_registrar else { return };
+        let events = registrar.drain_events();
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            let (window_id, menu) = match event {
+                srdwm_platform::RegistrarEvent::Registered { window_id, bus_name, menu_path } => (
+                    window_id,
+                    Some(srdwm_core::GlobalMenu { bus_name, menu_path: Some(menu_path), app_path: None, window_path: None, source: srdwm_core::MenuSource::DbusMenu }),
+                ),
+                srdwm_platform::RegistrarEvent::Unregistered { window_id } => (window_id, None),
+            };
+            let id = self.id_to_window.iter().find(|(_, w)| w.x11_surface().map(|x| x.window_id()) == Some(window_id)).map(|(id, _)| *id);
+            let Some(id) = id else { continue };
             if let Some(w) = self.wm.borrow_mut().window_mut(id) {
                 w.global_menu = menu;
             }
@@ -456,39 +498,6 @@ mod tests {
     fn shell_single_quote_handles_embedded_quotes() {
         assert_eq!(shell_single_quote("/usr/bin/Xwayland"), "'/usr/bin/Xwayland'");
         assert_eq!(shell_single_quote("/it's/here"), r"'/it'\''s/here'");
-    }
-
-    #[test]
-    fn appmenu_gtk_module_shim_is_classified_as_unity_not_gtk() {
-        // The exact live case that motivated this: a GTK menubar path
-        // present, but no application/window object path - confirmed by
-        // an AGS peer session reading the actual exported menu content off
-        // the bus and finding `unity.`-prefixed actions despite the GTK
-        // atom being what resolved the path.
-        let (path, source) = classify_menu_source(Some("/org/appmenu/gtk/window/0".to_string()), false, None);
-        assert_eq!(path.as_deref(), Some("/org/appmenu/gtk/window/0"), "the path itself is still correct - only the label was wrong");
-        assert_eq!(source, srdwm_core::MenuSource::Unity);
-    }
-
-    #[test]
-    fn real_gtk_application_export_is_still_classified_as_gtk() {
-        let (path, source) = classify_menu_source(Some("/org/gtk/menus/window/1".to_string()), true, None);
-        assert_eq!(path.as_deref(), Some("/org/gtk/menus/window/1"));
-        assert_eq!(source, srdwm_core::MenuSource::Gtk);
-    }
-
-    #[test]
-    fn plain_unity_object_path_with_no_gtk_atom_is_unaffected() {
-        let (path, source) = classify_menu_source(None, false, Some("/com/canonical/menu/1".to_string()));
-        assert_eq!(path.as_deref(), Some("/com/canonical/menu/1"));
-        assert_eq!(source, srdwm_core::MenuSource::Unity);
-    }
-
-    #[test]
-    fn neither_path_present_is_none() {
-        let (path, source) = classify_menu_source(None, false, None);
-        assert_eq!(path, None);
-        assert_eq!(source, srdwm_core::MenuSource::Gtk);
     }
 }
 
@@ -578,6 +587,9 @@ impl CompState {
         // existing.
         if self.context_menu.as_ref().is_some_and(|m| m.window == id) {
             self.close_context_menu();
+        }
+        if self.snap_flyout.as_ref().is_some_and(|f| f.window == id) {
+            self.close_snap_flyout();
         }
         self.wm.borrow_mut().remove_window(id);
         self.pending.borrow_mut().push(CoreEvent::WindowDestroyed(id));

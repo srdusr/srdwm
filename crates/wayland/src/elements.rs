@@ -12,10 +12,10 @@ use smithay::backend::renderer::element::solid::{SolidColorBuffer, SolidColorRen
 use smithay::backend::renderer::element::surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement};
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::{Color32F, ImportAll, ImportMem, Renderer};
-use smithay::desktop::{layer_map_for_output, PopupManager, Space, Window as DWindow};
+use smithay::desktop::{layer_map_for_output, utils::under_from_surface_tree, PopupManager, Space, Window as DWindow, WindowSurfaceType};
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Physical, Point, Rectangle, Scale};
+use smithay::utils::{Logical, Physical, Point, Rectangle, Scale};
 use smithay::wayland::shell::wlr_layer::Layer;
 
 use srdwm_core::TITLEBAR_HEIGHT;
@@ -167,25 +167,26 @@ where
 /// caller's fallback is the same: render `surface`'s content unrounded via
 /// [`surface_content_elements`].
 pub(crate) fn rounded_content_buffer<'a>(
-    cache: &'a mut std::collections::HashMap<srdwm_core::WindowId, (u64, smithay::backend::renderer::element::memory::MemoryRenderBuffer)>,
+    cache: &'a mut std::collections::HashMap<srdwm_core::WindowId, (u64, u32, smithay::backend::renderer::element::memory::MemoryRenderBuffer)>,
     epoch: u64,
     id: srdwm_core::WindowId,
     surface: &WlSurface,
     radius: f32,
     corners: crate::rounded_corners::RoundedCorners,
 ) -> Option<&'a smithay::backend::renderer::element::memory::MemoryRenderBuffer> {
-    let stale = cache.get(&id).map(|(built, _)| *built != epoch).unwrap_or(true);
+    let radius_bits = radius.to_bits();
+    let stale = cache.get(&id).map(|(built, r, _)| *built != epoch || *r != radius_bits).unwrap_or(true);
     if stale {
         match crate::rounded_corners_pixman::masked_content_buffer(surface, radius, corners) {
             Some(buf) => {
-                cache.insert(id, (epoch, buf));
+                cache.insert(id, (epoch, radius_bits, buf));
             }
             None => {
                 cache.remove(&id);
             }
         }
     }
-    cache.get(&id).map(|(_, b)| b)
+    cache.get(&id).map(|(_, _, b)| b)
 }
 
 /// Every mapped layer-shell surface on `output` whose [`Layer`] `include`
@@ -302,6 +303,49 @@ where
         }
     }
     elements
+}
+
+/// Topmost currently-mapped popup (tooltip, dropdown, right-click menu)
+/// under `pos`, if any - checked before every other kind of surface, the
+/// same "draw on top of literally everything else" priority
+/// `popup_render_elements` above already gives every popup (pushed into
+/// `custom_elements` ahead of even `Overlay`/`Top` layer-shell surfaces in
+/// both backends' render loops).
+///
+/// Without this, pointer hit-testing (`input::refresh_pointer_focus`) never
+/// checked popups at all: `state.popups: PopupManager` is entirely separate
+/// from `state.space` (a popup is never `space.map_element`'d - see this
+/// module's own `popup_render_elements` doc comment) and from layer-shell's
+/// `LayerMap`, so hit-testing that only walked those two structures was
+/// blind to every open popup. `xdg_popup`'s implicit pointer grab
+/// (`PopupPointerGrab`, smithay's own - see `protocols.rs`'s `grab`
+/// handler) only checks that the *focus* handed to it by `pointer.motion()`
+/// belongs to the same client as the grabbed popup; it never substitutes in
+/// the popup's own surface itself. A focus computed with no popup check at
+/// all resolved to whatever was visually *underneath* the popup instead --
+/// typically the same client's own parent window, so the grab's same-client
+/// check passed and let the motion straight through - meaning every click
+/// or scroll over an open popup actually landed on the parent surface, at
+/// coordinates that correspond to nothing real drawn there. Reads exactly
+/// as "menus are hard to click or scroll in", even though neither the grab
+/// itself nor the popup's own widgets were ever broken.
+///
+/// Real per-pixel hit-testing via `under_from_surface_tree`, not a
+/// bounding-rect check against `PopupKind::geometry()` - respects each
+/// surface's actual input region and walks subsurfaces, the same
+/// precision `layer_surface_under`/`Window::surface_under` already give
+/// every other surface kind.
+pub(crate) fn popup_surface_under(state: &CompState, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<i32, Logical>)> {
+    for target in popup_targets(state).iter().rev() {
+        let popups: Vec<_> = PopupManager::popups_for_surface(&target.surface).collect();
+        for (popup, offset) in popups.into_iter().rev() {
+            let origin = Point::<i32, Logical>::from(target.window_pos) + offset;
+            if let Some(hit) = under_from_surface_tree(popup.wl_surface(), pos, origin, WindowSurfaceType::ALL) {
+                return Some(hit);
+            }
+        }
+    }
+    None
 }
 
 /// Which of `space`'s mapped windows actually need a frame callback this

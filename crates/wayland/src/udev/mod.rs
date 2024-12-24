@@ -33,8 +33,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use smithay::backend::input::{
-    Axis, ButtonState as BackendButtonState, Event as InputEventTrait, InputEvent, PointerAxisEvent,
-    PointerButtonEvent, PointerMotionEvent,
+    Axis, ButtonState as BackendButtonState, Event as InputEventTrait, GestureBeginEvent as BackendGestureBeginEvent,
+    GestureEndEvent as BackendGestureEndEvent, GesturePinchUpdateEvent as BackendGesturePinchUpdateEvent, InputEvent,
+    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
 };
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::damage::OutputDamageTracker;
@@ -47,7 +48,10 @@ use smithay::backend::udev::{self, UdevBackend, UdevEvent};
 use smithay::desktop::{layer_map_for_output, PopupManager, Space};
 use smithay::backend::input::AxisSource;
 use smithay::wayland::shell::wlr_layer::Layer;
-use smithay::input::pointer::AxisFrame;
+use smithay::input::pointer::{
+    AxisFrame, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
+    GesturePinchUpdateEvent,
+};
 use smithay::input::SeatState;
 use smithay::output::{Mode as OutputMode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::generic::{FdWrapper, Generic};
@@ -63,7 +67,7 @@ use smithay::reexports::pixman::{FormatCode, Image};
 use smithay::reexports::rustix;
 use smithay::reexports::wayland_server::backend::GlobalId;
 use smithay::reexports::wayland_server::{Client, Display, DisplayHandle, ListeningSocket};
-use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Size, Transform};
+use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Size, Transform, SERIAL_COUNTER};
 use smithay::wayland::compositor::CompositorState;
 use smithay::wayland::dmabuf::DmabufState;
 use smithay::wayland::selection::data_device::DataDeviceState;
@@ -79,7 +83,10 @@ use srdwm_platform::{Platform, PlatformError, PlatformKind, Result as PlatformRe
 
 use crate::decoration;
 use crate::err;
-use crate::input::{handle_keyboard_key_event, handle_pointer_button, handle_pointer_position};
+use crate::input::{
+    handle_gesture_swipe_begin, handle_gesture_swipe_end, handle_gesture_swipe_update, handle_keyboard_key_event,
+    handle_pointer_button, handle_pointer_position,
+};
 use crate::state::{ClientState, CompState};
 
 /// A DRM device node, opened through the session (not a raw `File::open`)
@@ -158,6 +165,14 @@ pub(crate) struct UdevState {
     /// Pointer position in the *global* space, so it can cross between
     /// monitors; clamped to the union of all head rectangles.
     pub(crate) pointer_pos: Point<f64, Logical>,
+    /// A clone of the same `LibSeatSession` `platform.rs` opened the DRM
+    /// device with (`LibSeatSession` is cheaply `Clone` - see its own
+    /// derive - all clones share the same underlying seat connection).
+    /// Kept here, reachable from `input.rs`'s keyboard handler, purely so
+    /// `Ctrl+Alt+F<n>` can call `change_vt` on it - nothing else in this
+    /// backend needed the session handle after startup, so it was never
+    /// retained anywhere before this.
+    pub(crate) session: LibSeatSession,
 }
 
 impl UdevState {
@@ -226,6 +241,7 @@ impl UdevHead {
     }
 }
 
+mod capture;
 mod drm;
 mod outputs;
 mod platform;

@@ -28,7 +28,7 @@ impl CompState {
         // call for the same window (an ordinary drag/resize frame) goes
         // straight back to applying `geometry` immediately, as before.
         let anim_from = self.wm.borrow_mut().window_mut(id).and_then(|w| w.anim_from.take());
-        let Some((target, decorated)) = self.wm.borrow().window(id).map(|w| (w.geometry, w.decorated)) else { return };
+        let Some((target, decorated, maximized, fullscreen)) = self.wm.borrow().window(id).map(|w| (w.geometry, w.decorated, w.maximized, w.fullscreen)) else { return };
         if let Some(from) = anim_from {
             let duration_ms = self.wm.borrow().animation_duration_ms;
             if from != target && duration_ms > 0 {
@@ -93,6 +93,39 @@ impl CompState {
                         state.states.set(xdg_toplevel::State::TiledRight);
                         state.states.set(xdg_toplevel::State::TiledTop);
                         state.states.set(xdg_toplevel::State::TiledBottom);
+                        // Same "no configure from this compositor ever set
+                        // this" gap as the tiled bits above, confirmed the
+                        // same way (grepped the whole crate for `State::
+                        // Maximized`/`State::Fullscreen` outside foreign-
+                        // toplevel-management, which is a *different*
+                        // protocol read by external tools like a taskbar,
+                        // not the client's own `xdg_toplevel` configure --
+                        // zero hits there before this). The window was
+                        // resized to the full monitor rect and told it was
+                        // tiled on every side, but never actually told via
+                        // the real protocol mechanism for it that it was
+                        // maximized or fullscreen at all - indistinguishable
+                        // from an ordinary tiled-to-the-edges floating
+                        // window as far as the client could tell. Reported
+                        // live as fullscreen leaving a persistent gap along
+                        // one edge (Firefox keeping some of its own chrome
+                        // logic that specifically keys off genuinely
+                        // *knowing* it's fullscreen, not just being resized
+                        // to fullscreen-sized). `unset` the other explicitly
+                        // when only one applies - `WindowManager::
+                        // toggle_fullscreen`/`toggle_maximize` are mutually
+                        // exclusive, but nothing here should assume that
+                        // holds forever just because it does today.
+                        if maximized {
+                            state.states.set(xdg_toplevel::State::Maximized);
+                        } else {
+                            state.states.unset(xdg_toplevel::State::Maximized);
+                        }
+                        if fullscreen {
+                            state.states.set(xdg_toplevel::State::Fullscreen);
+                        } else {
+                            state.states.unset(xdg_toplevel::State::Fullscreen);
+                        }
                     });
                     top.send_configure();
                 }

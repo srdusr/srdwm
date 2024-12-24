@@ -36,7 +36,10 @@
 //! - xdg-decoration is forced to server-side mode (`Mode::ServerSide`) so
 //!   well-behaved clients don't also draw their own client-side titlebar.
 
+mod appmenu;
+mod blur;
 mod context_menu;
+mod snap_flyout;
 mod cursor;
 mod decoration;
 mod elements;
@@ -46,6 +49,7 @@ mod gtk_shell;
 mod gtk_shell_protocol;
 mod input;
 mod lock;
+mod native_lock;
 mod output_management;
 mod output_power;
 mod protocols;

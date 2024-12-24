@@ -214,6 +214,41 @@ fn handle_libinput_event(state: &mut CompState, event: InputEvent<LibinputInputB
             pointer.axis(state, frame);
             pointer.frame(state);
         }
+        // 3+-finger swipe - claimed entirely for workspace switching, never
+        // reaches a client. See `handle_gesture_swipe_end`'s doc comment.
+        InputEvent::GestureSwipeBegin { event } => handle_gesture_swipe_begin(state, &event),
+        InputEvent::GestureSwipeUpdate { event } => handle_gesture_swipe_update(state, &event),
+        InputEvent::GestureSwipeEnd { event } => handle_gesture_swipe_end(state, &event),
+        // Pinch/hold: no WM-level meaning, forwarded to the focused client
+        // as-is (`wp_pointer_gestures`) - pinch-to-zoom in an image viewer
+        // or PDF reader, the one real use either has. Same reasoning as the
+        // `PointerAxis` forwarding above: nothing here should be silently
+        // dropped just because this WM has no use for it itself.
+        InputEvent::GesturePinchBegin { event } => {
+            let Some(pointer) = state.seat.get_pointer() else { return };
+            let fingers = event.fingers();
+            pointer.gesture_pinch_begin(state, &GesturePinchBeginEvent { serial: SERIAL_COUNTER.next_serial(), time: event.time_msec(), fingers });
+        }
+        InputEvent::GesturePinchUpdate { event } => {
+            let Some(pointer) = state.seat.get_pointer() else { return };
+            let (delta, scale, rotation) = (event.delta(), event.scale(), event.rotation());
+            pointer.gesture_pinch_update(state, &GesturePinchUpdateEvent { time: event.time_msec(), delta, scale, rotation });
+        }
+        InputEvent::GesturePinchEnd { event } => {
+            let Some(pointer) = state.seat.get_pointer() else { return };
+            let cancelled = event.cancelled();
+            pointer.gesture_pinch_end(state, &GesturePinchEndEvent { serial: SERIAL_COUNTER.next_serial(), time: event.time_msec(), cancelled });
+        }
+        InputEvent::GestureHoldBegin { event } => {
+            let Some(pointer) = state.seat.get_pointer() else { return };
+            let fingers = event.fingers();
+            pointer.gesture_hold_begin(state, &GestureHoldBeginEvent { serial: SERIAL_COUNTER.next_serial(), time: event.time_msec(), fingers });
+        }
+        InputEvent::GestureHoldEnd { event } => {
+            let Some(pointer) = state.seat.get_pointer() else { return };
+            let cancelled = event.cancelled();
+            pointer.gesture_hold_end(state, &GestureHoldEndEvent { serial: SERIAL_COUNTER.next_serial(), time: event.time_msec(), cancelled });
+        }
         _ => {}
     }
 }

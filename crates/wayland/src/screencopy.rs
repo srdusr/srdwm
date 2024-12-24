@@ -19,7 +19,8 @@
 
 use std::time::UNIX_EPOCH;
 
-use smithay::backend::allocator::Fourcc;
+use smithay::backend::allocator::dmabuf::{Dmabuf, DmabufMappingMode, DmabufSyncFlags};
+use smithay::backend::allocator::{Buffer as AllocatorBuffer, Fourcc, Modifier};
 use smithay::backend::renderer::{ExportMem, Renderer};
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
@@ -29,6 +30,7 @@ use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 use smithay::utils::{Buffer as BufferCoord, Physical, Rectangle, Size};
+use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::shm::with_buffer_contents_mut;
 use wayland_protocols_wlr::screencopy::v1::server::{
     zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
@@ -42,6 +44,14 @@ use crate::state::CompState;
 const BYTES_PER_PIXEL: u32 = 4;
 const CAPTURE_FOURCC: Fourcc = Fourcc::Xrgb8888;
 const CAPTURE_SHM_FORMAT: wl_shm::Format = wl_shm::Format::Xrgb8888;
+/// `PixmanRenderer::dmabuf_formats()` (`smithay-0.7.0/src/backend/renderer/
+/// pixman/mod.rs`) pairs every format it supports - `Xrgb8888` included --
+/// with `Modifier::Linear` only; it never advertises a tiled/compressed
+/// modifier. So any dmabuf a client builds against srdwm's own
+/// `zwp_linux_dmabuf_v1` global is guaranteed to be a plain linear buffer,
+/// safe to `mmap` and `memcpy` into directly, with no vendor tiling to
+/// account for.
+const CAPTURE_MODIFIER: Modifier = Modifier::Linear;
 
 /// The screencopy manager global. Held by `CompState` purely to keep the
 /// global alive for the compositor's lifetime.
@@ -55,10 +65,20 @@ impl ScreencopyState {
     where
         D: GlobalDispatch<ZwlrScreencopyManagerV1, ()> + 'static,
     {
-        // Version 3 advertises `linux_dmabuf`/`buffer_done`, which this
-        // software-readback implementation does not support, so cap at 2 --
-        // that still covers `copy_with_damage`, which `wf-recorder` uses.
-        Self { _global: dh.create_global::<D, ZwlrScreencopyManagerV1, _>(2, ()) }
+        // Version 3 additionally advertises `linux_dmabuf`/`buffer_done`,
+        // letting a client request a dmabuf-backed capture instead of shm
+        // (what screen-sharing consumers - e.g. a WebRTC/PipeWire producer
+        // sitting behind xdg-desktop-portal - actually want, since it lets
+        // them hand the frame to a GPU pipeline without an extra copy back
+        // out of shared memory). This compositor has no GPU rendering path
+        // at all (`PixmanRenderer` is pure software, see this crate's udev
+        // backend), but that turns out not to matter here: the CLIENT
+        // allocates the dmabuf, informed by the format/modifier list this
+        // compositor's own `zwp_linux_dmabuf_v1` global already advertises
+        // (see `CAPTURE_MODIFIER`'s doc comment) - this side only ever
+        // needs to `mmap` the client's buffer and `memcpy` captured pixels
+        // into it, exactly as it already does for shm (see `copy_region`).
+        Self { _global: dh.create_global::<D, ZwlrScreencopyManagerV1, _>(3, ()) }
     }
 }
 
@@ -147,6 +167,16 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for CompState {
             region.size.h as u32,
             region.size.w as u32 * BYTES_PER_PIXEL,
         );
+        // `linux_dmabuf`/`buffer_done` are `since = 3`; a v1/v2 client's
+        // `frame` object - which inherits the version the client bound the
+        // manager global at, not this global's advertised maximum - can't
+        // receive them, so this is gated the same way `damage`/`with_damage`
+        // already is below (client requests that don't exist below a given
+        // version can't reach a handler that assumes they do).
+        if frame.version() >= 3 {
+            frame.linux_dmabuf(CAPTURE_FOURCC as u32, region.size.w as u32, region.size.h as u32);
+            frame.buffer_done();
+        }
     }
 }
 
@@ -178,15 +208,29 @@ impl Dispatch<ZwlrScreencopyFrameV1, FrameData> for CompState {
 
         // Validate the buffer really can hold the frame before promising a
         // capture - a mismatch here would otherwise be a silent short write.
+        // `get_dmabuf` only succeeds for a buffer imported through
+        // `zwp_linux_dmabuf_v1` (i.e. one the client built in response to
+        // this frame's own `linux_dmabuf` event, since=3); anything else --
+        // every v1/v2 client, and any v3 client that chose the shm offer
+        // instead - falls through to the pre-existing shm check below.
         let expected_stride = data.region.size.w as u32 * BYTES_PER_PIXEL;
-        let ok = with_buffer_contents_mut(&buffer, |_ptr, len, spec| {
-            spec.format == CAPTURE_SHM_FORMAT
-                && spec.width == data.region.size.w
-                && spec.height == data.region.size.h
-                && spec.stride as u32 == expected_stride
-                && len >= (expected_stride * data.region.size.h as u32) as usize
-        })
-        .unwrap_or(false);
+        let ok = if let Ok(dmabuf) = get_dmabuf(&buffer) {
+            dmabuf.num_planes() == 1
+                && dmabuf.format().code == CAPTURE_FOURCC
+                && dmabuf.format().modifier == CAPTURE_MODIFIER
+                && dmabuf.size().w == data.region.size.w
+                && dmabuf.size().h == data.region.size.h
+                && dmabuf.strides().next() == Some(expected_stride)
+        } else {
+            with_buffer_contents_mut(&buffer, |_ptr, len, spec| {
+                spec.format == CAPTURE_SHM_FORMAT
+                    && spec.width == data.region.size.w
+                    && spec.height == data.region.size.h
+                    && spec.stride as u32 == expected_stride
+                    && len >= (expected_stride * data.region.size.h as u32) as usize
+            })
+            .unwrap_or(false)
+        };
         if !ok {
             frame.post_error(
                 zwlr_screencopy_frame_v1::Error::InvalidBuffer,
@@ -309,6 +353,10 @@ where
         return Err(format!("readback produced {} bytes, need {}", pixels.len(), needed));
     }
 
+    if let Ok(dmabuf) = get_dmabuf(buffer) {
+        return write_dmabuf(dmabuf, pixels, needed);
+    }
+
     with_buffer_contents_mut(buffer, |ptr, len, _spec| {
         if len < needed {
             return Err(format!("client buffer holds {len} bytes, need {needed}"));
@@ -322,4 +370,26 @@ where
         Ok(())
     })
     .map_err(|e| format!("client buffer not accessible: {e}"))?
+}
+
+/// Writes captured pixels into a client-allocated dmabuf, in place of
+/// `with_buffer_contents_mut`'s shm path. The frame's `Copy`/`CopyWithDamage`
+/// handler already checked `num_planes() == 1` and `modifier ==
+/// CAPTURE_MODIFIER` (`Modifier::Linear`) before queuing this capture, so a
+/// plain single `mmap` + `memcpy` is correct here - no plane math, no tiling
+/// to undo.
+fn write_dmabuf(dmabuf: &Dmabuf, pixels: &[u8], needed: usize) -> Result<(), String> {
+    let mapping = dmabuf.map_plane(0, DmabufMappingMode::WRITE).map_err(|e| format!("map_plane: {e}"))?;
+    if mapping.length() < needed {
+        return Err(format!("client dmabuf holds {} bytes, need {needed}", mapping.length()));
+    }
+    dmabuf.sync_plane(0, DmabufSyncFlags::START | DmabufSyncFlags::WRITE).map_err(|e| format!("sync_plane(start): {e}"))?;
+    // SAFETY: `map_plane` guarantees `ptr()` is valid for `length()` bytes
+    // for as long as `mapping` is alive, and `needed <= length()` was just
+    // checked. Source and destination are distinct mappings.
+    unsafe {
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), mapping.ptr().cast::<u8>(), needed);
+    }
+    dmabuf.sync_plane(0, DmabufSyncFlags::END | DmabufSyncFlags::WRITE).map_err(|e| format!("sync_plane(end): {e}"))?;
+    Ok(())
 }

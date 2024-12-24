@@ -140,34 +140,69 @@ fn notify_idle_activity(state: &mut CompState) {
     state.idle_notifier_state.notify_activity(&seat);
 }
 
-pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Logical>, time: u32) {
-    notify_idle_activity(state);
-    // Locked: pointer motion goes to the lock surface only. No hit-testing
-    // against windows/decorations, so no hover, no drag, no resize.
-    if state.lock.locked {
-        let surface = state.any_lock_surface().cloned();
-        if let Some(pointer) = state.seat.get_pointer() {
-            let focus = surface.map(|s| (s, Point::from((0, 0)).to_f64()));
-            pointer.motion(state, focus, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
-            pointer.frame(state);
-        }
-        return;
-    }
-
+/// Re-resolves and re-asserts real Wayland pointer focus at `pos` - i.e.
+/// re-runs the exact same layer-shell/decoration/content/background
+/// hit-testing `handle_pointer_position` always did, and calls
+/// `pointer.motion()` with whatever it finds, but *without* sending
+/// `wl_pointer.frame` (callers decide when their own batch of events is
+/// done) and without any of `handle_pointer_position`'s other side effects
+/// (cursor shape, focus-follows-mouse, drag/resize updates) - those only
+/// make sense on an actual motion event, not a button press.
+///
+/// Extracted so [`handle_pointer_button`] can call this immediately before
+/// delivering a click, rather than only ever trusting whatever the *last*
+/// real motion event happened to leave `PointerHandle`'s own focus at.
+/// Those can disagree: confirmed live via a temporary diagnostic (since
+/// removed) that `space.element_under(pos)` - srdwm's own, freshly
+/// computed on every click - and
+/// `PointerHandle::current_focus()` - Wayland's, last set by whichever
+/// motion event happened to run before this click - disagreed on a real
+/// user's real clicks, inconsistently, sometimes on the very same window.
+/// A click landing on stale/no Wayland focus reads exactly like "clicking
+/// doesn't work" or "the cursor isn't where clicking happens," even though
+/// srdwm's own idea of what's under the pointer was correct the whole
+/// time. Calling this right before every button event closes that gap
+/// regardless of why focus went stale, rather than chasing the exact
+/// staleness trigger (rapid clicks, a tap-to-click event with no
+/// intervening motion delta, etc.) one cause at a time.
+#[allow(clippy::type_complexity)]
+fn refresh_pointer_focus(state: &mut CompState, pos: Point<f64, Logical>, time: u32) -> (Option<(WindowId, TitlebarHit)>, bool, bool, Option<WindowId>) {
+    // Checked before literally everything else, including layer-shell --
+    // see `elements::popup_surface_under`'s own doc comment for why: a
+    // popup (tooltip, dropdown, right-click menu) always renders on top of
+    // everything else, popups on their own parent's content and layer-shell
+    // bars/docks alike, and hit-testing has to match that same priority or
+    // a click/scroll over an open popup silently lands on whatever's
+    // underneath it instead.
+    let popup_hit = crate::elements::popup_surface_under(state, pos);
     let layer_hit = layer_surface_under(state, pos);
-    let over_layer_surface = layer_hit.is_some();
+    // Broadened, not just layer-shell: both a layer surface and an open
+    // popup are transient client UI that should suppress WM-level
+    // decoration-cursor guessing and focus-follows-mouse the same way (see
+    // both call sites below) - hovering a dropdown menu must not refocus
+    // whatever window happens to sit underneath it.
+    let over_layer_surface = layer_hit.is_some() || popup_hit.is_some();
     let hit = state.wm.borrow().hit_test(pos.x as i32, pos.y as i32);
-    let under = state.space.element_under(pos).map(|(w, loc)| (w.clone(), loc));
+    let under = state
+        .space
+        .element_under(pos)
+        .filter(|(w, _)| dwindow_is_visible(state, w))
+        .map(|(w, loc)| (w.clone(), loc));
     let over_content = under.is_some();
     // Whichever core window the pointer is over right now, decoration or
-    // content, for `general.focus_follows_mouse` below - `None` while over
-    // a layer-shell surface or bare desktop, same as everything else here.
+    // content - `None` while over a layer-shell surface or bare desktop.
+    // Only `handle_pointer_position` actually uses this (focus-follows-
+    // mouse), but it needs `under` before that's consumed by the match
+    // below, so it's computed here rather than recomputed by the caller.
     let hovered_id = hit
         .map(|(id, _)| id)
         .or_else(|| under.as_ref().and_then(|(window, _)| dwindow_wl_surface(window)).and_then(|s| state.surface_to_id.get(&s).copied()));
 
-    let Some(pointer) = state.seat.get_pointer() else { return };
-    if let Some((surface, loc)) = layer_hit {
+    let Some(pointer) = state.seat.get_pointer() else { return (hit, over_layer_surface, over_content, hovered_id) };
+    if let Some((surface, loc)) = popup_hit {
+        let surface_loc = pos - loc.to_f64();
+        pointer.motion(state, Some((surface, loc.to_f64())), &MotionEvent { location: surface_loc, serial: SERIAL_COUNTER.next_serial(), time });
+    } else if let Some((surface, loc)) = layer_hit {
         let surface_loc = pos - loc.to_f64();
         pointer.motion(state, Some((surface, loc.to_f64())), &MotionEvent { location: surface_loc, serial: SERIAL_COUNTER.next_serial(), time });
     } else if hit.is_some() {
@@ -201,6 +236,25 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
     } else {
         pointer.motion(state, None, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
     }
+    (hit, over_layer_surface, over_content, hovered_id)
+}
+
+pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Logical>, time: u32) {
+    notify_idle_activity(state);
+    // Locked: pointer motion goes to the lock surface only. No hit-testing
+    // against windows/decorations, so no hover, no drag, no resize.
+    if state.lock.locked {
+        let surface = state.any_lock_surface().cloned();
+        if let Some(pointer) = state.seat.get_pointer() {
+            let focus = surface.map(|s| (s, Point::from((0, 0)).to_f64()));
+            pointer.motion(state, focus, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
+            pointer.frame(state);
+        }
+        return;
+    }
+
+    let (hit, over_layer_surface, over_content, hovered_id) = refresh_pointer_focus(state, pos, time);
+    let Some(pointer) = state.seat.get_pointer() else { return };
     // `PointerHandle::motion`/`button`/`axis` only queue the event with the
     // active grab - nothing sends `wl_pointer.frame` on its own (confirmed
     // reading smithay's `DefaultGrab`: its `motion`/`button` impls call
@@ -334,6 +388,25 @@ pub(crate) fn dwindow_wl_surface(w: &DWindow) -> Option<WlSurface> {
     w.x11_surface().and_then(|x| x.wl_surface())
 }
 
+/// Whether `w` is actually visible right now - on the current workspace and
+/// not minimized - matching `WindowManager::visible_windows`'s own filter.
+///
+/// `state.space` (smithay's `Space`) is not workspace-aware: a window stays
+/// mapped in it, and so stays hit-testable by `Space::element_under`, from
+/// the moment it's created until it's explicitly minimized or destroyed --
+/// switching workspace never unmaps anything (see `minimize` in
+/// `udev::platform`, the only other place that calls `unmap_elem`, and the
+/// absence of any workspace-switch handler that touches `self.space` at
+/// all). Without this check, `element_under` freely returns a window sitting
+/// on a workspace that isn't even shown, and a click "through" empty desktop
+/// on the current workspace silently focuses/raises/moves motion onto that
+/// invisible window instead of whatever (if anything) is really there.
+fn dwindow_is_visible(state: &CompState, w: &DWindow) -> bool {
+    let Some(id) = dwindow_wl_surface(w).and_then(|s| state.surface_to_id.get(&s).copied()) else { return false };
+    let wm = state.wm.borrow();
+    wm.window(id).is_some_and(|win| !win.minimized && win.workspace == wm.current_workspace())
+}
+
 /// Requests a client close its window, whichever kind it is.
 pub(crate) fn close_dwindow(w: &DWindow) {
     if let Some(top) = w.toplevel() {
@@ -348,6 +421,30 @@ pub(crate) fn close_dwindow(w: &DWindow) {
 /// tiled correctly yet never receive a single keystroke.
 pub(crate) fn focus_window(state: &mut CompState, id: WindowId) {
     state.wm.borrow_mut().focus_window(id);
+    // Raises the window in smithay's own `Space` too, not just core's
+    // `order` - `Space` keeps a completely independent stacking order of
+    // its own, which is what actually renders on top *and* what
+    // `space.element_under` hit-tests against; `WindowManager::order`
+    // (which `focus_window` above already updates) has no effect on
+    // either. Without this, any focus path that doesn't also happen to
+    // raise `Space` manually (Alt-Tab, a dock's IPC "focus" dispatch,
+    // scratchpad show, the Snap-Layouts flyout, ...) left a window
+    // genuinely focused - keyboard input, core's own idea of "topmost"
+    // both correct - while it kept rendering *underneath* whatever was
+    // already on top, and a click on the visible (stale-topmost) window
+    // silently reached that one instead. "Focus doesn't bring a window to
+    // the front" and "clicking through a window that's fully covering
+    // another" are the same root cause, not two bugs. Previously only the
+    // plain-content-click branch in `handle_pointer_button` did this,
+    // manually, immediately before calling this function - every other
+    // caller went through unraised. Cheap even when the window is already
+    // topmost (`raise_element` on an already-last element is a no-op
+    // reinsertion), so unconditional here rather than gated on whether
+    // focus is actually changing.
+    if let Some(w) = state.id_to_window.get(&id).cloned() {
+        state.space.raise_element(&w, true);
+        state.raise_pinned();
+    }
     state.pending.borrow_mut().push(CoreEvent::WindowFocused(id));
     let surface = state.id_to_window.get(&id).and_then(dwindow_wl_surface);
     // Routed through `set_keyboard_focus` (rather than calling
@@ -411,6 +508,18 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
                 state.run_context_menu_action(menu.window, action);
             } else {
                 state.close_context_menu();
+            }
+            return;
+        }
+        // Same "one click, one action" rule as the context menu above --
+        // a click inside the Snap-Layouts flyout applies that zone, a click
+        // anywhere else just dismisses it.
+        if let Some(flyout) = state.snap_flyout.take() {
+            if let Some(zone) = flyout.zone_at(pos.x as i32, pos.y as i32) {
+                state.close_snap_flyout();
+                state.run_snap_flyout_action(flyout.window, zone);
+            } else {
+                state.close_snap_flyout();
             }
             return;
         }
@@ -499,11 +608,11 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
                 TitlebarHit::Resize(edge) => state.wm.borrow_mut().start_resize(id, edge, pos.x as i32, pos.y as i32),
             }
         } else if layer_hit.is_none() {
-            if let Some((window, _loc)) = state.space.element_under(pos) {
+            if let Some((window, _loc)) = state.space.element_under(pos).filter(|(w, _)| dwindow_is_visible(state, w)) {
                 let window = window.clone();
-                state.space.raise_element(&window, true);
-                // Clicking a normal window must not bury a pinned one.
-                state.raise_pinned();
+                // `focus_window` itself raises both `Space` and pinned
+                // windows now - see its own doc comment. No longer done
+                // manually here first.
                 if let Some(&id) = dwindow_wl_surface(&window).and_then(|s| state.surface_to_id.get(&s)) {
                     focus_window(state, id);
                 }
@@ -521,12 +630,15 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
         // was pressed, so a right-click on the close button, say, doesn't
         // do something else entirely.
         let hit = state.wm.borrow().hit_test(pos.x as i32, pos.y as i32);
-        if let Some((id, TitlebarHit::Drag)) = hit {
-            if button == BTN_RIGHT {
-                state.open_context_menu(id, (pos.x as i32, pos.y as i32));
-            } else {
-                state.wm.borrow_mut().lower_window(id);
-            }
+        match (button, hit) {
+            (BTN_RIGHT, Some((id, TitlebarHit::Drag))) => state.open_context_menu(id, (pos.x as i32, pos.y as i32)),
+            (BTN_MIDDLE, Some((id, TitlebarHit::Drag))) => state.wm.borrow_mut().lower_window(id),
+            // Right-click the maximize button itself: the Snap-Layouts
+            // flyout (pick a half/quarter position for this window)
+            // instead of the window menu - a plain left-click there still
+            // just toggles maximize, unchanged.
+            (BTN_RIGHT, Some((id, TitlebarHit::Maximize))) => state.open_snap_flyout(id, (pos.x as i32, pos.y as i32)),
+            _ => {}
         }
     } else if !pressed {
         let mut wm = state.wm.borrow_mut();
@@ -569,6 +681,13 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
         }
     }
 
+    // Re-assert real Wayland pointer focus at `pos` immediately before the
+    // actual click - see `refresh_pointer_focus`'s own doc comment for why
+    // this can't just trust whatever the last motion event left focus at.
+    // A no-op from the client's perspective when focus was already correct
+    // (an idempotent motion event at the same surface-local coordinates it
+    // already has), so this costs nothing in the common case.
+    refresh_pointer_focus(state, pos, time);
     if let Some(pointer) = state.seat.get_pointer() {
         let button_state = if pressed { BackendButtonState::Pressed } else { BackendButtonState::Released };
         pointer.button(state, &ButtonEvent { serial, time, button, state: button_state });
@@ -597,14 +716,75 @@ pub(crate) fn handle_keyboard_key_event<B: smithay::backend::input::InputBackend
     // (`Mod4+Return` opens a terminal), so honouring bindings here would let
     // anyone at a locked screen run arbitrary programs.
     if state.lock.locked {
+        // A native lock (`crate::native_lock`) has no external client
+        // surface to forward to at all - srdwm is its own locker, so
+        // every keystroke feeds the password buffer directly instead.
+        // Only on press: a character is typed on key-down, matching
+        // ordinary text input, and password/BackSpace/Return/Escape
+        // handling only make sense once per physical keystroke, not once
+        // per press *and* release.
+        if state.lock.native.is_some() {
+            if key_state == BackendKeyState::Pressed {
+                keyboard.input::<(), _>(state, keycode, key_state, serial, time, |data, mods, handle| {
+                    // `keysym_to_utf8` on the already-resolved keysym
+                    // (rather than the state-aware `xkb_state_key_get_
+                    // utf8` xkbcommon's own docs recommend) is a
+                    // deliberate simplification: correct for plain
+                    // ASCII/shifted-symbol passwords, which is the
+                    // overwhelming common case; the gap is dead-key/
+                    // compose sequences spanning more than one keypress,
+                    // which would just make that one character not match
+                    // rather than ever falsely succeed - a usability
+                    // rough edge, not a security one. Computed before
+                    // `keysym_name_for` below, which takes `handle` by
+                    // value.
+                    let utf8 = xkbcommon::xkb::keysym_to_utf8(handle.modified_sym());
+                    let name = keysym_name_for(handle).unwrap_or_default();
+                    data.native_lock_key(&name, &utf8, mods.caps_lock);
+                    FilterResult::Intercept(())
+                });
+            } else {
+                keyboard.input::<(), _>(state, keycode, key_state, serial, time, |_, _, _| FilterResult::Intercept(()));
+            }
+            return;
+        }
         keyboard.input::<(), _>(state, keycode, key_state, serial, time, |_, _, _| FilterResult::Forward);
         return;
     }
 
     let bound_keys = state.bound_keys.clone();
     let matched: Option<(String, Modifiers)> =
-        keyboard.input(state, keycode, key_state, serial, time, move |_, mods, handle| {
+        keyboard.input(state, keycode, key_state, serial, time, move |data, mods, handle| {
             let modifiers = core_modifiers_from_xkb(mods);
+            // `Ctrl+Alt+F1`..`F12` (xkb emits these as the `XF86Switch_VT_1`..
+            // `_12` keysyms, not a plain function-key + modifier combo) --
+            // handled here, by raw keysym *value* rather than name, since
+            // matching a name string wrong fails silently and looks
+            // identical to this never having been implemented at all (it
+            // wasn't, until now: reported live, the user had to leave the
+            // graphical session entirely and log in on a different TTY to
+            // get a shell back after srdwm went down, because nothing ever
+            // told the session to switch away). Values are contiguous
+            // (0x1008FE01..=0x1008FE0C, xkbcommon's `keysyms.rs`), so `raw -
+            // KEY_XF86SWITCH_VT_1 + 1` is the target VT. Udev/bare-TTY
+            // backend only - `data.udev` is `None` under the nested winit
+            // backend, where VT switching is meaningless, so this is a
+            // no-op there rather than an error, same as every other
+            // udev-only feature in this module.
+            const KEY_XF86SWITCH_VT_1: u32 = 0x1008_FE01;
+            const KEY_XF86SWITCH_VT_12: u32 = 0x1008_FE0C;
+            let raw = handle.modified_sym().raw();
+            if (KEY_XF86SWITCH_VT_1..=KEY_XF86SWITCH_VT_12).contains(&raw) {
+                if key_state == BackendKeyState::Pressed {
+                    if let Some(udev) = data.udev.as_mut() {
+                        let vt = (raw - KEY_XF86SWITCH_VT_1 + 1) as i32;
+                        if let Err(e) = udev.session.change_vt(vt) {
+                            log::warn!("udev: change_vt({vt}) failed: {e}");
+                        }
+                    }
+                }
+                return FilterResult::Intercept((String::new(), modifiers));
+            }
             match keysym_name_for(handle) {
                 Some(name) if bound_keys.contains(&srdwm_core::key_combo_string(modifiers, &name)) => {
                     FilterResult::Intercept((name, modifiers))
@@ -615,9 +795,17 @@ pub(crate) fn handle_keyboard_key_event<B: smithay::backend::input::InputBackend
 
     match key_state {
         BackendKeyState::Pressed => {
+            // An empty `key_name` is the VT-switch case above, already
+            // fully handled inside the closure - it isn't a real
+            // keybinding and must not start a repeat timer or fire a
+            // `CoreEvent::KeyPress` (`Lua` config has nothing bound to `""`,
+            // so this would be harmless either way, but skipping it is both
+            // cheaper and clearer than relying on that).
             if let Some((key_name, modifiers)) = matched {
-                state.begin_repeat(keycode, &key_name, modifiers);
-                state.pending.borrow_mut().push(CoreEvent::KeyPress { key_name, modifiers });
+                if !key_name.is_empty() {
+                    state.begin_repeat(keycode, &key_name, modifiers);
+                    state.pending.borrow_mut().push(CoreEvent::KeyPress { key_name, modifiers });
+                }
             }
         }
         // Any release ends a repeat of *that* key; releasing an unrelated
@@ -674,15 +862,29 @@ where
         return false;
     }
     let Some(v) = event.amount(Axis::Vertical).filter(|v| *v != 0.0) else { return false };
+    // Scrolling down (positive) advances, matching `workspace, e+1`.
+    switch_workspace_relative(state, v > 0.0)
+}
 
+/// Switches to the next (`forward`) or previous workspace in id order,
+/// wrapping around, and fires the two follow-up broadcasts a plain
+/// `WindowManager::switch_workspace` call alone doesn't cover. The shared
+/// body behind every *relative* workspace switch - `SUPER`+scroll above,
+/// and a 3+-finger touchpad swipe (`handle_gesture_swipe_end` below) --
+/// pulled out here rather than duplicated a second time: both gaps below
+/// were found missing for the scroll gesture specifically during this same
+/// session, and nothing about either is scroll-only, so a second call site
+/// copy-pasting the same steps would have been one missed broadcast away
+/// from reintroducing the exact bug that was just fixed once already.
+/// Returns `false` (and does nothing) if there are no workspaces at all.
+fn switch_workspace_relative(state: &mut CompState, forward: bool) -> bool {
     let mut wm = state.wm.borrow_mut();
     let ids: Vec<_> = wm.workspaces().iter().map(|w| w.id).collect();
     if ids.is_empty() {
         return false;
     }
     let current = ids.iter().position(|&id| id == wm.current_workspace()).unwrap_or(0);
-    // Scrolling down (positive) advances, matching `workspace, e+1`.
-    let next = if v > 0.0 { (current + 1) % ids.len() } else { (current + ids.len() - 1) % ids.len() };
+    let next = if forward { (current + 1) % ids.len() } else { (current + ids.len() - 1) % ids.len() };
     wm.switch_workspace(ids[next]);
     drop(wm);
     // Without this, the switch above is invisible: nothing shows or hides
@@ -690,14 +892,75 @@ where
     // runs, which only happens when a polled event sets `dirty` - see
     // `srdwm_core::Event::WorkspaceChanged`'s doc comment. Found live-
     // testing the unrelated `ext_workspace_v1` protocol's own `activate`
-    // request, which has the identical problem; this gesture had the exact
-    // same bug already, just never one anyone traced back this far.
+    // request, which has the identical problem; the scroll gesture had the
+    // exact same bug already, just never one anyone traced back this far.
     state.pending.borrow_mut().push(srdwm_core::Event::WorkspaceChanged);
     // Same reasoning as `foreign_toplevel::send_state`'s call sites: without
     // this, a dock's workspace pill only ever tracked switches driven
     // through `ext_workspace_handle_v1.activate` itself, going stale the
-    // moment this gesture (or any other non-protocol trigger) changed the
+    // moment a gesture (or any other non-protocol trigger) changed the
     // active workspace instead.
     crate::workspace::broadcast_active_workspace(state);
     true
+}
+
+/// A 3+-finger touchpad swipe just started - resets the running horizontal
+/// offset `handle_gesture_swipe_update` accumulates into, or leaves it
+/// `None` while the session is locked so a swipe over the lock screen does
+/// nothing (matching every other pointer/keyboard path's "locked: no normal
+/// handling" rule - see this module's own doc comment).
+pub(crate) fn handle_gesture_swipe_begin<B, E>(state: &mut CompState, event: &E)
+where
+    B: smithay::backend::input::InputBackend,
+    E: smithay::backend::input::GestureBeginEvent<B>,
+{
+    notify_idle_activity(state);
+    state.gesture_swipe = if state.lock.locked { None } else { Some((event.fingers(), 0.0)) };
+}
+
+/// Accumulates one update's worth of horizontal motion into the swipe
+/// started by `handle_gesture_swipe_begin` - `delta_x` is relative to the
+/// *previous* update, not a running total (see `gesture_swipe`'s own doc
+/// comment on `CompState`), so summing here is the only way to know the
+/// swipe's real total distance once it ends.
+pub(crate) fn handle_gesture_swipe_update<B, E>(state: &mut CompState, event: &E)
+where
+    B: smithay::backend::input::InputBackend,
+    E: smithay::backend::input::GestureSwipeUpdateEvent<B>,
+{
+    if let Some((_, total_dx)) = state.gesture_swipe.as_mut() {
+        *total_dx += event.delta_x();
+    }
+}
+
+/// A touchpad swipe just ended - switches workspace if it was a genuine
+/// 3+-finger swipe past `SWIPE_THRESHOLD` and wasn't cancelled (a libinput
+/// gesture is marked cancelled when it doesn't resolve to a clean single
+/// direction, e.g. the fingers moved back and forth). Below the threshold
+/// or below 3 fingers, this does nothing - the same "did you mean it"
+/// floor a mis-clicked drag gets elsewhere in this file, and 2-finger
+/// motion is already handled as ordinary scroll (`PointerAxis`) rather
+/// than reaching here at all on a correctly configured touchpad.
+///
+/// Deliberately claimed entirely by the compositor rather than forwarded to
+/// the focused client, unlike pinch/hold (forwarded as-is in
+/// `udev::session`): `wp_pointer_gestures` swipe is specifically the
+/// 3/4-finger overview-style gesture, and the handful of desktops that
+/// support it at all (GNOME, sway, Hyprland) all reserve it for workspace
+/// switching the same way - there is no real client-side consumer to lose
+/// by not forwarding it. Swipe left (negative `total_dx`) advances to the
+/// next workspace, right goes back, matching macOS's own convention for
+/// swiping between spaces.
+const SWIPE_THRESHOLD: f64 = 60.0;
+
+pub(crate) fn handle_gesture_swipe_end<B, E>(state: &mut CompState, event: &E)
+where
+    B: smithay::backend::input::InputBackend,
+    E: smithay::backend::input::GestureEndEvent<B>,
+{
+    let Some((fingers, total_dx)) = state.gesture_swipe.take() else { return };
+    if event.cancelled() || fingers < 3 || total_dx.abs() < SWIPE_THRESHOLD {
+        return;
+    }
+    switch_workspace_relative(state, total_dx < 0.0);
 }

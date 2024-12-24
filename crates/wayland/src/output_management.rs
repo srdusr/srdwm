@@ -327,7 +327,7 @@ fn apply_or_test(state: &mut CompState, config: &ZwlrOutputConfigurationV1, data
 /// (used to translate render geometry into head-local space) each keep
 /// their own copy for reasons documented on their own fields, and would
 /// otherwise silently drift from what `Output` now reports.
-fn apply_output_position(state: &mut CompState, output: &Output, new_location: Point<i32, smithay::utils::Logical>) {
+pub(crate) fn apply_output_position(state: &mut CompState, output: &Output, new_location: Point<i32, smithay::utils::Logical>) {
     output.change_current_state(None, None, None, Some(new_location));
     if let Some(entry) = state.outputs.iter_mut().find(|e| &e.output == output) {
         entry.location = new_location;

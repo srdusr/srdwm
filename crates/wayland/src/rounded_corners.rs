@@ -176,6 +176,18 @@ pub(crate) fn rounded_content_element(
     radius: f32,
     corners: RoundedCorners,
 ) -> Option<TextureShaderElement> {
+    // This module's doc comment has always said a window with subsurfaces
+    // "won't have them rendered at all through this path" - intended to
+    // mean the caller falls back to `surface_content_elements` (subsurface-
+    // aware) for such a window instead. Nothing here actually enforced that:
+    // without this check, a window whose real content lives in a subsurface
+    // (confirmed live on the udev/Pixman backend's identical bug: Firefox
+    // does this) would round and return just its own root surface - often
+    // blank/background-only - instead of falling back, silently dropping
+    // the window's actual content rather than merely leaving it unrounded.
+    if !smithay::wayland::compositor::get_children(surface).is_empty() {
+        return None;
+    }
     smithay::wayland::compositor::with_states(surface, |states| {
         smithay::backend::renderer::utils::import_surface(renderer, states).ok()?;
         Some(())

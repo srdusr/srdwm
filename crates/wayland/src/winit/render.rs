@@ -22,8 +22,22 @@ impl WaylandPlatform {
         let age = self.backend.buffer_age().unwrap_or(0);
         let (renderer, mut framebuffer) = self.backend.bind().map_err(err)?;
 
-        // Locked: the lock surface over an opaque black clear, and nothing
-        // else - no windows, no decorations, no layer surfaces.
+        // Locked: srdwm's own native lock UI, or an external locker's
+        // surface, over an opaque black clear - nothing else, no windows,
+        // no decorations, no layer surfaces, either way.
+        if self.state.lock.locked && self.state.lock.native.is_some() {
+            let name = self.output.name();
+            let bg = self.state.native_lock_background(&name).cloned();
+            let ui = self.state.native_lock_ui().map(|(buf, s)| (buf.clone(), s));
+            let elements = crate::native_lock::native_lock_render_elements(bg.as_ref(), ui.as_ref().map(|(b, s)| (b, *s)), (size.w, size.h), renderer);
+            self.damage_tracker
+                .render_output(renderer, &mut framebuffer, age, &elements, [0.0, 0.0, 0.0, 1.0])
+                .map_err(err)?;
+            drop(framebuffer);
+            self.backend.submit(None).map_err(err)?;
+            screencopy::fail_pending(std::mem::take(&mut self.state.screencopy_pending));
+            return Ok(());
+        }
         if self.state.lock.locked {
             let lock_surface = self.state.lock_surface_for(&self.output).cloned();
             let elements = lock_render_elements(lock_surface.as_ref(), renderer);
@@ -56,6 +70,14 @@ impl WaylandPlatform {
             match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, None, None, Kind::Unspecified) {
                 Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
                 Err(e) => log::warn!("failed to import context menu buffer: {e}"),
+            }
+        }
+        // The Snap-Layouts flyout, if open - same topmost placement.
+        if let (Some(flyout), Some(buffer)) = (self.state.snap_flyout.as_ref(), self.state.snap_flyout_buffer.as_ref()) {
+            let pos = (flyout.pos.0 as f64, flyout.pos.1 as f64);
+            match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, None, None, Kind::Unspecified) {
+                Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
+                Err(e) => log::warn!("failed to import snap flyout buffer: {e}"),
             }
         }
         // Content now renders here too, one window at a time, not through
@@ -228,7 +250,7 @@ impl WaylandPlatform {
                     let pos = (geom.x, geom.y + band);
                     let rounded = rounded_corners_enabled.then_some(self.state.rounded_corners_program.as_ref()).flatten().and_then(|program| {
                         let corners = if w.decorated { crate::rounded_corners::RoundedCorners::BOTTOM_ONLY } else { crate::rounded_corners::RoundedCorners::ALL };
-                        crate::rounded_corners::rounded_content_element(renderer, program, &surface, pos, w.opacity, crate::decoration::CORNER_RADIUS as f32, corners)
+                        crate::rounded_corners::rounded_content_element(renderer, program, &surface, pos, w.opacity, w.corner_radius as f32, corners)
                     });
                     match rounded {
                         Some(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Rounded(elem)),
@@ -257,6 +279,22 @@ impl WaylandPlatform {
             .map_err(err)?;
         let damage_rects: Vec<Rectangle<i32, Physical>> = result.damage.cloned().unwrap_or_default();
         let has_damage = !damage_rects.is_empty();
+        // A native lock is waiting on this output's background - same
+        // capture hook as `udev/render.rs`'s matching point, exercised
+        // here too so a native lock can be tested against this nested dev
+        // session without ever touching the live tty1 one. `self.state.
+        // lock.locked` is still `false` at this point (`begin_native_lock`
+        // doesn't flip it until every output has a background - see its
+        // own doc comment), so the frame just rendered into `framebuffer`
+        // is the ordinary desktop scene, not a lock scene.
+        if self.state.native_lock_needs_capture(&self.output.name()) {
+            let name = self.output.name();
+            let blur_radius = self.state.wm.borrow().lock.blur_radius;
+            match crate::native_lock::capture_and_blur(renderer, &framebuffer, size.into(), blur_radius) {
+                Ok(blurred) => self.state.capture_output(&name, blurred),
+                Err(e) => log::warn!("native lock: capture failed for output {name}: {e}"),
+            }
+        }
         drop(framebuffer);
         // Both the buffer swap and the frame-callback notification are
         // conditional on real damage now - this used to run

@@ -247,4 +247,12 @@ impl Platform for WindowsPlatform {
     fn ungrab_keyboard(&mut self) -> Result<()> {
         Err(PlatformError::Unsupported("ungrab_keyboard"))
     }
+
+    fn keyboard_layout(&mut self) -> Result<String> {
+        Err(PlatformError::Unsupported("keyboard_layout"))
+    }
+
+    fn cycle_keyboard_layout(&mut self) -> Result<String> {
+        Err(PlatformError::Unsupported("cycle_keyboard_layout"))
+    }
 }

@@ -17,6 +17,15 @@ impl CompState {
         // Same reason: the cursor needs the renderer that borrow owns.
         let cursor_status = self.cursor_status.clone();
         let cursor_buffers = self.cursor_buffers.clone();
+        // Same reason again: a native lock's capture step (below) needs
+        // this, and `self.wm` can't be borrowed once `self.udev` is.
+        let lock_blur_radius = self.wm.borrow().lock.blur_radius;
+        // Captured-and-blurred backgrounds collected during the per-head
+        // loop below, applied via `self.capture_output` only after it
+        // ends - `self.udev`'s mutable borrow is held for the whole loop
+        // body, and that method needs the whole of `self`, not just the
+        // one field the loop already has.
+        let mut new_captures: Vec<(String, smithay::backend::renderer::element::memory::MemoryRenderBuffer)> = Vec::new();
 
         // Border geometry is in global space, independent of which head
         // renders it, so it's gathered once here rather than per head.
@@ -77,6 +86,12 @@ impl CompState {
         let mut presented: Vec<(Output, Vec<Rectangle<i32, Physical>>)> = Vec::new();
         for (index, output) in ready {
             let lock_surface = self.lock_surface_for(&output).cloned();
+            // Extracted before the `self.udev` borrow below starts - see
+            // `native_lock::native_lock_render_elements`'s own doc comment
+            // for why (cheap `MemoryRenderBuffer` clones, not a pixel copy).
+            let native_bg = self.native_lock_background(&output.name()).cloned();
+            let native_ui = self.native_lock_ui().map(|(buf, size)| (buf.clone(), size));
+            let native_needs_capture = self.native_lock_needs_capture(&output.name());
 
             // Content/decoration elements are built per head: both need the
             // renderer, and geometry is translated into head-local space.
@@ -110,6 +125,15 @@ impl CompState {
                     match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, None, None, Kind::Unspecified) {
                         Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
                         Err(e) => log::warn!("udev: failed to import context menu buffer: {e}"),
+                    }
+                }
+                // The Snap-Layouts flyout, if open - same "topmost but
+                // never hides the cursor" placement as the context menu.
+                if let (Some(flyout), Some(buffer)) = (self.snap_flyout.as_ref(), self.snap_flyout_buffer.as_ref()) {
+                    let pos = ((flyout.pos.0 - origin.x) as f64, (flyout.pos.1 - origin.y) as f64);
+                    match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, None, None, Kind::Unspecified) {
+                        Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                        Err(e) => log::warn!("udev: failed to import snap flyout buffer: {e}"),
                     }
                 }
                 // Popups next: always above every window's own content,
@@ -316,7 +340,7 @@ impl CompState {
                                 // bitmap.
                                 let corners = if w.decorated { crate::rounded_corners::RoundedCorners::BOTTOM_ONLY } else { crate::rounded_corners::RoundedCorners::ALL };
                                 if let Some(buffer) =
-                                    crate::elements::rounded_content_buffer(&mut self.rounded_content_buffers, epoch, id, &surface, decoration::CORNER_RADIUS as f32, corners)
+                                    crate::elements::rounded_content_buffer(&mut self.rounded_content_buffers, epoch, id, &surface, w.corner_radius as f32, corners)
                                 {
                                     match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, (pos.0 as f64, pos.1 as f64), buffer, Some(w.opacity), None, None, Kind::Unspecified)
                                     {
@@ -327,7 +351,9 @@ impl CompState {
                             }
                             match rounded_elem {
                                 Some(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
-                                None => custom_elements.extend(crate::elements::surface_content_elements(&mut udev.renderer, &surface, pos, w.opacity)),
+                                None => {
+                                    custom_elements.extend(crate::elements::surface_content_elements(&mut udev.renderer, &surface, pos, w.opacity));
+                                }
                             }
                         }
                     }
@@ -343,8 +369,20 @@ impl CompState {
                     |layer| matches!(layer, Layer::Background | Layer::Bottom),
                 ));
             }
-            let lock_elements = if locked {
+            // Three genuinely different element types (external `LockSurface`
+            // content, srdwm's own memory-backed background+UI, or the
+            // normal desktop's `custom_elements`), so each is built and
+            // passed to its own `render_output` call below rather than
+            // forced into one shared, unified element list.
+            let is_native = self.lock.native.is_some();
+            let lock_elements = if locked && !is_native {
                 crate::lock::lock_render_elements(lock_surface.as_ref(), &mut udev.renderer)
+            } else {
+                Vec::new()
+            };
+            let native_elements = if locked && is_native {
+                let size = udev.heads[index].size;
+                crate::native_lock::native_lock_render_elements(native_bg.as_ref(), native_ui.as_ref().map(|(b, s)| (b, *s)), size, &mut udev.renderer)
             } else {
                 Vec::new()
             };
@@ -358,9 +396,18 @@ impl CompState {
                 }
             };
 
-            // Locked heads draw the lock surface over opaque black and
-            // nothing else; unlocked heads draw the normal scene.
-            let result = if locked {
+            // Locked heads draw either srdwm's own native lock UI (over
+            // opaque black - the background element covers the visible
+            // area, but the clear colour is still what shows through if a
+            // capture failed or hasn't happened for this output yet) or an
+            // external locker's surface the same way, and nothing else;
+            // unlocked heads draw the normal scene.
+            let result = if locked && is_native {
+                head.damage_tracker
+                    .render_output(&mut udev.renderer, &mut framebuffer, 0, &native_elements, [0.0, 0.0, 0.0, 1.0])
+                    .map(|r| (r.damage.is_some(), Vec::new()))
+                    .map_err(|e| e.to_string())
+            } else if locked {
                 head.damage_tracker
                     .render_output(&mut udev.renderer, &mut framebuffer, 0, &lock_elements, [0.0, 0.0, 0.0, 1.0])
                     .map(|r| (r.damage.is_some(), Vec::new()))
@@ -401,6 +448,22 @@ impl CompState {
                 let (mine, rest): (Vec<_>, Vec<_>) = captures.into_iter().partition(|c| c.output == output);
                 captures = rest;
                 crate::screencopy::service_pending(mine, &mut udev.renderer, &framebuffer);
+
+                // A native lock is waiting on this output's background --
+                // this same freshly-rendered framebuffer (the ordinary
+                // desktop scene, not a lock scene: `locked` is still
+                // `false` here because `begin_native_lock` deliberately
+                // doesn't flip it until every output has one, see that
+                // function's own doc comment) is exactly "what's on
+                // screen right now" for this output.
+                if native_needs_capture {
+                    let name = output.name();
+                    let size = head.size;
+                    match crate::native_lock::capture_and_blur(&mut udev.renderer, &framebuffer, size, lock_blur_radius) {
+                        Ok(blurred) => new_captures.push((name, blurred)),
+                        Err(e) => log::warn!("native lock: capture failed for output {name}: {e}"),
+                    }
+                }
             }
             drop(framebuffer);
 
@@ -439,6 +502,15 @@ impl CompState {
                 // wanted whether or not the screen had changed at all.
                 presented.push((output, damage_rects));
             }
+        }
+
+        // Applies every background captured during the loop above, now
+        // that `self.udev`'s borrow has ended and `self` (specifically
+        // `self.lock`) can be borrowed as a whole again - see
+        // `capture_output`'s own doc comment for what happens once every
+        // output has one (the lock actually engages).
+        for (name, blurred) in new_captures {
+            self.capture_output(&name, blurred);
         }
 
         // Frame callbacks + lock confirmation, once the `udev` borrow is done.

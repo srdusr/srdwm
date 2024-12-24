@@ -11,8 +11,8 @@
 use fontdue::{Font, FontSettings};
 use std::sync::OnceLock;
 
-const FONT_PIXELS: f32 = 13.0;
-const TEXT_LEFT_PADDING: f32 = 8.0;
+pub(crate) const FONT_PIXELS: f32 = 13.0;
+pub(crate) const TEXT_LEFT_PADDING: f32 = 8.0;
 
 /// Titlebar buttons are laid out right-aligned in `height`-wide squares --
 /// matching `ResizeEdge::hit_test` in `crates/core/src/window.rs`, whose
@@ -26,7 +26,7 @@ const BUTTON_MARGIN: f32 = 0.32;
 /// fontconfig query (no new system dependency for something this small) --
 /// if none of these resolve, titlebars fall back to solid-color-only, same
 /// as before text rendering existed.
-fn find_system_font() -> Option<Font> {
+pub(crate) fn find_system_font() -> Option<Font> {
     static FONT: OnceLock<Option<Font>> = OnceLock::new();
     FONT.get_or_init(load_any_monospace_font).clone()
 }
@@ -89,7 +89,7 @@ fn find_ttf_preferring_mono(dir: &std::path::Path, best: &mut Option<std::path::
     }
 }
 
-fn rgb_to_bgra(rgb: (u8, u8, u8), alpha: u8) -> [u8; 4] {
+pub(crate) fn rgb_to_bgra(rgb: (u8, u8, u8), alpha: u8) -> [u8; 4] {
     [rgb.2, rgb.1, rgb.0, alpha]
 }
 
@@ -154,6 +154,68 @@ pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], 
         buf[left * 4..left * 4 + 4].copy_from_slice(&border_px);
         let right = y * width + width - 1;
         buf[right * 4..right * 4 + 4].copy_from_slice(&border_px);
+    }
+    buf
+}
+
+/// The Snap-Layouts flyout (`crates/wayland/src/snap_flyout.rs`) - a
+/// `columns`-wide grid of labeled cells, one per `SnapZoneKind`. Same
+/// "deliberately plain" bar `render_context_menu` above sets: solid cells,
+/// left-padded text, grid lines and an outer border in one colour - no
+/// live preview thumbnails, no icons.
+pub fn render_snap_flyout(columns: u32, cell_width: u32, cell_height: u32, labels: &[&str], bg: (u8, u8, u8), fg: (u8, u8, u8), border: (u8, u8, u8)) -> Vec<u8> {
+    let (cell_width, cell_height, columns) = (cell_width.max(1) as usize, cell_height.max(1) as usize, columns.max(1) as usize);
+    let rows = labels.len().div_ceil(columns).max(1);
+    let width = cell_width * columns;
+    let height = cell_height * rows;
+    let mut buf = vec![0u8; width * height * 4];
+
+    let bg_px = rgb_to_bgra(bg, 255);
+    for px in buf.chunks_exact_mut(4) {
+        px.copy_from_slice(&bg_px);
+    }
+
+    let font = find_system_font();
+    for (i, label) in labels.iter().enumerate() {
+        let (col, row) = (i % columns, i / columns);
+        let (cell_x, cell_y) = (col * cell_width, row * cell_height);
+        if let Some(font) = &font {
+            let baseline = cell_y as f32 + cell_height as f32 * 0.58;
+            let mut pen_x = cell_x as f32 + TEXT_LEFT_PADDING;
+            for ch in label.chars() {
+                if ch.is_control() {
+                    continue;
+                }
+                let (metrics, coverage) = font.rasterize(ch, FONT_PIXELS);
+                if metrics.width > 0 && metrics.height > 0 {
+                    let glyph_x = pen_x + metrics.xmin as f32;
+                    let glyph_y = baseline - metrics.height as f32 - metrics.ymin as f32;
+                    blit_glyph(&mut buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, bg, fg);
+                }
+                pen_x += metrics.advance_width;
+                if pen_x as usize >= cell_x + cell_width {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Grid lines (including the outer border) drawn last, one colour, so
+    // nothing overdraws them.
+    let border_px = rgb_to_bgra(border, 255);
+    for y in 0..height {
+        for col in 0..=columns {
+            let x = (col * cell_width).min(width - 1);
+            let idx = y * width + x;
+            buf[idx * 4..idx * 4 + 4].copy_from_slice(&border_px);
+        }
+    }
+    for x in 0..width {
+        for row in 0..=rows {
+            let y = (row * cell_height).min(height - 1);
+            let idx = y * width + x;
+            buf[idx * 4..idx * 4 + 4].copy_from_slice(&border_px);
+        }
     }
     buf
 }
@@ -283,14 +345,14 @@ fn edge_distance(pos: u32, margin: u32, extent: u32) -> u32 {
 /// visible corner at all (`border_strips`' geometry has them span only the
 /// height *between* the top and bottom strips) and stay plain solid fills
 /// - see their render call sites.
-pub fn render_border_top(width: u32, thickness: u32, color: (u8, u8, u8)) -> Vec<u8> {
+pub fn render_border_top(width: u32, thickness: u32, color: (u8, u8, u8), radius: u32) -> Vec<u8> {
     let (width, thickness) = (width.max(1) as usize, thickness.max(1) as usize);
     let bg = rgb_to_bgra(color, 255);
     let mut buf = vec![0u8; width * thickness * 4];
     for px in buf.chunks_exact_mut(4) {
         px.copy_from_slice(&bg);
     }
-    round_top_corners(&mut buf, width, thickness, CORNER_RADIUS + thickness as u32);
+    round_top_corners(&mut buf, width, thickness, radius + thickness as u32);
     buf
 }
 
@@ -306,14 +368,14 @@ pub fn render_border_top(width: u32, thickness: u32, color: (u8, u8, u8)) -> Vec
 /// fragments`) - the same trade-off `render_border_top`'s own call site
 /// already makes and for the same reason: cropping a rounded bitmap's
 /// source rect per fragment is real extra work for a strip this thin.
-pub fn render_border_bottom(width: u32, thickness: u32, color: (u8, u8, u8)) -> Vec<u8> {
+pub fn render_border_bottom(width: u32, thickness: u32, color: (u8, u8, u8), radius: u32) -> Vec<u8> {
     let (width, thickness) = (width.max(1) as usize, thickness.max(1) as usize);
     let bg = rgb_to_bgra(color, 255);
     let mut buf = vec![0u8; width * thickness * 4];
     for px in buf.chunks_exact_mut(4) {
         px.copy_from_slice(&bg);
     }
-    round_bottom_corners(&mut buf, width, thickness, CORNER_RADIUS + thickness as u32);
+    round_bottom_corners(&mut buf, width, thickness, radius + thickness as u32);
     buf
 }
 
@@ -331,7 +393,7 @@ pub fn render_border_bottom(width: u32, thickness: u32, color: (u8, u8, u8)) -> 
 /// `true` here same as a borderless one now - reported live as most
 /// windows (anything with the default border) looking inconsistently
 /// square next to the few borderless ones that were rounded.
-pub fn render_titlebar(width: u32, height: u32, title: &str, background: (u8, u8, u8), foreground: (u8, u8, u8), round_corners: bool) -> Vec<u8> {
+pub fn render_titlebar(width: u32, height: u32, title: &str, background: (u8, u8, u8), foreground: (u8, u8, u8), round_corners: bool, radius: u32) -> Vec<u8> {
     let (width, height) = (width.max(1) as usize, height.max(1) as usize);
     let bg = rgb_to_bgra(background, 255);
     let mut buf = vec![0u8; width * height * 4];
@@ -371,23 +433,20 @@ pub fn render_titlebar(width: u32, height: u32, title: &str, background: (u8, u8
         draw_close_icon(&mut buf, width, height, 0, foreground);
     }
     if round_corners {
-        round_top_corners(&mut buf, width, height, CORNER_RADIUS);
+        round_top_corners(&mut buf, width, height, radius);
     }
     buf
 }
 
-/// How many pixels of each top corner are clipped away by
-/// `round_top_corners`. Small and fixed rather than configurable: this is a
-/// cosmetic nicety, not a feature surface worth a `srd.theme` knob, and a
-/// value this small barely reads as "rounded" if it gets any larger at the
-/// titlebar heights this compositor actually uses.
-///
-/// `pub(crate)`, not private: `rounded_corners.rs` reuses the exact same
-/// value for a decorated window's own content (its bottom two corners,
-/// where the GLES backend can round the client's actual pixels, unlike
-/// the CPU bitmap clip this file does for the titlebar/border), so a
-/// bordered window's curve reads as one continuous radius from titlebar
-/// to content rather than two different ones meeting at a seam.
+/// Default corner radius, in pixels, applied to a window at creation
+/// (`Window::corner_radius`/`ThemeConfig::default_corner_radius`) - kept
+/// here only as this file's own test fixture default now that the real
+/// radius is a live, per-window value (`theme.decorations.border.radius`
+/// in config, `srd set corner_radius <n>` live, `srd.window.
+/// set_corner_radius(n)`/a rule's `corner_radius` action per-window).
+/// `render_border_top`/`render_border_bottom`/`render_titlebar` all take
+/// the real radius as a parameter now rather than reading this directly.
+#[cfg(test)]
 pub(crate) const CORNER_RADIUS: u32 = 6;
 
 /// Clips the top-left and top-right corners of a titlebar buffer to a
@@ -405,6 +464,23 @@ pub(crate) const CORNER_RADIUS: u32 = 6;
 /// Hard cutoff rather than an anti-aliased edge, matching this codebase's
 /// existing pixel-art aesthetic elsewhere (the cursor bitmaps) rather than
 /// mixing rendering styles for one corner treatment.
+///
+/// Zeroes all four BGRA bytes for a cut pixel, not just alpha: this buffer
+/// is `Fourcc::Argb8888`, which both Wayland/`wl_shm` and Pixman treat as
+/// premultiplied - a genuinely transparent premultiplied pixel is `(0, 0,
+/// 0, 0)` in every channel, not just alpha, since the stored colour already
+/// carries the alpha multiplied in. Leaving the opaque titlebar-background
+/// RGB behind while zeroing only alpha produced a byte pattern Pixman's own
+/// `OVER` compositing (`result = src + dst * (1 - src_alpha)`) does not
+/// actually treat as "nothing here": with `src_alpha = 0` the formula still
+/// adds the stale, un-premultiplied `src` RGB straight through, so the
+/// "cut" pixel came out opaque and the corner still read as square --
+/// confirmed live, pixel-by-pixel, no visible transparency anywhere in a
+/// window's real top corner despite this function running and a nonzero
+/// radius. `rounded_corners_pixman.rs`'s `apply_corner_mask` - the
+/// equivalent mask for client *content* - already gets this right (scales
+/// all four bytes together); this was the one corner-rounding path in the
+/// codebase that didn't match it.
 fn round_top_corners(buf: &mut [u8], width: usize, height: usize, radius: u32) {
     let r = (radius as usize).min(width / 2).min(height);
     if r == 0 {
@@ -419,12 +495,12 @@ fn round_top_corners(buf: &mut [u8], width: usize, height: usize, radius: u32) {
     for y in 0..r {
         for x in 0..r {
             if is_outside_corner(x, y, r, r) {
-                buf[(y * width + x) * 4 + 3] = 0;
+                buf[(y * width + x) * 4..(y * width + x) * 4 + 4].fill(0);
             }
         }
         for x in (width - r)..width {
             if is_outside_corner(x, y, width - r - 1, r) {
-                buf[(y * width + x) * 4 + 3] = 0;
+                buf[(y * width + x) * 4..(y * width + x) * 4 + 4].fill(0);
             }
         }
     }
@@ -432,7 +508,8 @@ fn round_top_corners(buf: &mut [u8], width: usize, height: usize, radius: u32) {
 
 /// [`round_top_corners`]'s mirror for the bottom two corners - same
 /// construction, corner centres `r` *up* from the bottom instead of down
-/// from the top.
+/// from the top. Same premultiplied-alpha fix, same reason - see that
+/// function's own doc comment.
 fn round_bottom_corners(buf: &mut [u8], width: usize, height: usize, radius: u32) {
     let r = (radius as usize).min(width / 2).min(height);
     if r == 0 {
@@ -450,12 +527,12 @@ fn round_bottom_corners(buf: &mut [u8], width: usize, height: usize, radius: u32
     for y in (height - r)..height {
         for x in 0..r {
             if is_outside_corner(x, y, r, cy) {
-                buf[(y * width + x) * 4 + 3] = 0;
+                buf[(y * width + x) * 4..(y * width + x) * 4 + 4].fill(0);
             }
         }
         for x in (width - r)..width {
             if is_outside_corner(x, y, width - r - 1, cy) {
-                buf[(y * width + x) * 4 + 3] = 0;
+                buf[(y * width + x) * 4..(y * width + x) * 4 + 4].fill(0);
             }
         }
     }
@@ -529,7 +606,7 @@ fn draw_minimize_icon(buf: &mut [u8], width: usize, height: usize, right_offset:
 }
 
 #[allow(clippy::too_many_arguments)]
-fn blit_glyph(
+pub(crate) fn blit_glyph(
     buf: &mut [u8],
     width: usize,
     height: usize,
@@ -621,7 +698,7 @@ mod tests {
 
     #[test]
     fn fills_background_when_no_text() {
-        let buf = render_titlebar(40, 20, "", (0x2e, 0x34, 0x40), (0xec, 0xef, 0xf4), true);
+        let buf = render_titlebar(40, 20, "", (0x2e, 0x34, 0x40), (0xec, 0xef, 0xf4), true, CORNER_RADIUS);
         assert_eq!(buf.len(), 40 * 20 * 4);
         // Center, not (0,0): the top-left pixel is inside the rounded
         // corner `round_top_corners` clips away, so it's transparent by
@@ -644,7 +721,7 @@ mod tests {
         let (width, height) = (300u32, srdwm_core::TITLEBAR_HEIGHT);
         let bg = (0x2e, 0x34, 0x40);
         let fg = (0xec, 0xef, 0xf4);
-        let buf = render_titlebar(width, height, "", bg, fg, true);
+        let buf = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS);
         let frame = srdwm_core::Rect::new(0, 0, width, height);
         let (width, height) = (width as usize, height as usize);
 
@@ -671,7 +748,7 @@ mod tests {
         }
         let bg = (0x2e, 0x34, 0x40);
         let fg = (0xec, 0xef, 0xf4);
-        let buf = render_titlebar(200, 30, "Terminal", bg, fg, true);
+        let buf = render_titlebar(200, 30, "Terminal", bg, fg, true, CORNER_RADIUS);
         let bg_bytes = rgb_to_bgra(bg, 255);
         let changed = buf.chunks_exact(4).any(|px| px != bg_bytes);
         assert!(changed, "expected at least one pixel to differ from the background once text is drawn");
@@ -681,7 +758,7 @@ mod tests {
     fn empty_title_leaves_buffer_all_background_outside_the_rounded_corners() {
         let bg = (0x10, 0x20, 0x30);
         let (width, height) = (50, 24);
-        let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true);
+        let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true, CORNER_RADIUS);
         let bg_bytes = rgb_to_bgra(bg, 255);
         for (i, px) in buf.chunks_exact(4).enumerate() {
             let (x, y) = (i % width as usize, i / width as usize);
@@ -697,7 +774,7 @@ mod tests {
     fn corners_are_clipped_but_the_middle_is_not() {
         let bg = (0x10, 0x20, 0x30);
         let (width, height) = (50, 24);
-        let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true);
+        let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true, CORNER_RADIUS);
         let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
         // The very corner pixel is well outside the quarter-circle at any
         // sane radius - fully clipped.
@@ -713,10 +790,32 @@ mod tests {
     }
 
     #[test]
+    fn clipped_corner_pixels_are_fully_premultiplied_zero_not_just_alpha() {
+        // Regression test: `round_top_corners` used to zero only the alpha
+        // byte of a clipped pixel, leaving the opaque background RGB behind
+        // it untouched. This buffer is `Fourcc::Argb8888`, which both
+        // Wayland/`wl_shm` and Pixman treat as premultiplied - Pixman's own
+        // `OVER` compositing (`result = src + dst * (1 - src_alpha)`) does
+        // not treat `alpha=0, rgb=<something>` as "contributes nothing": it
+        // adds that stale, un-premultiplied `rgb` straight through, so the
+        // "clipped" corner still rendered fully opaque and every window's
+        // top corners read as square regardless of a nonzero radius --
+        // confirmed live, pixel-by-pixel, zero transparency anywhere in a
+        // real window's corner. A genuinely transparent premultiplied pixel
+        // is `(0, 0, 0, 0)` in every channel, not just alpha.
+        let bg = (0x10, 0x20, 0x30);
+        let (width, height) = (50, 24);
+        let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true, CORNER_RADIUS);
+        let px_at = |x: usize, y: usize| &buf[(y * width as usize + x) * 4..(y * width as usize + x) * 4 + 4];
+        assert_eq!(px_at(0, 0), [0, 0, 0, 0], "top-left corner pixel must be fully zeroed (premultiplied transparent), not just alpha");
+        assert_eq!(px_at(width as usize - 1, 0), [0, 0, 0, 0], "top-right corner pixel must be fully zeroed (premultiplied transparent), not just alpha");
+    }
+
+    #[test]
     fn round_corners_false_leaves_the_top_corners_square() {
         let bg = (0x10, 0x20, 0x30);
         let (width, height) = (50, 24);
-        let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), false);
+        let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), false, CORNER_RADIUS);
         let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
         assert_eq!(alpha_at(0, 0), 255, "top-left corner should stay square when round_corners is false");
         assert_eq!(alpha_at(width as usize - 1, 0), 255, "top-right corner should stay square when round_corners is false");
@@ -733,7 +832,7 @@ mod tests {
         // change now depends on.
         let color = (0x40, 0x50, 0x60);
         let (width, thickness) = (60, 2);
-        let buf = render_border_top(width, thickness, color);
+        let buf = render_border_top(width, thickness, color, CORNER_RADIUS);
         let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
         assert_eq!(alpha_at(0, 0), 0, "top-left corner pixel should be clipped");
         assert_eq!(alpha_at(width as usize - 1, 0), 0, "top-right corner pixel should be clipped");
@@ -748,7 +847,7 @@ mod tests {
     fn border_bottom_rounds_its_own_bottom_corners() {
         let color = (0x40, 0x50, 0x60);
         let (width, thickness) = (60, 2);
-        let buf = render_border_bottom(width, thickness, color);
+        let buf = render_border_bottom(width, thickness, color, CORNER_RADIUS);
         let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
         assert_eq!(alpha_at(0, thickness as usize - 1), 0, "bottom-left corner pixel should be clipped");
         assert_eq!(alpha_at(width as usize - 1, thickness as usize - 1), 0, "bottom-right corner pixel should be clipped");
@@ -787,5 +886,37 @@ mod tests {
         assert_eq!(alpha_at(99, 0), 255);
         assert_eq!(alpha_at(0, 27), 255);
         assert_eq!(alpha_at(99, 27), 255);
+    }
+
+    #[test]
+    fn snap_flyout_is_sized_for_a_full_grid_of_labels() {
+        let labels = ["Left Half", "Right Half", "Top Left", "Top Right", "Bottom Left", "Bottom Right"];
+        let buf = render_snap_flyout(3, 90, 60, &labels, (0x2e, 0x34, 0x40), (0xff, 0xff, 0xff), (0x10, 0x10, 0x10));
+        // 3 columns x 2 rows (6 labels / 3 columns, rounded up).
+        assert_eq!(buf.len(), (90 * 3) * (60 * 2) * 4);
+    }
+
+    #[test]
+    fn snap_flyout_border_is_opaque_at_every_outer_edge() {
+        let labels = ["A", "B", "C", "D", "E", "F"];
+        let (cell_w, cell_h) = (90, 60);
+        let buf = render_snap_flyout(3, cell_w, cell_h, &labels, (0, 0, 0), (0xff, 0xff, 0xff), (0x99, 0x99, 0x99));
+        let (width, height) = (cell_w * 3, cell_h * 2);
+        let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
+        assert_eq!(alpha_at(0, 0), 255);
+        assert_eq!(alpha_at(width as usize - 1, 0), 255);
+        assert_eq!(alpha_at(0, height as usize - 1), 255);
+        assert_eq!(alpha_at(width as usize - 1, height as usize - 1), 255);
+    }
+
+    #[test]
+    fn snap_flyout_has_an_internal_grid_line_between_columns() {
+        let labels = ["A", "B", "C", "D", "E", "F"];
+        let (cell_w, cell_h) = (90, 60);
+        let buf = render_snap_flyout(3, cell_w, cell_h, &labels, (0, 0, 0), (0xff, 0xff, 0xff), (0x99, 0x99, 0x99));
+        let width = cell_w * 3;
+        // The boundary between column 0 and column 1, away from the outer border.
+        let idx = (30 * width as usize + cell_w as usize) * 4;
+        assert_eq!(buf[idx + 3], 255, "column boundary must be drawn, not just the outer border");
     }
 }

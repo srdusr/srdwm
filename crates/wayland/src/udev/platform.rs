@@ -113,6 +113,7 @@ impl UdevPlatform {
             heads,
             active: true,
             pointer_pos: (width as f64 / 2.0, height as f64 / 2.0).into(),
+            session: session.clone(),
         };
 
         let state = CompState {
@@ -141,6 +142,7 @@ impl UdevPlatform {
             ),
             _screencopy_state: crate::screencopy::ScreencopyState::new::<CompState>(&display_handle),
             screencopy_pending: Vec::new(),
+            _appmenu_state: crate::appmenu::AppmenuManagerState::new::<CompState>(&display_handle),
             _foreign_toplevel_state: crate::foreign_toplevel::ForeignToplevelState::new::<CompState>(&display_handle),
             foreign_toplevel_managers: Vec::new(),
             foreign_toplevel_handles: HashMap::new(),
@@ -170,15 +172,20 @@ impl UdevPlatform {
             cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
             cursor_buffers: crate::cursor::make_buffers(),
             last_titlebar_click: None,
+            gesture_swipe: None,
             context_menu: None,
             context_menu_buffer: None,
+            snap_flyout: None,
+            snap_flyout_buffer: None,
             wm: wm.clone(),
             surface_to_id: HashMap::new(),
             id_to_window: HashMap::new(),
             dead_layer_surfaces: HashSet::new(),
+            hidden_layer_surfaces: HashMap::new(),
             decorations: HashMap::new(),
             border_top_decorations: HashMap::new(),
             border_bottom_decorations: HashMap::new(),
+            decoration_signatures: HashMap::new(),
             shadow_buffers: HashMap::new(),
             rounded_corners_program: None,
             content_epoch: HashMap::new(),
@@ -196,6 +203,7 @@ impl UdevPlatform {
             xwayland_windows: HashMap::new(),
             xwayland_pending: Vec::new(),
             ewmh: None,
+            appmenu_registrar: None,
         };
 
         let listener = ListeningSocket::bind_auto("wayland", 0..32).map_err(err)?;
@@ -262,9 +270,92 @@ impl Platform for UdevPlatform {
         self.state.tick_repeat();
         self.display.dispatch_clients(&mut self.state).map_err(err)?;
         self.display.flush_clients().map_err(err)?;
+        self.state.apply_registrar_events();
         if let Some(ipc) = self.ipc.as_mut() {
             if ipc.poll(&self.state.wm) {
                 self.pending.borrow_mut().push(CoreEvent::WorkspaceChanged);
+                // `ipc.rs`'s `handle_request` (`"focus"`, `"toggle
+                // visibility"`, ...) only ever touches core's `WindowManager`
+                // - it has no handle to `state.space`, which is what
+                // actually renders on top *and* what `space.element_under`
+                // hit-tests against (see `input::focus_window`'s own doc
+                // comment, which fixed every *other* focus path this same
+                // way). Left alone, a dock/AGS "focus" click over IPC moved
+                // core's idea of focus while the window kept rendering, and
+                // hit-testing, underneath whatever was already topmost --
+                // reproduced live: `srd dispatch focus` on a covered Firefox
+                // window raised it in the taskbar/keyboard sense but a
+                // click at its own visible location still landed on the
+                // window still actually on top. Re-syncing here rather than
+                // in `ipc.rs` itself since core is platform-agnostic and
+                // cannot see `state.space`; cheap and safe to call
+                // unconditionally on any IPC mutation, not just ones that
+                // are definitely focus changes - raising an already-topmost
+                // element is a no-op reinsertion.
+                let focused = self.state.wm.borrow().focused_id();
+                if let Some(id) = focused {
+                    crate::input::focus_window(&mut self.state, id);
+                }
+            }
+        }
+        // Starts srdwm's own lock UI if `srd dispatch lock` queued a
+        // request since the last poll - see `WindowManager::request_lock`'s
+        // own doc comment for why this crosses the core/backend boundary
+        // as a drained request rather than a direct call. A no-op if
+        // already locked (native or external), same guard `begin_native_
+        // lock` applies itself.
+        if self.state.wm.borrow_mut().drain_lock_request() {
+            self.state.begin_native_lock();
+        }
+        // Same drained-request pattern as the lock check just above, for
+        // `srd capture workspace` - see `WindowManager::request_capture_
+        // workspace`'s own doc comment for why this needs the backend at
+        // all rather than being answerable from core state.
+        let capture_requests = self.state.wm.borrow_mut().drain_capture_requests();
+        if !capture_requests.is_empty() {
+            self.state.service_capture_requests(capture_requests);
+        }
+        // Checks whether a background PAM authentication spawned by a
+        // native lock's own `Return` handling finished since the last
+        // poll - see `native_lock.rs`'s module doc comment for why this
+        // runs on a background thread rather than blocking here.
+        self.state.poll_native_lock_auth();
+        // Applies any `srd set_output_position` IPC requests queued since
+        // the last poll - see `WindowManager::request_output_position`'s
+        // own doc comment for why this indirection exists at all (core has
+        // no real output handle to move itself). `id` is this head's index
+        // into `udev.heads` *as of the platform's last `monitors()` query*
+        // (see that function's own construction of `Monitor::new(i as u32,
+        // ...)`) - stale if a hotplug reordered heads in between, same
+        // trade-off `wlr-output-management-v1`'s own `apply_or_test`
+        // guards against with a serial check. Not guarded the same way
+        // here: this is a first pass at the primitive a display-settings
+        // panel needs to build real monitor mirroring on top of, not yet
+        // hardened against a hotplug racing an in-flight request - worth
+        // adding if that turns out to matter in practice.
+        let output_requests = self.state.wm.borrow_mut().drain_output_position_requests();
+        if !output_requests.is_empty() {
+            let mut any_applied = false;
+            for (id, x, y) in output_requests {
+                let Some(output) = self.state.udev.as_ref().and_then(|u| u.heads.get(id as usize)).map(|h| h.output.clone()) else {
+                    log::warn!("udev: set_output_position: no head at index {id}");
+                    continue;
+                };
+                crate::output_management::apply_output_position(&mut self.state, &output, (x, y).into());
+                any_applied = true;
+            }
+            if any_applied {
+                crate::output_management::broadcast_dirty_outputs(&mut self.state);
+                // Core's own `Monitor` list is a passive mirror of whatever
+                // the backend last reported (see `monitors()` above) --
+                // without re-triggering a query, `Window.geometry`/
+                // placement would keep using the pre-move rect until some
+                // unrelated event happened to refresh it. `MonitorAdded`'s
+                // payload is discarded unread on this path (`main.rs`
+                // re-queries the full list rather than trusting it), same
+                // as every other "just go recompute" use of this event
+                // elsewhere in this codebase.
+                self.pending.borrow_mut().push(CoreEvent::MonitorAdded(srdwm_core::Monitor::new(0, "", srdwm_core::Rect::new(0, 0, 0, 0))));
             }
         }
         self.state.render_udev_frame();
@@ -313,6 +404,7 @@ impl Platform for UdevPlatform {
                 // the resulting geometry back over IPC, not just from
                 // reading this code.
                 m.full_geometry = srdwm_core::Rect::new(head.location.x, head.location.y, head.size.0 as u32, head.size.1 as u32);
+                m.maximize_geometry = crate::input::maximize_geometry_for(&head.output, m.full_geometry);
                 m.primary = i == 0;
                 m
             })
@@ -395,5 +487,24 @@ impl Platform for UdevPlatform {
 
     fn ungrab_keyboard(&mut self) -> PlatformResult<()> {
         Ok(())
+    }
+
+    fn keyboard_layout(&mut self) -> PlatformResult<String> {
+        let Some(keyboard) = self.state.seat.get_keyboard() else { return Ok(String::new()) };
+        Ok(keyboard.with_xkb_state(&mut self.state, |ctx| {
+            let xkb = ctx.xkb().lock().unwrap();
+            let layout = xkb.active_layout();
+            xkb.layout_name(layout).to_string()
+        }))
+    }
+
+    fn cycle_keyboard_layout(&mut self) -> PlatformResult<String> {
+        let Some(keyboard) = self.state.seat.get_keyboard() else { return Ok(String::new()) };
+        Ok(keyboard.with_xkb_state(&mut self.state, |mut ctx| {
+            ctx.cycle_next_layout();
+            let xkb = ctx.xkb().lock().unwrap();
+            let layout = xkb.active_layout();
+            xkb.layout_name(layout).to_string()
+        }))
     }
 }
