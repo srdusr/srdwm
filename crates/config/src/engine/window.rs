@@ -139,6 +139,20 @@ impl Engine {
         })?)
     }
 
+    pub(super) fn fn_window_set_corner_radius(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, radius: u32| {
+            let wm = state.borrow().wm.clone();
+            let mut wm = wm.borrow_mut();
+            if let Some(id) = wm.focused_id() {
+                if let Some(w) = wm.window_mut(id) {
+                    w.corner_radius = radius;
+                }
+            }
+            Ok(())
+        })?)
+    }
+
     pub(super) fn fn_window_set_opacity(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |_, opacity: f32| {

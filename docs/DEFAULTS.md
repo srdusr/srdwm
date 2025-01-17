@@ -153,6 +153,7 @@ srd.theme.set_colors({
 srd.theme.set_decorations({
     border = {
         width = 2,                                      -- Default: 2
+        radius = 6,                                      -- Default: 6 (corner radius, logical px)
         active_color = "#88c0d0",                       -- Default: Nord blue
         inactive_color = "#2e3440",                     -- Default: Nord dark
         focused_style = "solid",                        -- Default: "solid"
@@ -164,7 +165,20 @@ srd.theme.set_decorations({
         font = "JetBrains Mono 10",                     -- Default: "JetBrains Mono 10"
         background = "#2e3440",                         -- Default: Nord dark
         foreground = "#eceff4"                          -- Default: Nord light
-    }
+    },
+    - Which decoration mode a window gets before any per-window rule or
+    - the window's own `xdg-decoration` request has a say. "server"
+    - (default): srdwm draws its own titlebar for anything that doesn't
+    - ask otherwise - consistent Windows/macOS-style chrome, and KDE/
+    - KWin's own choice too. "client": srdwm steps back by default and
+    - lets every window draw its own chrome (GNOME/Mutter's approach) --
+    - a window with no titlebar opinion of its own then gets no titlebar
+    - at all. A client that explicitly requests a mode is always honored
+    - either way; this only decides what a client with *no* preference
+    - ends up with. Also live-settable without a config reload/restart:
+    - `srd set decoration_mode server` / `srd set decoration_mode client`
+    - (affects windows created after the call, not already-open ones).
+    default_mode = "server"                             -- Default: "server"
 })
 ```
 
@@ -217,7 +231,7 @@ srd.rule(matcher, actions)
 - `x`, `y`, `width`, `height` (number) - explicit geometry; all four must be
   given together to take effect
 - `decorated` (bool)
-- `border_color` (`{r, g, b}`), `border_width` (number)
+- `border_color` (`{r, g, b}`), `border_width` (number), `corner_radius` (number)
 - `pinned` (bool) - always-on-top
 - `opacity` (number, `0.0`..=`1.0`) - content opacity; srdwm's own
   titlebar/border/shadow always stay fully opaque regardless

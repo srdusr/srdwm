@@ -17,6 +17,7 @@ impl Engine {
         srd.set("rule", self.fn_rule()?)?;
         srd.set("load", self.fn_load()?)?;
         srd.set("spawn", self.fn_spawn()?)?;
+        srd.set("setenv", self.fn_setenv()?)?;
         srd.set("notify", self.fn_notify()?)?;
         srd.set("quit", self.fn_quit()?)?;
         srd.set("reload", self.fn_reload()?)?;
@@ -44,6 +45,7 @@ impl Engine {
         window.set("set_decorations", self.fn_window_set_decorations()?)?;
         window.set("set_border_color", self.fn_window_set_border_color()?)?;
         window.set("set_border_width", self.fn_window_set_border_width()?)?;
+        window.set("set_corner_radius", self.fn_window_set_corner_radius()?)?;
         window.set("set_opacity", self.fn_window_set_opacity()?)?;
         window.set("set_resize_margin", self.fn_window_set_resize_margin()?)?;
         window.set("set_floating", self.fn_window_set_floating()?)?;

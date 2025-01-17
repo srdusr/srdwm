@@ -128,7 +128,8 @@ impl Engine {
     /// class_regex = "...", instance = "..." }, { floating = true,
     /// workspace = 2, x = .., y = .., width = .., height = ..,
     /// decorated = false, border_color = {r,g,b}, border_width = 2,
-    /// maximized = true, opacity = 0.9 })`. At least one matcher field is
+    /// corner_radius = 10, maximized = true, opacity = 0.9 })`. At least
+    /// one matcher field is
     /// required; unmatched rules apply nothing.
     ///
     /// `title`/`class` are plain substring/exact match, cheap and cover
@@ -182,6 +183,7 @@ impl Engine {
                     decorated: actions.get("decorated")?,
                     border_color,
                     border_width: actions.get("border_width")?,
+                    corner_radius: actions.get("corner_radius")?,
                     pinned: actions.get("pinned")?,
                     opacity: actions.get("opacity")?,
                     resize_margin: actions.get("resize_margin")?,
@@ -213,6 +215,22 @@ impl Engine {
             if let Err(e) = result {
                 log::warn!("srd.spawn('{command}') failed: {e}");
             }
+            Ok(())
+        })?)
+    }
+
+    /// Sets an environment variable in srdwm's own process - `std::process::
+    /// Command` inherits the parent's environment by default (`fn_spawn`
+    /// above never overrides that), so anything set here is visible to
+    /// every process `srd.spawn` starts from this point on, and to their own
+    /// children in turn. Hyprland's `env = NAME,VALUE` works the same way
+    /// (sets it in its own process before forking anything), which is the
+    /// mechanism a ported `env.conf` needs - there is no per-spawn
+    /// equivalent that would let one client see a variable no other client
+    /// does, so this is deliberately global and process-wide, not scoped.
+    pub(super) fn fn_setenv(&self) -> Result<mlua::Function<'_>> {
+        Ok(self.lua.create_function(move |_, (name, value): (String, String)| {
+            std::env::set_var(&name, &value);
             Ok(())
         })?)
     }

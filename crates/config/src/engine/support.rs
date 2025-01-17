@@ -82,6 +82,7 @@ pub(super) fn validate(s: &SharedState) -> Vec<String> {
     check_range("layout.floating.gaps.outer", 0.0, 100.0);
     check_range("general.border_width", 0.0, 20.0);
     check_range("theme.decorations.border.width", 0.0, 20.0);
+    check_range("theme.decorations.border.radius", 0.0, 100.0);
     check_range("general.animation_duration", 0.0, 1000.0);
     check_range("general.resize_margin", 1.0, 50.0);
     check_range("performance.max_fps", 30.0, 240.0);
@@ -242,6 +243,7 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     set("theme.colors.success", String("#a3be8c".into()));
 
     set("theme.decorations.border.width", Number(2.0));
+    set("theme.decorations.border.radius", Number(6.0));
     set("theme.decorations.border.active_color", String("#88c0d0".into()));
     set("theme.decorations.border.inactive_color", String("#2e3440".into()));
     set("theme.decorations.border.focused_style", String("solid".into()));

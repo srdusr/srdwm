@@ -175,8 +175,48 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     }
     let border_width = engine.get_f64("theme.decorations.border.width", 2.0).max(0.0) as u32;
     theme.default_border_width = border_width;
+    let corner_radius = engine.get_f64("theme.decorations.border.radius", 6.0).max(0.0) as u32;
+    theme.default_corner_radius = corner_radius;
     if let Some(rgb) = srdwm_core::parse_hex_color(&engine.get_string("theme.decorations.border.active_color", "#88c0d0")) {
         theme.default_border_color = rgb;
+    }
+    // "server" (srdwm draws the titlebar, Windows/macOS-style) or "client"
+    // (srdwm steps back for anything with no decoration opinion of its
+    // own, GNOME-style) - see `ThemeConfig::default_decorated`'s own doc
+    // comment. Anything other than exactly "client" is treated as
+    // "server", the existing default, rather than erroring on a typo.
+    theme.default_decorated = engine.get_string("theme.decorations.default_mode", "server") != "client";
+
+    // `theme.lock.*` - srdwm's own session-lock UI (`crates/wayland/src/
+    // native_lock.rs`), configured the same "start from ThemeConfig-style
+    // Nord defaults, override per key" way as everything above.
+    let mut lock = srdwm_core::LockConfig::default();
+    if let Some(rgb) = srdwm_core::parse_hex_color(&engine.get_string("theme.lock.box_bg", "#2e3440")) {
+        lock.box_bg = rgb;
+    }
+    if let Some(rgb) = srdwm_core::parse_hex_color(&engine.get_string("theme.lock.box_border", "#88c0d0")) {
+        lock.box_border = rgb;
+    }
+    if let Some(rgb) = srdwm_core::parse_hex_color(&engine.get_string("theme.lock.text_color", "#eceff4")) {
+        lock.text_color = rgb;
+    }
+    if let Some(rgb) = srdwm_core::parse_hex_color(&engine.get_string("theme.lock.error_color", "#bf616a")) {
+        lock.error_color = rgb;
+    }
+    lock.corner_radius = engine.get_f64("theme.lock.corner_radius", lock.corner_radius as f64).max(0.0) as u32;
+    lock.blur_radius = engine.get_f64("theme.lock.blur_radius", lock.blur_radius as f64).max(0.0) as u32;
+    lock.show_caps_lock = engine.get_bool("theme.lock.show_caps_lock", lock.show_caps_lock);
+    lock.show_failed_attempts = engine.get_bool("theme.lock.show_failed_attempts", lock.show_failed_attempts);
+    let fail_message = engine.get_string("theme.lock.fail_message", &lock.fail_message);
+    lock.fail_message = fail_message;
+    // A single character, not a string - silently keeping the default
+    // rather than erroring is deliberate here (same "malformed value falls
+    // back to default rather than erroring a second time" stance `parse_
+    // hex_color` callers already take above), since a multi-character
+    // "dot" would misalign the whole password row's width calculations,
+    // which assume one glyph per typed character.
+    if let Some(ch) = engine.get_string("theme.lock.dot_char", &lock.dot_char.to_string()).chars().next() {
+        lock.dot_char = ch;
     }
 
     let mut wm = wm.borrow_mut();
@@ -190,6 +230,7 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     wm.focus_follows_mouse = focus_follows_mouse;
     wm.auto_raise = auto_raise;
     wm.theme = theme;
+    wm.lock = lock;
     wm.auto_back_and_forth = engine.get_bool("workspace.auto_back_and_forth", false);
 }
 
@@ -305,6 +346,18 @@ fn sync(wm: &Rc<RefCell<WindowManager>>, platform: &mut dyn Platform) {
         }
     }
 
+    // Same "core records the intent, this loop forwards it to the platform
+    // that can actually act on it" shape as `close_requests` above - a
+    // count rather than a single flag, so more than one `srd dispatch
+    // cycle_keyboard_layout` in one tick isn't silently collapsed into one
+    // real cycle.
+    for _ in 0..wm.borrow_mut().take_keyboard_layout_cycle_requests() {
+        match platform.cycle_keyboard_layout() {
+            Ok(name) => wm.borrow_mut().set_keyboard_layout(name),
+            Err(e) => log::warn!("cycle_keyboard_layout() failed: {e}"),
+        }
+    }
+
     let ws = wm.borrow().current_workspace();
     wm.borrow_mut().arrange_workspace(ws);
 
@@ -388,7 +441,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    env_logger::init();
+    // `log::*` throughout this codebase and `tracing::*` inside smithay
+    // (its own buffer-import failures, e.g. "Failed to import surface" /
+    // "Unknown buffer format for", are emitted via `tracing::warn!`/
+    // `error!`, not `log::`) are two independent facades - plain
+    // `env_logger::init()` only ever installed a `log` backend, so every
+    // smithay-side diagnostic was silently dropped with no subscriber to
+    // receive it. `tracing_subscriber::fmt()` bridges `log::*` calls into
+    // `tracing` itself (its default `tracing-log` feature installs that
+    // bridge as part of `init()`) and then prints both, still filtered by
+    // the same `RUST_LOG` directive syntax `env_logger` used - a separate,
+    // explicit `tracing_log::LogTracer::init()` call here crashed srdwm on
+    // every single startup (`SetLoggerError` - `log::set_boxed_logger` can
+    // only ever succeed once process-wide, and `init()` below already
+    // claims it) instead of merely being redundant with it, since `init()`
+    // internally unwraps that install rather than tolerating it being taken
+    // already. Confirmed live: this is what put srdwm into a boot loop.
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
     log::info!("srdwm starting");
 
     // Decided before the config loads (it needs no engine, just argv/the
@@ -442,6 +513,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let monitors = platform.monitors()?;
     log::info!("detected {} monitor(s)", monitors.len());
     wm.borrow_mut().set_monitors(monitors);
+
+    // Read once so `WindowManager::keyboard_layout` (surfaced over `srd`,
+    // for an AGS peer session's keyboard-layout badge) has a real value
+    // from the start rather than an empty string until the first real
+    // cycle. `Err` here just means this backend has no real XKB-backed
+    // seat to ask (X11, Windows, macOS) - not worth failing startup over,
+    // same as any other platform capability that's honestly unsupported.
+    match platform.keyboard_layout() {
+        Ok(name) => wm.borrow_mut().set_keyboard_layout(name),
+        Err(e) => log::debug!("keyboard_layout() unavailable on this backend: {e}"),
+    }
 
     // The platform is fully connected now (for Wayland, `WAYLAND_DISPLAY`
     // was just set by `srdwm_wayland::connect` - see `udev`/`winit`
