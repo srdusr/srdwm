@@ -429,6 +429,27 @@
     }
 
     #[test]
+    fn focusing_a_minimized_window_also_restores_it() {
+        // Regression: `focus_window` marked a window focused without
+        // clearing `minimized` - a dock icon's click (foreign-toplevel
+        // `Activate`, or the plain `"focus"` IPC command) both route
+        // through here, so clicking a minimized app's dock icon left it
+        // `focused: true` but still `minimized: true`, still excluded from
+        // `visible_windows`/rendering. Reads exactly like the click did
+        // nothing, since the window never actually reappears.
+        let mut wm = wm_with_monitor();
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "a"));
+        wm.minimize_window(id);
+        assert!(wm.window(id).unwrap().minimized, "sanity: actually minimized first");
+
+        wm.focus_window(id);
+        assert!(!wm.window(id).unwrap().minimized, "focusing a minimized window must restore it");
+        assert_eq!(wm.focused_id(), Some(id));
+        assert!(wm.visible_windows().any(|w| w.id == id));
+    }
+
+    #[test]
     fn refocusing_an_already_visible_window_does_not_trigger_auto_back_and_forth() {
         // The fix above must not call `switch_workspace` unconditionally --
         // `switch_workspace`'s own `auto_back_and_forth` handling treats

@@ -45,6 +45,22 @@ impl WindowManager {
             if workspace != self.current_workspace {
                 self.switch_workspace(workspace);
             }
+            // A minimized window's dock icon (or Alt-Tab entry, or any
+            // other `focus_window` caller) has to un-minimize it too, not
+            // just focus it - without this, clicking a minimized app's
+            // dock icon left it focused (keyboard input, `srd clients`'
+            // own `focused: true`) while still `minimized: true`, still
+            // excluded from `visible_windows`/rendering. Reads exactly like
+            // the click did nothing, since the one visible thing "focused"
+            // usually implies (the window coming to the front) never
+            // happens. Every desktop's taskbar/dock has this behavior for
+            // free; this compositor's `Activate` (zwlr-foreign-toplevel)
+            // and `"focus"` IPC handlers both route through here already,
+            // so they get it too rather than each needing their own
+            // explicit restore call.
+            if let Some(w) = self.windows.get_mut(&id) {
+                w.minimized = false;
+            }
             self.focused = Some(id);
             self.raise_window(id);
         }
