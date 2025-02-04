@@ -67,10 +67,31 @@ pub(crate) fn layer_surface_under_layers(state: &CompState, pos: Point<f64, Logi
     let local = pos - origin.to_f64();
     let map = layer_map_for_output(&entry.output);
     for layer_kind in layers {
-        let Some(layer) = map.layer_under(layer_kind, local) else { continue };
-        let Some(geo) = map.layer_geometry(layer) else { continue };
-        if let Some((surface, surface_loc)) = layer.surface_under(local - geo.loc.to_f64(), WindowSurfaceType::ALL) {
-            return Some((surface, origin + geo.loc + surface_loc));
+        // Not `map.layer_under(layer_kind, local)` - that hands back only
+        // the single topmost surface whose *bounding box* contains `local`,
+        // and if that one surface's own input region excludes the point
+        // (its `surface_under` below returns `None`), the old code gave up
+        // on this whole layer-kind rather than trying whatever real,
+        // clickable surface is stacked underneath it. A bbox-only pick is
+        // exactly wrong the moment two surfaces on the same layer-kind
+        // overlap - a transparent, mapped-but-mostly-empty surface (a
+        // backdrop-dismiss popup, concretely: `Overview`'s own bbox-wide
+        // fallback region was exactly this shape before it was fixed
+        // AGS-side) sitting in front of a real one in z-order would
+        // silently swallow every click and even every hover/motion event
+        // meant for the surface underneath, with no way to reach it at
+        // all. Walking every candidate on this layer-kind, topmost first
+        // (`.rev()`, matching `layer_under`'s own z-order convention), and
+        // falling through to the next when a candidate's real input region
+        // doesn't cover the point, is what `layer_under` alone can't do.
+        for layer in map.layers_on(layer_kind).rev() {
+            let Some(geo) = map.layer_geometry(layer) else { continue };
+            if !geo.to_f64().contains(local) {
+                continue;
+            }
+            if let Some((surface, surface_loc)) = layer.surface_under(local - geo.loc.to_f64(), WindowSurfaceType::ALL) {
+                return Some((surface, origin + geo.loc + surface_loc));
+            }
         }
     }
     None
