@@ -62,7 +62,12 @@ impl CompState {
             let Some(w) = self.id_to_window.get(&id) else { continue };
             let Some(surface) = crate::input::dwindow_wl_surface(w) else { continue };
             let Some(geom) = self.wm.borrow().window(id).map(|w| w.geometry) else { continue };
-            let loc = (geom.x - origin.0, geom.y - origin.1);
+            // Same `set_window_geometry` offset every other render path
+            // subtracts (see `udev/render.rs`'s matching fix) - without
+            // it, a CSD window's invisible shadow margin would show up as
+            // a gap in the capture too.
+            let content_offset = w.geometry().loc;
+            let loc = (geom.x - origin.0 - content_offset.x, geom.y - origin.1 - content_offset.y);
             elements.extend(render_elements_from_surface_tree(&mut udev.renderer, &surface, loc, 1.0, 1.0, Kind::Unspecified));
         }
 

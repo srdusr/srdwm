@@ -247,7 +247,15 @@ impl WaylandPlatform {
             if let Some(dwindow) = self.state.id_to_window.get(&id) {
                 if let Some(surface) = crate::elements::window_wl_surface(dwindow) {
                     let band = if w.decorated { srdwm_core::TITLEBAR_HEIGHT as i32 } else { 0 };
-                    let pos = (geom.x, geom.y + band);
+                    // See the matching fix in `udev/render.rs`'s render loop
+                    // for the full explanation: a CSD client's own
+                    // `set_window_geometry` offset (its declared visible
+                    // content within a larger buffer that also reserves an
+                    // invisible shadow margin) was never subtracted, so
+                    // that margin's worth of gap showed through at this
+                    // window's top-left corner.
+                    let content_offset = dwindow.geometry().loc;
+                    let pos = (geom.x - content_offset.x, geom.y + band - content_offset.y);
                     let rounded = rounded_corners_enabled.then_some(self.state.rounded_corners_program.as_ref()).flatten().and_then(|program| {
                         let corners = if w.decorated { crate::rounded_corners::RoundedCorners::BOTTOM_ONLY } else { crate::rounded_corners::RoundedCorners::ALL };
                         crate::rounded_corners::rounded_content_element(renderer, program, &surface, pos, w.opacity, w.corner_radius as f32, corners)

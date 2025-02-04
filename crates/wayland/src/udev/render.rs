@@ -329,7 +329,30 @@ impl CompState {
                     if let Some(dwindow) = self.id_to_window.get(&id) {
                         if let Some(surface) = crate::elements::window_wl_surface(dwindow) {
                             let band = if w.decorated { srdwm_core::TITLEBAR_HEIGHT as i32 } else { 0 };
-                            let pos = (geom.x - origin.x, geom.y + band - origin.y);
+                            // `dwindow.geometry().loc` is the client's own
+                            // `xdg_surface.set_window_geometry` offset --
+                            // GTK4 CSD clients (Firefox concretely) declare
+                            // their real visible content as a sub-rect
+                            // inset within a larger buffer that also holds
+                            // an invisible shadow-reservation margin, even
+                            // once the tiled-state hint (`sync_geometry`,
+                            // `xdg_toplevel::State::Tiled*`) has told them
+                            // to skip drawing that shadow - the margin
+                            // itself, not just its decoration, stays
+                            // reserved in the buffer. Never subtracting
+                            // this meant every such client's buffer origin
+                            // (0,0) - the *outer* edge of that invisible
+                            // margin - landed exactly at `geom.x,geom.y`,
+                            // leaving the margin's width/height of genuine
+                            // gap (wallpaper visible through it) between
+                            // the border this compositor draws and where
+                            // the client's actual visible content begins.
+                            // Reported live as "an extra layer or border
+                            // over each window" - confirmed by diffing a
+                            // corner crop against the real wallpaper at
+                            // that exact screen position, pixel for pixel.
+                            let content_offset = dwindow.geometry().loc;
+                            let pos = (geom.x - origin.x - content_offset.x, geom.y + band - origin.y - content_offset.y);
                             let mut rounded_elem = None;
                             if rounded_corners_enabled {
                                 let epoch = self.content_epoch.get(&id).copied().unwrap_or(0);

@@ -55,7 +55,24 @@ impl CompState {
         let size_changed = self.last_synced_size.insert(id, size) != Some(size);
         let mut moved = false;
         if let Some(w) = self.id_to_window.get(&id) {
-            self.space.map_element(w.clone(), (geom.x, geom.y + band), false);
+            // `w.geometry().loc` is the client's own `xdg_surface::
+            // set_window_geometry` offset - a CSD client (GTK4/Firefox
+            // concretely) declares its real visible content as a sub-rect
+            // inset within a larger buffer that also reserves an invisible
+            // shadow margin, even once the tiled-state hint below has told
+            // it to skip drawing that shadow. `render_udev_frame`/
+            // `winit/render.rs` both subtract this same offset from where
+            // they draw the window's content, specifically so the client's
+            // visible content lands at `geom.x, geom.y` instead of a
+            // shadow-margin's width/height short of it - `space` has to
+            // agree with that adjustment, not just rendering, or every
+            // click computed via `win_relative = pos - space_loc` would
+            // land `content_offset` short of whatever the user actually
+            // clicked on: rendering moves the content, hit-testing keeps
+            // routing against where the client's raw, unshifted buffer
+            // origin used to be.
+            let content_offset = w.geometry().loc;
+            self.space.map_element(w.clone(), (geom.x - content_offset.x, geom.y + band - content_offset.y), false);
             moved = true;
             if let Some(top) = w.toplevel() {
                 // xdg-shell position is a purely compositor-side concept --
