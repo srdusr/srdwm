@@ -89,6 +89,29 @@ pub(crate) fn layer_surface_under_layers(state: &CompState, pos: Point<f64, Logi
             if !geo.to_f64().contains(local) {
                 continue;
             }
+            // Temporary: tracing a live report that a bottom-anchored
+            // layer surface (a dock) receives no pointer input at all,
+            // despite its own committed input region - as measured from
+            // the AGS side - covering the point being tested. Logs
+            // exactly what this compositor's own view of that surface is
+            // at the moment of the hit-test, so the two sides' numbers can
+            // be compared directly instead of guessed at. Remove once
+            // that's settled.
+            let local_in_surface = local - geo.loc.to_f64();
+            // `None` here means "no region ever committed" - per-protocol
+            // that means the *whole* surface is input-sensitive, not that
+            // nothing is, so it is its own distinct, meaningful answer.
+            let region_dump = with_states(layer.wl_surface(), |states| {
+                states.cached_state.get::<smithay::wayland::compositor::SurfaceAttributes>().current().input_region.as_ref().map(|r| r.rects.clone())
+            });
+            log::info!(
+                "layer_hit_test: layer={:?} namespace={:?} geo={:?} local_in_surface={:?} input_region={:?}",
+                layer_kind,
+                layer.namespace(),
+                geo,
+                local_in_surface,
+                region_dump
+            );
             if let Some((surface, surface_loc)) = layer.surface_under(local - geo.loc.to_f64(), WindowSurfaceType::ALL) {
                 return Some((surface, origin + geo.loc + surface_loc));
             }
