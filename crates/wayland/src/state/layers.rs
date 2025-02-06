@@ -61,29 +61,13 @@ impl CompState {
         }
         let has_buffer = with_renderer_surface_state(surface, |state: &mut RendererSurfaceState| state.buffer().is_some()).unwrap_or(false);
 
-        // TEMPORARY diagnostic for the "AGS dock reserves its exclusive
-        // zone but never paints" investigation, relayed from the AGS peer
-        // session - this function's own `has_buffer`-based hide/show logic
-        // (see the doc comment above) is the leading suspect: if a client
-        // ever legitimately commits a null buffer for a reason other than
-        // an intentional hide (an internal `Gtk.Revealer` transition
-        // artifact, a resize-in-progress commit), this treats it as a hide,
-        // `unmap_layer`s it, and requires a *later* has-buffer commit to
-        // ever come back - which would look exactly like this symptom if
-        // the client's own state machine doesn't expect the compositor to
-        // have done that and never re-triggers one. Logs every call for
-        // every layer surface, not just suspected ones, since which
-        // surface is actually affected isn't confirmed yet. Remove once
-        // resolved.
-        log::warn!("LAYER-VIS-DIAG surface={:?} has_buffer={has_buffer} already_hidden={}", surface.id(), self.hidden_layer_surfaces.contains_key(surface));
-
         if has_buffer {
+            self.layer_surfaces_shown_once.insert(surface.clone());
             let Some((output, layer)) = self.hidden_layer_surfaces.remove(surface) else { return };
             let mut map = layer_map_for_output(&output);
             let zone_before = map.non_exclusive_zone();
             let _ = map.map_layer(&layer);
             let zone_after = map.non_exclusive_zone();
-            log::warn!("LAYER-VIS-DIAG re-mapped namespace={:?} zone_before={zone_before:?} zone_after={zone_after:?}", layer.namespace());
             if zone_after != zone_before {
                 self.pending.borrow_mut().push(CoreEvent::MonitorAdded(srdwm_core::Monitor::new(0, "", srdwm_core::Rect::new(0, 0, 0, 0))));
             }
@@ -91,6 +75,13 @@ impl CompState {
         }
 
         if self.hidden_layer_surfaces.contains_key(surface) {
+            return;
+        }
+        // A commit with no buffer on a surface that has never shown one
+        // yet is the ack-configure step of realization, not a hide - see
+        // `layer_surfaces_shown_once`'s own doc comment. Only a surface
+        // that has genuinely been visible at least once can be hidden.
+        if !self.layer_surfaces_shown_once.contains(surface) {
             return;
         }
         for output in self.outputs().cloned().collect::<Vec<_>>() {

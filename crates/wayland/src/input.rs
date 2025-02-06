@@ -17,6 +17,7 @@ use smithay::input::keyboard::FilterResult;
 use smithay::input::pointer::{ButtonEvent, MotionEvent};
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::Resource as _;
 use smithay::utils::{Logical, Point, SERIAL_COUNTER};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::wlr_layer::{Anchor, ExclusiveZone, KeyboardInteractivity, Layer, LayerSurfaceCachedState};
@@ -89,25 +90,27 @@ pub(crate) fn layer_surface_under_layers(state: &CompState, pos: Point<f64, Logi
             if !geo.to_f64().contains(local) {
                 continue;
             }
-            // Temporary: tracing a live report that a bottom-anchored
-            // layer surface (a dock) receives no pointer input at all,
-            // despite its own committed input region - as measured from
-            // the AGS side - covering the point being tested. Logs
-            // exactly what this compositor's own view of that surface is
-            // at the moment of the hit-test, so the two sides' numbers can
-            // be compared directly instead of guessed at. Remove once
-            // that's settled.
+            // Temporary: verifying the `layer_surfaces_shown_once` fix
+            // (state/layers.rs) actually stops a reused `wl_surface`'s
+            // stale layer-shell entry from outliving its role destroy --
+            // live-reproduced this session as a full-monitor click-catcher
+            // popup whose hit-tested geometry came back wider than the
+            // real output after several open/close cycles. Remove once a
+            // restart confirms the geometry stays sane across repeated
+            // popup toggles.
             let local_in_surface = local - geo.loc.to_f64();
             // `None` here means "no region ever committed" - per-protocol
             // that means the *whole* surface is input-sensitive, not that
-            // nothing is, so it is its own distinct, meaningful answer.
+            // nothing is, so it is its own distinct, meaningful answer from
+            // `Some([])` (a region was committed and it is empty).
             let region_dump = with_states(layer.wl_surface(), |states| {
                 states.cached_state.get::<smithay::wayland::compositor::SurfaceAttributes>().current().input_region.as_ref().map(|r| r.rects.clone())
             });
             log::info!(
-                "layer_hit_test: layer={:?} namespace={:?} geo={:?} local_in_surface={:?} input_region={:?}",
+                "layer_hit_test: layer={:?} namespace={:?} surface={:?} geo={:?} local_in_surface={:?} input_region={:?}",
                 layer_kind,
                 layer.namespace(),
+                layer.wl_surface().id(),
                 geo,
                 local_in_surface,
                 region_dump

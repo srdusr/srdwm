@@ -661,6 +661,15 @@ impl WlrLayerShellHandler for CompState {
         // `new_surface` - see that function's doc comment for the bug
         // this exists to route around.
         self.dead_layer_surfaces.insert(surface.wl_surface().clone());
+        // GTK (confirmed live via an AGS peer session's WAYLAND_DEBUG trace)
+        // reuses the same `wl_surface` for the next `get_layer_surface` role
+        // rather than creating a fresh one - so without this, a "shown at
+        // least once" flag from *this* role would leak onto the next one
+        // and make `sync_layer_visibility` treat that new role's own
+        // ack-configure commit as eligible to hide again, the same bug
+        // `layer_surfaces_shown_once` exists to prevent, just reintroduced
+        // for exactly the reused-surface case that matters here.
+        self.layer_surfaces_shown_once.remove(surface.wl_surface());
         // The surface belongs to exactly one output's map, but which one is
         // the client's choice, so unmap from whichever holds it.
         for output in self.outputs().cloned().collect::<Vec<_>>() {

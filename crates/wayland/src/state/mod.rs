@@ -303,6 +303,27 @@ pub(crate) struct CompState {
     /// again on its own - this is the only way `sync_layer_visibility`
     /// can re-map it once the client commits real content again.
     pub(crate) hidden_layer_surfaces: HashMap<WlSurface, (smithay::output::Output, smithay::desktop::LayerSurface)>,
+    /// Layer surfaces `sync_layer_visibility` has seen commit an actual
+    /// buffer at least once. A layer-shell client's realization sequence is
+    /// (commit with no buffer -> receive configure -> commit with no buffer
+    /// again to ack it -> *then* attach and commit real content), and that
+    /// middle ack-commit is indistinguishable from a real "hide" (a null-
+    /// buffer commit on an already-visible surface) by buffer-presence
+    /// alone - both are "committed, no buffer". Without this, every
+    /// layer-shell surface's very first realization spuriously unmapped and
+    /// immediately remapped itself through `sync_layer_visibility`, doubling
+    /// the number of `LayerMap::arrange()` passes on every single popup
+    /// open (confirmed live: an AGS popup toggle logged unmapped/re-mapped
+    /// within the same ~300ms window every time) and giving a second,
+    /// needless remap for `arrange()`'s zone/size math to disagree with
+    /// itself across - the leading suspect for a live-reproduced bug where
+    /// a full-monitor click-catcher popup's hit-tested geometry came back
+    /// wider than the real output after several open/close cycles. Real
+    /// hides (a role kept alive, buffer later reattached) still work:
+    /// `sync_layer_visibility`'s own `has_buffer` branch inserts here before
+    /// this set is ever consulted, so a surface only reaches the unmap path
+    /// once it has legitimately shown something.
+    pub(crate) layer_surfaces_shown_once: HashSet<WlSurface>,
     pub(crate) decorations: HashMap<WindowId, MemoryRenderBuffer>,
     /// The top border strip's rounded-corner bitmap, cached the same way
     /// and at the same trigger points as `decorations` (built in
