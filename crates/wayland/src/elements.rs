@@ -255,7 +255,22 @@ pub(crate) fn popup_targets(state: &CompState) -> Vec<PopupTarget> {
         }
         let toplevel = dwindow.toplevel()?;
         let band = if w.decorated { TITLEBAR_HEIGHT as i32 } else { 0 };
-        Some(PopupTarget { surface: toplevel.wl_surface().clone(), window_pos: (w.geometry.x, w.geometry.y + band) })
+        // Same `xdg_surface::set_window_geometry` offset every other
+        // position computation in this codebase subtracts (see
+        // `state/geometry.rs::sync_geometry`'s doc comment for the full
+        // explanation) - missed here originally. A popup's positioner
+        // places it relative to the parent's *window geometry* (its real
+        // visible content, per the protocol's own text), not the parent's
+        // raw, unshifted buffer origin, so leaving this out put every CSD
+        // window's dropdowns/right-click menus at a content_offset-sized
+        // remove from both where they were drawn *and* where clicks were
+        // tested for them - self-consistently wrong, so a menu still drew
+        // and could still be clicked, just visibly detached from the
+        // window whose click opened it, and increasingly so the deeper a
+        // submenu nested (each level re-adds the same offset).
+        let content_offset = dwindow.geometry().loc;
+        let window_pos = (w.geometry.x - content_offset.x, w.geometry.y + band - content_offset.y);
+        Some(PopupTarget { surface: toplevel.wl_surface().clone(), window_pos })
     });
     let layers = state.outputs.iter().flat_map(|entry| {
         let origin = entry.location;
