@@ -54,6 +54,22 @@ fn install_signal_handlers() {
     unsafe {
         libc::signal(libc::SIGTERM, handle_shutdown_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, handle_shutdown_signal as *const () as libc::sighandler_t);
+        // Every `srd.spawn(...)`/`std::process::Command::spawn` call in this
+        // codebase (`fn_spawn` in config/general.rs, scratchpad toggles,
+        // screenshot commands, XWayland's own child) fires the process and
+        // drops the `Child` handle without ever calling `.wait()` on it --
+        // by design, since a compositor's main loop has no business
+        // blocking on an arbitrary spawned command. Nothing else was
+        // reaping them either, so every one that exited stayed a zombie for
+        // the rest of the session: confirmed live via an AGS peer session's
+        // own `ps`, six zombies (four different programs, half an hour
+        // apart) all parented to this process. Explicitly ignoring SIGCHLD
+        // is the standard POSIX fix for exactly "I spawn children I never
+        // wait() on and don't care about their exit status" - the kernel
+        // reaps them itself the instant they exit, no handler/waitpid loop
+        // needed. Harmless to XWayland's own child processes and to
+        // anything else this compositor ever spawns for the same reason.
+        libc::signal(libc::SIGCHLD, libc::SIG_IGN);
     }
 }
 
