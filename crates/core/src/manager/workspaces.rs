@@ -50,7 +50,14 @@ impl WindowManager {
     /// doesn't need its own separate bookkeeping.
     pub fn switch_workspace(&mut self, id: WorkspaceId) {
         let target = if self.auto_back_and_forth && id == self.current_workspace { self.previous_workspace } else { id };
-        if self.workspaces.iter().any(|w| w.id == target) && target != self.current_workspace {
+        let exists = self.workspaces.iter().any(|w| w.id == target);
+        log::warn!(
+            "SWITCH-WS-DIAG requested_id={id} auto_back_and_forth={} current={} previous={} target={target} exists={exists}",
+            self.auto_back_and_forth,
+            self.current_workspace,
+            self.previous_workspace
+        );
+        if exists && target != self.current_workspace {
             self.previous_workspace = self.current_workspace;
             self.current_workspace = target;
         }

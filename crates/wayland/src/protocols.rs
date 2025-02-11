@@ -346,9 +346,19 @@ impl XdgShellHandler for CompState {
     /// `resize_request` already ignore the same parameter.
     fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, serial: Serial) {
         let popup = PopupKind::Xdg(surface);
-        let Ok(root) = find_popup_root_surface(&popup) else { return };
+        let Ok(root) = find_popup_root_surface(&popup) else {
+            log::warn!("POPUP-GRAB-DIAG find_popup_root_surface failed");
+            return;
+        };
         let seat = self.seat.clone();
-        let Ok(grab) = self.popups.grab_popup(root, popup, &seat, serial) else { return };
+        let grab = match self.popups.grab_popup(root, popup, &seat, serial) {
+            Ok(g) => g,
+            Err(e) => {
+                log::warn!("POPUP-GRAB-DIAG grab_popup failed: {e:?}");
+                return;
+            }
+        };
+        log::warn!("POPUP-GRAB-DIAG grab established, has_pointer={} has_keyboard={}", seat.get_pointer().is_some(), seat.get_keyboard().is_some());
         if let Some(keyboard) = seat.get_keyboard() {
             keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
         }
