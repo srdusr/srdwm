@@ -213,7 +213,11 @@ fn notify_idle_activity(state: &mut CompState) {
 /// staleness trigger (rapid clicks, a tap-to-click event with no
 /// intervening motion delta, etc.) one cause at a time.
 #[allow(clippy::type_complexity)]
-fn refresh_pointer_focus(state: &mut CompState, pos: Point<f64, Logical>, time: u32) -> (Option<(WindowId, TitlebarHit)>, bool, bool, Option<WindowId>) {
+fn refresh_pointer_focus(
+    state: &mut CompState,
+    pos: Point<f64, Logical>,
+    time: u32,
+) -> (Option<(WindowId, TitlebarHit)>, bool, bool, Option<WindowId>, Option<(WlSurface, Point<f64, Logical>)>) {
     // Checked before literally everything else, including layer-shell --
     // see `elements::popup_surface_under`'s own doc comment for why: a
     // popup (tooltip, dropdown, right-click menu) always renders on top of
@@ -245,17 +249,17 @@ fn refresh_pointer_focus(state: &mut CompState, pos: Point<f64, Logical>, time: 
         .map(|(id, _)| id)
         .or_else(|| under.as_ref().and_then(|(window, _)| dwindow_wl_surface(window)).and_then(|s| state.surface_to_id.get(&s).copied()));
 
-    let Some(pointer) = state.seat.get_pointer() else { return (hit, over_layer_surface, over_content, hovered_id) };
-    if let Some((surface, loc)) = popup_hit {
-        let surface_loc = pos - loc.to_f64();
-        pointer.motion(state, Some((surface, loc.to_f64())), &MotionEvent { location: surface_loc, serial: SERIAL_COUNTER.next_serial(), time });
+    let Some(pointer) = state.seat.get_pointer() else { return (hit, over_layer_surface, over_content, hovered_id, None) };
+    // Freshly resolved target from ordinary hit-testing - overridden below
+    // by `pointer_button_grab` when a button is held, per its own doc
+    // comment (the Wayland implicit-grab rule).
+    let resolved: Option<(WlSurface, Point<f64, Logical>)> = if let Some((surface, loc)) = popup_hit {
+        Some((surface, loc.to_f64()))
     } else if let Some((surface, loc)) = layer_hit {
-        let surface_loc = pos - loc.to_f64();
-        pointer.motion(state, Some((surface, loc.to_f64())), &MotionEvent { location: surface_loc, serial: SERIAL_COUNTER.next_serial(), time });
+        Some((surface, loc.to_f64()))
     } else if hit.is_some() {
-        // Over our own decoration - no client focus.
-        pointer.motion(state, None, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
-    } else if let Some((window, loc)) = under {
+        None // Over our own decoration - no client focus.
+    } else if let Some((window, loc)) = &under {
         // `window.toplevel()` is only ever `Some` for a native xdg-shell
         // surface - it's `None` for every XWayland window, and even for a
         // plain xdg-shell one it's always the *root* surface regardless of
@@ -269,21 +273,21 @@ fn refresh_pointer_focus(state: &mut CompState, pos: Point<f64, Logical>, time: 
         // unifies the xdg-shell/X11 cases the way `dwindow_wl_surface` does
         // elsewhere in this module.
         let win_relative = pos - loc.to_f64();
-        if let Some((surface, offset)) = window.surface_under(win_relative, WindowSurfaceType::ALL) {
-            let surface_loc = win_relative - offset.to_f64();
-            let surface_origin = (loc + offset).to_f64();
-            pointer.motion(state, Some((surface, surface_origin)), &MotionEvent { location: surface_loc, serial: SERIAL_COUNTER.next_serial(), time });
-        }
-    } else if let Some((surface, loc)) = background_layer_surface_under(state, pos) {
+        window.surface_under(win_relative, WindowSurfaceType::ALL).map(|(surface, offset)| (surface, (*loc + offset).to_f64()))
+    } else {
         // Bare desktop, no window there either - last chance for a
         // `Bottom`/`Background` layer surface (see
         // `layer_surface_under_layers`'s doc comment) before giving up.
-        let surface_loc = pos - loc.to_f64();
-        pointer.motion(state, Some((surface, loc.to_f64())), &MotionEvent { location: surface_loc, serial: SERIAL_COUNTER.next_serial(), time });
+        background_layer_surface_under(state, pos).map(|(surface, loc)| (surface, loc.to_f64()))
+    };
+    let delivery = state.pointer_button_grab.clone().or_else(|| resolved.clone());
+    if let Some((surface, origin)) = delivery {
+        let surface_loc = pos - origin;
+        pointer.motion(state, Some((surface, origin)), &MotionEvent { location: surface_loc, serial: SERIAL_COUNTER.next_serial(), time });
     } else {
         pointer.motion(state, None, &MotionEvent { location: pos, serial: SERIAL_COUNTER.next_serial(), time });
     }
-    (hit, over_layer_surface, over_content, hovered_id)
+    (hit, over_layer_surface, over_content, hovered_id, resolved)
 }
 
 pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Logical>, time: u32) {
@@ -300,7 +304,7 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
         return;
     }
 
-    let (hit, over_layer_surface, over_content, hovered_id) = refresh_pointer_focus(state, pos, time);
+    let (hit, over_layer_surface, over_content, hovered_id, _) = refresh_pointer_focus(state, pos, time);
     let Some(pointer) = state.seat.get_pointer() else { return };
     // `PointerHandle::motion`/`button`/`axis` only queue the event with the
     // active grab - nothing sends `wl_pointer.frame` on its own (confirmed
@@ -734,7 +738,22 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
     // A no-op from the client's perspective when focus was already correct
     // (an idempotent motion event at the same surface-local coordinates it
     // already has), so this costs nothing in the common case.
-    refresh_pointer_focus(state, pos, time);
+    //
+    // Also where `pointer_button_grab` starts and ends - see its own doc
+    // comment. Only the 0->1 transition captures a new grab target (a
+    // second button going down mid-gesture keeps whatever the first press
+    // already locked in); only the ->0 transition releases it, and not
+    // before this press/release's own `pointer.button()` below still goes
+    // out under the (still-active) grab.
+    let (.., resolved) = refresh_pointer_focus(state, pos, time);
+    if pressed {
+        if state.pointer_buttons_held == 0 {
+            state.pointer_button_grab = resolved;
+        }
+        state.pointer_buttons_held += 1;
+    } else {
+        state.pointer_buttons_held = state.pointer_buttons_held.saturating_sub(1);
+    }
     if let Some(pointer) = state.seat.get_pointer() {
         let button_state = if pressed { BackendButtonState::Pressed } else { BackendButtonState::Released };
         pointer.button(state, &ButtonEvent { serial, time, button, state: button_state });
@@ -742,6 +761,9 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
         // alone never tells the client the event is ready to act on, only
         // `frame` does.
         pointer.frame(state);
+    }
+    if !pressed && state.pointer_buttons_held == 0 {
+        state.pointer_button_grab = None;
     }
 }
 

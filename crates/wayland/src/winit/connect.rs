@@ -135,6 +135,8 @@ impl WaylandPlatform {
             _idle_inhibit_manager_state: smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<CompState>(&dh),
             idle_inhibiting_surfaces: Vec::new(),
             last_idle_notify: None,
+            pointer_button_grab: None,
+            pointer_buttons_held: 0,
             window_anims: HashMap::new(),
             last_broadcast_flags: HashMap::new(),
             last_broadcast_workspace: None,

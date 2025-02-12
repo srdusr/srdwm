@@ -475,6 +475,35 @@ pub(crate) struct CompState {
     /// event this session's earlier per-motion diagnostic-logging
     /// regression already proved is worth being careful around) needs one.
     pub(crate) last_idle_notify: Option<Instant>,
+    /// The Wayland-standard "implicit grab": once a pointer button goes
+    /// down over a surface, every subsequent motion/button event - no
+    /// matter where the pointer physically ends up - has to keep being
+    /// delivered to that *same* surface until every held button is
+    /// released, not whatever a fresh hit-test happens to land on next.
+    /// Nothing implemented this before: every motion event re-ran the same
+    /// popup/layer/content hit-test from scratch and called `pointer.
+    /// motion()` with whatever it found *right now*, so the moment a real
+    /// human's hand drifted even slightly outside the pressed surface's own
+    /// bounds mid-gesture (trivially easy during a fast drag - a mouse
+    /// does not move in a perfectly straight line), that client received an
+    /// unrequested `leave` in the middle of its own gesture. GTK's drag
+    /// recognizers (a `GtkHeaderBar`'s move-the-window gesture, concretely)
+    /// treat a mid-gesture `leave` as "this isn't coherent, abort" - which
+    /// reads as "dragging this window's title bar does nothing at all,"
+    /// live-reproduced this session. `(surface, origin)` is captured once,
+    /// from the same resolution `refresh_pointer_focus` already computes,
+    /// the instant the held-button count goes from 0 to 1; `origin` is
+    /// reused for every event under the grab so surface-local coordinates
+    /// keep updating correctly even though the target surface no longer
+    /// does.
+    pub(crate) pointer_button_grab: Option<(WlSurface, Point<f64, Logical>)>,
+    /// How many pointer buttons are currently held - what actually decides
+    /// when [`Self::pointer_button_grab`] starts (0 -> 1) and ends (only
+    /// once every button, not just one of several held at once, comes back
+    /// up), matching the real Wayland implicit-grab rule instead of the
+    /// single-button assumption that would break as soon as a drag and a
+    /// second accidental button overlapped.
+    pub(crate) pointer_buttons_held: u32,
     /// Windows currently mid-tween - see `WindowAnim` and `sync_geometry`'s
     /// `anim_from` handling. Driven forward once per frame by
     /// `tick_animations`, called from both backends' poll loops.
