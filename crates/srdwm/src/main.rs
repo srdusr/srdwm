@@ -1,5 +1,5 @@
 use srdwm_config::Engine;
-use srdwm_core::{Event, WindowManager};
+use srdwm_core::{Event, WindowId, WindowManager};
 use srdwm_platform::{Platform, PlatformKind};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -355,7 +355,7 @@ fn default_platform_kind() -> PlatformKind {
 /// is explicitly shown via `Platform::restore` before geometry/decoration
 /// are pushed, since on X11 `apply_geometry` only reconfigures an existing
 /// mapping, it doesn't create one.
-fn sync(wm: &Rc<RefCell<WindowManager>>, platform: &mut dyn Platform) {
+fn sync(wm: &Rc<RefCell<WindowManager>>, platform: &mut dyn Platform, last_synced_focus: &mut Option<WindowId>) {
     for id in wm.borrow_mut().take_close_requests() {
         if let Err(e) = platform.close(id) {
             log::warn!("close({id}) failed: {e}");
@@ -390,14 +390,33 @@ fn sync(wm: &Rc<RefCell<WindowManager>>, platform: &mut dyn Platform) {
     // `_NET_ACTIVE_WINDOW` never moved - confirmed live: `srd dispatch
     // focus` on an XWayland window left it at `0x0`. `Platform::focus`'s
     // own impls now go through the same real-focus-sync path a mouse click
-    // already uses (see their doc comments), so calling it here every tick
-    // closes the gap for all of those callers at once. Cheap when nothing
-    // actually changed - `set_keyboard_focus` early-returns if the target
-    // surface is already focused.
-    if let Some(id) = focused {
-        if let Err(e) = platform.focus(id) {
-            log::warn!("focus({id}) failed: {e}");
+    // already uses (see their doc comments), so calling it here every dirty
+    // tick closes the gap for all of those callers at once.
+    //
+    // Gated on the focused id actually having *changed* since the last
+    // call, not just "call every time, it's cheap when nothing changed" as
+    // originally reasoned - that reasoning covered `set_keyboard_focus`
+    // alone (a real early-return-if-already-focused no-op) but missed that
+    // `focus_window` (core) has its own side effect of switching to the
+    // focused window's workspace if it differs from the current one. Live-
+    // reproduced this session: `srd dispatch activate_workspace` changed
+    // `current_workspace` correctly, and within the same dirty tick this
+    // unconditional re-assertion of the still-focused (unchanged, still on
+    // the *old* workspace) window's focus saw that mismatch and switched
+    // straight back - every workspace switch with no accompanying focus
+    // change silently undid itself within milliseconds, confirmed via the
+    // core diagnostic logging two `switch_workspace` calls a few
+    // milliseconds apart, the second putting it right back where it
+    // started. Re-asserting real platform focus still happens on every
+    // *genuine* focus change, which is everything the comment above this
+    // one actually needed fixed.
+    if focused != *last_synced_focus {
+        if let Some(id) = focused {
+            if let Err(e) = platform.focus(id) {
+                log::warn!("focus({id}) failed: {e}");
+            }
         }
+        *last_synced_focus = focused;
     }
     let (visible, hidden) = {
         let wm = wm.borrow();
@@ -551,7 +570,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         log::debug!("no 'ready' handler registered");
     }
 
-    sync(&wm, platform.as_mut());
+    let mut last_synced_focus: Option<WindowId> = None;
+    sync(&wm, platform.as_mut(), &mut last_synced_focus);
 
     while running.get() {
         if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
@@ -621,7 +641,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if dirty {
-            sync(&wm, platform.as_mut());
+            sync(&wm, platform.as_mut(), &mut last_synced_focus);
         }
     }
 
