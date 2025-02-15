@@ -67,7 +67,33 @@ pub(crate) fn spawn(handle: &LoopHandle<'static, CompState>, display_handle: &sm
         log::warn!("could not set up an -shm wrapper for XWayland ({e}); XWayland windows will likely fail to render - see xwayland.rs's `spawn` docs");
     }
 
-    let (xwayland, client) = XWayland::spawn(display_handle, None, std::iter::empty::<(String, String)>(), true, std::process::Stdio::null(), std::process::Stdio::null(), |_| ())?;
+    // Xwayland's own stdout/stderr, not `/dev/null` - a real session hit
+    // XWayland never becoming ready at all (no `Ready`, no `Error`, no
+    // process left running, `com.canonical.AppMenu.Registrar` left
+    // permanently unclaimed as one downstream symptom of it) with
+    // *nothing* logged anywhere to explain why, because whatever Xwayland
+    // itself would have printed about the failure was being thrown away
+    // right here. A manual, standalone run of the exact same binary (and
+    // of the `-shm` wrapper `ensure_shm_wrapper_on_path` installs) both
+    // succeeded outside this process, which points at something specific
+    // to *this* process's environment/context rather than the binary
+    // itself - but confirming that needs Xwayland's own words, not
+    // another guess. Redirected to a file rather than piped and read back
+    // in-process: a real stdout/stderr handle Xwayland can just write to
+    // synchronously, no async plumbing needed for a diagnostic that's
+    // meant to be read after the fact, not reacted to live.
+    let xwayland_log = xwayland_log_path();
+    if let Some(dir) = xwayland_log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let stdio = |path: &std::path::Path| -> std::process::Stdio {
+        std::fs::OpenOptions::new().create(true).append(true).open(path).map(std::process::Stdio::from).unwrap_or_else(|e| {
+            log::warn!("xwayland: couldn't open {path:?} for Xwayland's own stdout/stderr ({e}); falling back to /dev/null");
+            std::process::Stdio::null()
+        })
+    };
+    let (xwayland, client) =
+        XWayland::spawn(display_handle, None, std::iter::empty::<(String, String)>(), true, stdio(&xwayland_log), stdio(&xwayland_log), |_| ())?;
 
     let handle_for_ready = handle.clone();
     handle
@@ -335,6 +361,61 @@ impl EwmhState {
         Some(srdwm_core::GlobalMenu { bus_name, menu_path, app_path, window_path, source })
     }
 
+    /// Selects `PropertyChangeMask` on `xid` - without this, the X server
+    /// never sends this connection a `PropertyNotify` for it at all, no
+    /// matter what changes. Call once, right after a window finishes
+    /// setup; see `poll_property_events`'s own doc comment for why this is
+    /// needed on top of `update_net_active_window`'s focus-triggered read.
+    fn watch_property_changes(&self, xid: u32) {
+        use smithay::reexports::x11rb::connection::Connection;
+        use smithay::reexports::x11rb::protocol::xproto::{ChangeWindowAttributesAux, ConnectionExt as _, EventMask};
+        if let Err(e) = self.conn.change_window_attributes(xid, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE)) {
+            log::warn!("xwayland: couldn't watch xid={xid} for global-menu property changes: {e}");
+            return;
+        }
+        let _ = self.conn.flush();
+    }
+
+    /// Every xid, watched via `watch_property_changes`, whose global-menu
+    /// atom changed since the last call - non-blocking, `poll_for_event`
+    /// never waits on the network.
+    ///
+    /// Needed on top of `update_net_active_window`'s per-focus-change read:
+    /// that read only fires when a window *gains* focus, but most toolkits
+    /// set `_GTK_UNIQUE_BUS_NAME`/the menu-path atom once, shortly after
+    /// mapping - for an already-focused window (the common case: a freshly
+    /// launched app almost always opens focused) that registration can
+    /// finish *after* the one focus-triggered read already ran, leaving
+    /// `Window.global_menu` stuck at `None` until the user clicks away and
+    /// back. Reported live as "global menu doesn't show up for some
+    /// windows" - this is why it was intermittent rather than affecting
+    /// every window the same way: it depended on a race between window-map
+    /// and D-Bus registration that a plain focus-change hook has no way to
+    /// see.
+    fn poll_property_events(&self) -> Vec<u32> {
+        use smithay::reexports::x11rb::connection::Connection;
+        use smithay::reexports::x11rb::protocol::Event;
+        let menu_atoms = [
+            self.gtk_unique_bus_name,
+            self.gtk_application_object_path,
+            self.gtk_window_object_path,
+            self.gtk_menubar_object_path,
+            self.gtk_app_menu_object_path,
+            self.unity_object_path,
+            self.kde_appmenu_service_name,
+            self.kde_appmenu_object_path,
+        ];
+        let mut xids = Vec::new();
+        while let Ok(Some(event)) = self.conn.poll_for_event() {
+            if let Event::PropertyNotify(n) = event {
+                if menu_atoms.contains(&Some(n.atom)) && !xids.contains(&n.window) {
+                    xids.push(n.window);
+                }
+            }
+        }
+        xids
+    }
+
     /// `xid` is `None` when focus is on a native Wayland window (or
     /// nothing) rather than an X11 one - `_NET_ACTIVE_WINDOW`'s value is
     /// only meaningful for X11 clients, so this writes `0` (the documented
@@ -399,6 +480,25 @@ impl CompState {
         }
     }
 
+    /// Call once per event-loop tick (same cadence as
+    /// `apply_registrar_events`): applies every global-menu property change
+    /// `EwmhState::poll_property_events` picked up since the last call. See
+    /// that method's own doc comment for why this exists on top of the
+    /// focus-triggered read in `update_net_active_window`.
+    pub(crate) fn poll_global_menu_properties(&mut self) {
+        let xids = match &self.ewmh {
+            Some(ewmh) => ewmh.poll_property_events(),
+            None => return,
+        };
+        for xid in xids {
+            let Some(&id) = self.xwayland_windows.get(&xid) else { continue };
+            let menu = self.ewmh.as_ref().and_then(|ewmh| ewmh.read_global_menu(xid));
+            if let Some(w) = self.wm.borrow_mut().window_mut(id) {
+                w.global_menu = menu;
+            }
+        }
+    }
+
     /// Drains `AppmenuRegistrarState`'s channel and applies every event to
     /// the matching `Window.global_menu` - call once per event-loop tick
     /// (`poll_events`), same as `IpcServer::poll`.
@@ -454,6 +554,18 @@ impl CompState {
 /// the wrapper instead of the real binary. The wrapper always re-execs the
 /// real `Xwayland` with `-shm` prepended to whatever arguments it was
 /// given, so it's transparent to everything else `spawn` sets up.
+/// Where Xwayland's own stdout/stderr land - `$XDG_STATE_HOME/srd/
+/// xwayland.log` (`~/.local/state/srd/xwayland.log` fallback), same
+/// directory `monitor_layout.rs` already uses for this compositor's own
+/// state, appended to (not truncated) so a restart doesn't erase whatever
+/// the previous run's Xwayland process said right before this one starts.
+fn xwayland_log_path() -> std::path::PathBuf {
+    let dir = std::env::var_os("XDG_STATE_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| {
+        std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/state")).unwrap_or_else(std::env::temp_dir)
+    });
+    dir.join("srd").join("xwayland.log")
+}
+
 fn ensure_shm_wrapper_on_path() -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -573,6 +685,12 @@ impl CompState {
         self.set_keyboard_focus(Some(wl_surface));
         self.pending.borrow_mut().push(CoreEvent::WindowCreated(id));
         self.update_net_client_list();
+        // See `poll_global_menu_properties`'s doc comment: without this,
+        // this connection never receives a `PropertyNotify` for this
+        // window at all, no matter what its global-menu atoms later do.
+        if let Some(ewmh) = &self.ewmh {
+            ewmh.watch_property_changes(surface.window_id());
+        }
         crate::foreign_toplevel::window_created(self, id);
     }
 

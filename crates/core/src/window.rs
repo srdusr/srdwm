@@ -119,6 +119,31 @@ pub fn classify_menu_source(gtk_menu_path: Option<String>, is_real_gtk_applicati
     }
 }
 
+/// Whether `app_id` almost certainly belongs to an application that draws
+/// its own header bar (a `GtkHeaderBar`/`Adw.HeaderBar` widget embedded
+/// directly in its content, unconditionally) regardless of whatever
+/// `xdg-decoration` mode actually gets negotiated - see
+/// `crates/wayland/src/protocols.rs`'s `XdgDecorationHandler` doc comment
+/// for why the protocol itself can't tell such an app apart from a normal
+/// one: both Firefox and Nemo negotiate a decoration mode fine, and still
+/// draw a second title row under srdwm's server-side one regardless.
+/// Confirmed live for both (a screenshot showing two stacked bars) before
+/// either got its own `decorated = false` entry in `rules.lua`.
+///
+/// `org.gnome.*` app ids are the one case general enough to catch here
+/// instead of needing a `rules.lua` entry added for each one as it's
+/// discovered live: the GNOME HIG mandates every one of GNOME's own apps
+/// use an embedded header bar, with no exceptions, so the namespace alone
+/// is enough to know in advance. Deliberately narrow: a third-party GTK4/
+/// libadwaita app under `io.github.*`, or any other reverse-DNS scheme, is
+/// left to `rules.lua`'s per-app list instead - those toolkits don't share
+/// GNOME's HIG mandate, so guessing from the app id alone there would
+/// misclassify plenty of ordinary, well-behaved server-side-decorated apps
+/// that also happen to use a reverse-DNS-style id.
+pub fn likely_draws_own_titlebar(app_id: &str) -> bool {
+    app_id.to_ascii_lowercase().starts_with("org.gnome.")
+}
+
 /// State of a single managed window. This is platform-independent: backends
 /// (X11, Wayland, ...) own the real surface/client handle and keep a `Window`
 /// in sync with it via `srdwm_core::WindowManager`.
@@ -135,6 +160,19 @@ pub struct Window {
     /// Geometry to restore to when un-maximizing.
     pub restore_geometry: Option<Rect>,
     pub decorated: bool,
+    /// Whether this window declared an `xdg_toplevel` parent (`set_parent`)
+    /// - a dialog/utility window belonging to another one, not a normal
+    /// top-level app window. Backend-set (the wayland crate reads the real
+    /// `ToplevelSurface::parent()`, refreshed on every decoration redraw),
+    /// same as `decorated` itself; `core` has no protocol concept of its
+    /// own to derive this from. Only ever `true` for a genuine `xdg_
+    /// toplevel` client that set a parent - an XWayland dialog's own
+    /// `WM_TRANSIENT_FOR` isn't read yet, so this misses those specifically
+    /// (a real, known gap, not an oversight). Requested directly: a
+    /// dialog's titlebar should show only a close button, no traffic
+    /// lights - see `hit_test`'s and `decoration::render_titlebar`'s own
+    /// use of this for what actually changes.
+    pub is_dialog: bool,
     /// `decorated`'s value from just before entering fullscreen, restored
     /// on exit - see `WindowManager::toggle_fullscreen`'s doc comment on
     /// why this can't just hardcode `true` back.
@@ -205,6 +243,7 @@ impl Window {
             geometry: Rect::new(0, 0, 640, 480),
             restore_geometry: None,
             decorated: true,
+            is_dialog: false,
             restore_decorated: None,
             floating: false,
             minimized: false,
@@ -217,7 +256,13 @@ impl Window {
             corner_radius: 6,
             opacity: 1.0,
             resize_margin: None,
-            workspace: 0,
+            // Always overwritten by `WindowManager::add_window` before this
+            // is ever read for real (to the current workspace, or a rule's
+            // own `workspace` action) - `1`, not `0`, only because
+            // workspace ids are 1-based now (see `WindowManager::new`'s own
+            // doc comment), so this placeholder still names a workspace
+            // that could plausibly exist.
+            workspace: 1,
             monitor: 0,
             rules_applied: false,
             anim_from: None,
@@ -228,7 +273,59 @@ impl Window {
 
 /// The height, in pixels, of the drawn title bar. Shared between backends so
 /// hit-testing and rendering agree on the same band.
-pub const TITLEBAR_HEIGHT: u32 = 30;
+///
+/// `32`, measured directly against a real, live Firefox window: a
+/// side-by-side screenshot of both windows at identical scale, scanned
+/// column-by-column for the pixel row where the titlebar's own background
+/// colour gives way to the next row down (Firefox's tab strip), put that
+/// boundary at row 32 sharp. An earlier value of `38` came from a Nemo
+/// headerbar measured the same way (~40px) - Nemo's own headerbar carries
+/// extra chrome (a search/menu button row) a bare titlebar doesn't, so it
+/// isn't the right reference once Firefox is the thing actually being
+/// matched. `ThemeConfig::default_corner_radius` moves with this (see its
+/// own doc comment) to keep the same `radius / TITLEBAR_HEIGHT` ratio
+/// rather than just looking proportionally smaller on top of already being
+/// shorter.
+pub const TITLEBAR_HEIGHT: u32 = 32;
+/// The centre-to-centre spacing between titlebar buttons, and the size of
+/// the square each one's own dot/click-box is drawn/hit-tested inside --
+/// deliberately *not* the same value as `TITLEBAR_HEIGHT` (which used to
+/// double as this too). Reported live: with the two tied together, growing
+/// `TITLEBAR_HEIGHT` to `38` to match a real GTK headerbar's own *row*
+/// height also silently grew the buttons themselves to a visibly bigger
+/// scale than that same headerbar's own buttons - a real GTK/Firefox CSD
+/// row reserves generous padding above and below a comparatively compact
+/// button cluster, not one dimension sized off the other. `24`, matching a
+/// real Firefox window's own measured button-to-button spacing (via
+/// screenshot, at this system's own scale) - kept a separate constant
+/// from `TITLEBAR_HEIGHT` specifically so the two can each move for their
+/// own reason without dragging the other along. `decoration::button_box`
+/// centres this smaller box vertically inside the taller `TITLEBAR_HEIGHT`
+/// band for rendering; `ResizeEdge::hit_test` below has no matching
+/// vertical narrowing to do - a click anywhere in the titlebar's own
+/// height column-wise inside a button's `BUTTON_PITCH`-wide slice still
+/// counts as that button, the same generous-vertical-target convention
+/// every mainstream desktop already uses.
+pub const BUTTON_PITCH: u32 = 24;
+/// The gap, in pixels, between the titlebar's own edge (whichever side the
+/// button cluster renders on) and the first button's own click/draw box --
+/// measured directly against a live Firefox window: its visible dot's own
+/// left edge sits 17px in from the window's real left edge, while the
+/// button's own box margin (`decoration::BUTTON_MARGIN_LEFT`, applied to
+/// every box the same way) only accounts for 4px of that. The remaining
+/// `13` is this - a real macOS/GTK titlebar's own leading margin is
+/// visibly bigger than the gap *between* buttons, not the same value
+/// reused for both. Added once, before the first button's own `BUTTON_
+/// PITCH`-spaced offset, on whichever edge `buttons_left` selects (`decoration
+/// ::render_titlebar`'s `offset` calculation, and the matching `left`/
+/// `right` base below in `hit_test` - the two have to move together, the
+/// same "renders on one side, hit-tests on the other" trap every other
+/// button-geometry constant here already has to avoid). Before this
+/// existed, the dead strip between the titlebar's real edge and the first
+/// visible dot silently counted as a hit on that button (`hit_test`'s
+/// slice starts flush with the edge) - clicking blank titlebar background
+/// right at the corner closed the window instead of dragging it.
+pub const BUTTON_CLUSTER_MARGIN: u32 = 13;
 /// Default width, in pixels, of the resize grab band along each window
 /// edge - `WindowManager::resize_margin`'s starting value, read from
 /// `general.resize_margin`, and what every `hit_test` call in this file's
@@ -248,25 +345,53 @@ pub const TITLEBAR_HEIGHT: u32 = 30;
 /// edge back. Still configurable per the doc comment above if 6px turns
 /// out to be too little in the other direction for someone.
 pub const RESIZE_MARGIN: i32 = 6;
-/// Top-edge resize margin for an *undecorated* window specifically --
+/// Resize margin for an *undecorated* window, on every edge and corner --
 /// narrower than [`RESIZE_MARGIN`] on purpose.
 ///
-/// An undecorated (client-side-decorated) window has no titlebar band for
-/// srdwm to treat as a drag handle - Firefox's own tab strip, concretely --
-/// so the client's own header area sits directly at `frame.y` with nothing
-/// srdwm-drawn to grab. The client detects a drag on its own header and
-/// asks to be moved via `xdg_toplevel.move`, but only for clicks that
-/// actually reach it as a normal button press; the full 10px `RESIZE_MARGIN`
-/// swallowed every click within the first 10 rows of the window - including
-/// most of a typical natural grab point near the top of a tab strip - as a
-/// top-edge resize instead, so the client's own move request never fired.
-/// Reported live as "can't drag-move Firefox from its own top bar."
-/// Resize-from-the-top-edge still works (a deliberate earlier trade-off --
-/// see `undecorated_window_still_resizes_from_every_edge_including_top`'s
-/// own comment - since an undecorated window is still a window), just from
-/// a much narrower band that a click meant to grab the tab strip is very
-/// unlikely to land in by accident.
-pub const UNDECORATED_TOP_RESIZE_MARGIN: i32 = 3;
+/// An undecorated (client-side-decorated) window has no srdwm-drawn band
+/// anywhere for srdwm to treat as its own - every pixel right up to each
+/// edge is the client's real content: Firefox's tab strip at the top, its
+/// own window-control dots in a top corner, Nemo's tab-close X hard against
+/// its right edge, a minimize button nowhere near any corner at all. The
+/// full `RESIZE_MARGIN` (and, at a corner, `CORNER_MARGIN`'s further
+/// multiple of it) was tuned for a window srdwm decorates itself, where none
+/// of that applies - the whole titlebar band, buttons included, is checked
+/// before `resize_edge_at` ever runs, so widening its own resize zone never
+/// costs it a click. Applied to an undecorated window instead, that same
+/// width competed with the client's own controls for the same pixels on
+/// every edge, not just the top - first found as "can't drag-move Firefox
+/// from its own top bar" (the original, narrower-top-only version of this
+/// margin), then reported again, live, as real mouse clicks on Nemo's own
+/// tab-close and minimize buttons - one hard against the right edge, the
+/// other not even near a corner - landing "a distance" from the visible
+/// button. Resize-from-every-edge still works (a deliberate trade-off - see
+/// `undecorated_window_still_resizes_from_every_edge_including_top`'s own
+/// comment - since an undecorated window is still a window), just from a
+/// much narrower band on every side that a click meant for the client's own
+/// content is very unlikely to land in by accident. No corner-widening for
+/// an undecorated window at all: that widening exists purely to make a
+/// diagonal drag easier to land on a window srdwm itself has no competing
+/// content in, which is never true here.
+pub const UNDECORATED_RESIZE_MARGIN: i32 = 3;
+/// Top-edge resize margin for a *decorated* window's own titlebar band --
+/// unlike [`UNDECORATED_RESIZE_MARGIN`], this has no client content to
+/// avoid stealing a click from (the whole titlebar band is srdwm's own
+/// drawn UI, not the client's), so it can just reuse [`RESIZE_MARGIN`]
+/// outright rather than needing its own narrower value.
+///
+/// Reported live as a real gap, not a guess: a decorated window's titlebar
+/// had *no* top-edge resize zone at all outside the two tiny diagonal
+/// corners - every other pixel of the band, including the top row,
+/// resolved to `Drag` unconditionally - while an undecorated window
+/// (Firefox) could already be resized from its own top edge via
+/// `UNDECORATED_RESIZE_MARGIN` above. "Can't resize tmux's window from
+/// the top, but can in Firefox" was the exact live report. `hit_test`'s
+/// own decorated-titlebar branch checks a button's x-range *before* this
+/// margin, not after, so a button sitting within the first few rows of
+/// the titlebar (true for every button, since `decoration::button_box`
+/// spans nearly the full titlebar height) still always wins there --
+/// this only ever applies to the button-free part of the band.
+pub const DECORATED_TOP_RESIZE_MARGIN: i32 = RESIZE_MARGIN;
 /// How much wider than [`RESIZE_MARGIN`] a corner's own diagonal-resize
 /// zone reaches, as a multiplier on whatever margin is actually in effect
 /// - see `ResizeEdge::resize_edge_at`'s doc comment for why corners need
@@ -304,7 +429,25 @@ impl ResizeEdge {
     /// client. Resize-from-edge still applies either way: an undecorated
     /// window is still a window, and dragging its (invisible) edge to
     /// resize is still expected to work.
-    pub fn hit_test(frame: Rect, x: i32, y: i32, decorated: bool, border_width: u32, resize_margin: i32) -> Option<TitlebarHit> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn hit_test(
+        frame: Rect,
+        x: i32,
+        y: i32,
+        decorated: bool,
+        border_width: u32,
+        resize_margin: i32,
+        buttons_left: bool,
+        order_override: Option<ButtonOrder>,
+        // `Window::is_dialog`'s resolved value - see its own doc comment.
+        // A dialog only ever shows/recognizes Close, never Minimize/
+        // Maximize, regardless of `order_override`; must stay in exact
+        // agreement with `decoration::render_titlebar`'s own `is_dialog`
+        // parameter, the same "renders on one side, hit-tests on the
+        // other" trap every other button-geometry value here already has
+        // to avoid.
+        is_dialog: bool,
+    ) -> Option<TitlebarHit> {
         // Border strips render *outside* `frame` (`decoration::
         // border_strips`, `border_width` pixels past each edge) - without
         // widening the containment check to match, those visible pixels
@@ -321,37 +464,110 @@ impl ResizeEdge {
             return None;
         }
         if decorated && y < frame.y + TITLEBAR_HEIGHT as i32 {
-            // The titlebar's own top-left corner pixels are still the
-            // window's outer corner - without this, a decorated window's
-            // top-left diagonal resize was completely unreachable: every y
-            // inside the titlebar band returned here unconditionally,
-            // before `resize_edge_at` (checked below, for every other edge)
-            // ever ran. A genuine small square right at the corner (both x
-            // *and* y within it), not just "close on one axis" - otherwise
-            // this would claim the whole left end of the drag area at any
-            // height within the titlebar, not just its actual corner.
+            // The titlebar's own outer corner (on whichever side doesn't
+            // hold the buttons) is still the window's outer corner --
+            // without this, a decorated window's diagonal resize there was
+            // completely unreachable: every y inside the titlebar band
+            // returned here unconditionally, before `resize_edge_at`
+            // (checked below, for every other edge) ever ran. A genuine
+            // small square right at the corner (both x *and* y within it),
+            // not just "close on one axis" - otherwise this would claim
+            // the whole drag area at any height within the titlebar, not
+            // just its actual corner.
             //
-            // The top-right corner deliberately does *not* get the same
-            // treatment: it's where the close button already lives, and
-            // every mainstream desktop's convention is that the corner of a
-            // titlebar closes the window, not resizes it. Adding a
-            // competing resize zone there would trade a real, expected
-            // target (close) for a rarely-wanted one at exactly the spot a
-            // miss is most costly.
+            // The corner *with* the buttons deliberately does not get the
+            // same treatment: every mainstream desktop's convention is
+            // that the corner of a titlebar closes the window, not
+            // resizes it - see `decoration::button_box`'s own doc
+            // comment for the matching rendering-side placement this has
+            // to agree with. Adding a competing resize zone there would
+            // trade a real, expected target (close) for a rarely-wanted
+            // one at exactly the spot a miss is most costly. `buttons_left`
+            // flips which corner gets which treatment, not just where the
+            // buttons render - the two have to move together.
             let corner_zone = CORNER_MARGIN * resize_margin;
-            if x <= frame.x + corner_zone && y <= frame.y + corner_zone {
+            if !buttons_left && x <= frame.x + corner_zone && y <= frame.y + corner_zone {
                 return Some(TitlebarHit::Resize(ResizeEdge::TopLeft));
             }
-            const BUTTON: i32 = TITLEBAR_HEIGHT as i32;
-            let right = frame.right();
-            if x >= right - BUTTON {
-                return Some(TitlebarHit::Close);
+            if buttons_left && x >= frame.right() - corner_zone && y <= frame.y + corner_zone {
+                return Some(TitlebarHit::Resize(ResizeEdge::TopRight));
             }
-            if x >= right - BUTTON * 2 {
-                return Some(TitlebarHit::Maximize);
+            // Box size is *not* bigger when left-aligned, even though the
+            // visible dot is (see `decoration::BUTTON_MARGIN_LEFT`) - the
+            // box is already capped at `BUTTON_PITCH` vertically by
+            // `decoration::button_box`'s own centring, so a genuinely
+            // bigger *box* would draw a dot that gets clipped top/bottom
+            // against it. A bigger dot within the same click box gets the
+            // requested "bigger" look with no such clipping risk, and
+            // keeps this hit-test box in exact agreement with `decoration::
+            // button_box`'s own size, not just its side. `BUTTON_PITCH`,
+            // not `TITLEBAR_HEIGHT` - see that constant's own doc comment
+            // for why the two aren't the same value.
+            let button: i32 = BUTTON_PITCH as i32;
+            // Closest-to-the-aligned-edge first - see `ButtonOrder`'s own
+            // doc comment for why the two built-in defaults are genuinely
+            // different relative orderings, not mirrors of each other,
+            // and why an explicit override applies identically regardless
+            // of side rather than trying to preserve that asymmetry.
+            // A dialog always recognizes Close, full stop - not just
+            // whichever button an `order_override` would otherwise put
+            // first, or Minimize/Maximize could still end up the one hit-
+            // testable button. Matches `decoration::render_titlebar`'s own
+            // identical override for the same reason.
+            let order: ButtonOrder = if is_dialog {
+                [TitlebarButton::Close; 3]
+            } else {
+                order_override.unwrap_or(if buttons_left {
+                    [TitlebarButton::Close, TitlebarButton::Minimize, TitlebarButton::Maximize]
+                } else {
+                    [TitlebarButton::Close, TitlebarButton::Maximize, TitlebarButton::Minimize]
+                })
+            };
+            // A dialog only ever recognizes the first slot, matching
+            // `decoration::render_titlebar` only ever drawing the one
+            // button there too.
+            let button_count = if is_dialog { 1 } else { 3 };
+            if buttons_left {
+                let left = frame.x + BUTTON_CLUSTER_MARGIN as i32;
+                // `x >= left` excludes the dead `BUTTON_CLUSTER_MARGIN`
+                // strip between the titlebar's real edge and the first
+                // button - without this guard, `x < left + button` (the
+                // first iteration below) is trivially true for any `x`
+                // left of `left` too, so that whole blank strip silently
+                // counted as a Close hit.
+                if x >= left {
+                    for (i, b) in order.iter().take(button_count).enumerate() {
+                        if x < left + button * (i as i32 + 1) {
+                            return Some(match b {
+                                TitlebarButton::Close => TitlebarHit::Close,
+                                TitlebarButton::Minimize => TitlebarHit::Minimize,
+                                TitlebarButton::Maximize => TitlebarHit::Maximize,
+                            });
+                        }
+                    }
+                }
+                if y <= frame.y + DECORATED_TOP_RESIZE_MARGIN {
+                    return Some(TitlebarHit::Resize(ResizeEdge::Top));
+                }
+                return Some(TitlebarHit::Drag);
             }
-            if x >= right - BUTTON * 3 {
-                return Some(TitlebarHit::Minimize);
+            let right = frame.right() - BUTTON_CLUSTER_MARGIN as i32;
+            // Same guard, mirrored: `x <= right` excludes the dead strip
+            // between the first (rightmost) button and the titlebar's real
+            // right edge.
+            if x <= right {
+                for (i, b) in order.iter().take(button_count).enumerate() {
+                    if x >= right - button * (i as i32 + 1) {
+                        return Some(match b {
+                            TitlebarButton::Close => TitlebarHit::Close,
+                            TitlebarButton::Minimize => TitlebarHit::Minimize,
+                            TitlebarButton::Maximize => TitlebarHit::Maximize,
+                        });
+                    }
+                }
+            }
+            if y <= frame.y + DECORATED_TOP_RESIZE_MARGIN {
+                return Some(TitlebarHit::Resize(ResizeEdge::Top));
             }
             return Some(TitlebarHit::Drag);
         }
@@ -360,27 +576,24 @@ impl ResizeEdge {
     }
 
     fn resize_edge_at(frame: Rect, x: i32, y: i32, decorated: bool, resize_margin: i32) -> Option<ResizeEdge> {
-        let m = resize_margin;
-        let top_m = if decorated { m } else { UNDECORATED_TOP_RESIZE_MARGIN };
-
         // A corner resize gets a bigger, prioritized hit zone than a plain
-        // single edge, checked first - a diagonal drag is a harder target
-        // to land than a straight edge, and several desktops (GNOME, KDE)
-        // give it noticeably more room for exactly that reason. Reported
-        // live: corners felt like they had no priority over sides at all,
-        // which tracked - a corner previously only registered in the exact
-        // pixel square where both edges' own `resize_margin` zones happened
-        // to overlap (6x6px at the default margin), nothing wider.
-        // `corner_top_m` still respects the undecorated window's much
-        // narrower top reach (`UNDECORATED_TOP_RESIZE_MARGIN`) rather than
-        // widening it too - this must not reopen the "can't grab Firefox's
-        // tab strip" bug near a top corner, only the horizontal reach grows
-        // there.
-        let corner_m = CORNER_MARGIN * m;
-        let corner_top_m = if decorated { corner_m } else { UNDECORATED_TOP_RESIZE_MARGIN };
+        // single edge for a *decorated* window - a diagonal drag is a
+        // harder target to land than a straight edge, and several desktops
+        // (GNOME, KDE) give it noticeably more room for exactly that reason.
+        // Reported live: corners felt like they had no priority over sides
+        // at all, which tracked - a corner previously only registered in
+        // the exact pixel square where both edges' own `resize_margin` zones
+        // happened to overlap (6x6px at the default margin), nothing wider.
+        //
+        // None of that widening applies to an *undecorated* window, on any
+        // edge or corner - see [`UNDECORATED_RESIZE_MARGIN`]'s own doc
+        // comment for why a single small, uniform margin is what's actually
+        // correct there.
+        let (m, corner_m) = if decorated { (resize_margin, CORNER_MARGIN * resize_margin) } else { (UNDECORATED_RESIZE_MARGIN, UNDECORATED_RESIZE_MARGIN) };
+
         let corner_left = x <= frame.x + corner_m;
         let corner_right = x >= frame.right() - corner_m;
-        let corner_top = y <= frame.y + corner_top_m;
+        let corner_top = y <= frame.y + corner_m;
         let corner_bottom = y >= frame.bottom() - corner_m;
         if corner_left && corner_top {
             return Some(ResizeEdge::TopLeft);
@@ -397,7 +610,7 @@ impl ResizeEdge {
 
         let near_left = x <= frame.x + m;
         let near_right = x >= frame.right() - m;
-        let near_top = y <= frame.y + top_m;
+        let near_top = y <= frame.y + m;
         let near_bottom = y >= frame.bottom() - m;
         match (near_left, near_right, near_top, near_bottom) {
             (true, false, false, false) => Some(ResizeEdge::Left),
@@ -455,6 +668,112 @@ pub enum TitlebarHit {
     Resize(ResizeEdge),
 }
 
+/// One of the three titlebar buttons, for [`ButtonOrder`] - a narrower
+/// type than [`TitlebarHit`] on purpose: `TitlebarHit` also carries
+/// `Drag`/`Resize`, neither of which is a button a layout can place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitlebarButton {
+    Close,
+    Minimize,
+    Maximize,
+}
+
+/// A custom `close,minimize,maximize`-style ordering for the three
+/// titlebar buttons, overriding this project's own default order for
+/// whichever side `buttons_left` already selects - KWin's `ButtonsOnLeft`/
+/// `ButtonsOnRight`, GNOME/Adwaita's `decoration-layout`, and Openbox's
+/// `titlelayout` each independently converged on exactly this "ordered
+/// list of button names" idea, confirmed this session by reading each
+/// project's own real config docs/source rather than assuming.
+///
+/// Positions are read closest-to-the-aligned-edge first, same as this
+/// project's own two built-in defaults already are: on the left, index 0
+/// sits at the window's own left edge; on the right, index 0 sits at the
+/// window's own right edge. This project's two defaults (macOS-style
+/// close-minimize-maximize on the left, Windows/GTK-style close-maximize-
+/// minimize on the right) are genuinely different *relative* orderings,
+/// not mirrors of each other - seem `hit_test`'s own doc comment on why
+/// that's deliberate - so `None` (the default, no override configured)
+/// keeps using whichever of those two already applies rather than this
+/// type imposing one order on both sides.
+pub type ButtonOrder = [TitlebarButton; 3];
+
+/// Parses a `srd.set("theme.decorations.button_order", "...")` value like
+/// `"close,minimize,maximize"` into a [`ButtonOrder`] - `None` if it
+/// doesn't name each of the three buttons exactly once (a typo'd or
+/// partial list falls back to this project's own built-in default rather
+/// than silently hiding a button or drawing one twice).
+pub fn parse_button_order(s: &str) -> Option<ButtonOrder> {
+    let mut close = None;
+    let mut minimize = None;
+    let mut maximize = None;
+    for (i, part) in s.split(',').map(str::trim).enumerate() {
+        match part.to_ascii_lowercase().as_str() {
+            "close" => close = Some(i),
+            "minimize" | "minimise" => minimize = Some(i),
+            "maximize" | "maximise" => maximize = Some(i),
+            _ => return None,
+        }
+    }
+    let (Some(c), Some(mn), Some(mx)) = (close, minimize, maximize) else { return None };
+    let mut order = [TitlebarButton::Close; 3];
+    for (slot, button) in [(c, TitlebarButton::Close), (mn, TitlebarButton::Minimize), (mx, TitlebarButton::Maximize)] {
+        if slot >= 3 {
+            return None;
+        }
+        order[slot] = button;
+    }
+    // Every slot must have been assigned exactly once - three distinct
+    // source indices (0, 1, 2) covering three slots guarantees that; a
+    // repeated button name (e.g. "close,close,maximize") would have
+    // reused one slot index and left another unset, which range 0..3
+    // alone can't catch.
+    let mut seen = [false; 3];
+    for i in [c, mn, mx] {
+        if seen[i] {
+            return None;
+        }
+        seen[i] = true;
+    }
+    Some(order)
+}
+
+#[cfg(test)]
+mod button_order_tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_well_formed_order() {
+        assert_eq!(parse_button_order("close,minimize,maximize"), Some([TitlebarButton::Close, TitlebarButton::Minimize, TitlebarButton::Maximize]));
+        assert_eq!(parse_button_order("maximize,minimize,close"), Some([TitlebarButton::Maximize, TitlebarButton::Minimize, TitlebarButton::Close]));
+    }
+
+    #[test]
+    fn is_case_insensitive_and_trims_whitespace() {
+        assert_eq!(parse_button_order(" Close, MINIMIZE ,Maximize"), Some([TitlebarButton::Close, TitlebarButton::Minimize, TitlebarButton::Maximize]));
+    }
+
+    #[test]
+    fn accepts_the_british_spelling() {
+        assert_eq!(parse_button_order("close,minimise,maximise"), Some([TitlebarButton::Close, TitlebarButton::Minimize, TitlebarButton::Maximize]));
+    }
+
+    #[test]
+    fn rejects_a_missing_button() {
+        assert_eq!(parse_button_order("close,minimize"), None);
+    }
+
+    #[test]
+    fn rejects_a_duplicated_button() {
+        assert_eq!(parse_button_order("close,close,maximize"), None);
+    }
+
+    #[test]
+    fn rejects_an_unknown_token() {
+        assert_eq!(parse_button_order("close,minimize,help"), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,29 +818,99 @@ mod tests {
     #[test]
     fn close_button_is_top_right_corner_of_titlebar() {
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - 5, f.y + 5, true, 0, RESIZE_MARGIN);
+        // `BUTTON_CLUSTER_MARGIN` back from the edge, not just `- 5`: that
+        // margin is a real dead strip now (see its own doc comment) - a
+        // point only `5` in from the raw edge landed inside it, not on the
+        // button.
+        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, None, false);
         assert_eq!(hit, Some(TitlebarHit::Close));
     }
 
     #[test]
     fn maximize_is_left_of_close() {
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - TITLEBAR_HEIGHT as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN);
+        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - BUTTON_PITCH as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, None, false);
         assert_eq!(hit, Some(TitlebarHit::Maximize));
     }
 
     #[test]
+    fn a_dialog_only_ever_recognizes_close_not_minimize_or_maximize() {
+        // The whole point of `is_dialog`: the same point that hits Maximize
+        // for a normal window (see `maximize_is_left_of_close` just above)
+        // must not hit anything at all for a dialog - that button was
+        // never drawn there in the first place (`decoration::
+        // render_titlebar`'s own `is_dialog` branch), so a phantom hit zone
+        // there would be exactly the "click does nothing, or worse, hits
+        // the wrong control" bug this codebase already fixed once for
+        // undecorated windows.
+        let f = frame();
+        let maximize_spot = f.right() - BUTTON_CLUSTER_MARGIN as i32 - BUTTON_PITCH as i32 - 5;
+        let hit = ResizeEdge::hit_test(f, maximize_spot, f.y + 5, true, 0, RESIZE_MARGIN, false, None, true);
+        assert_ne!(hit, Some(TitlebarHit::Maximize), "a dialog must not have a Maximize hit zone at all");
+        assert_ne!(hit, Some(TitlebarHit::Minimize), "a dialog must not have a Minimize hit zone at all");
+        // The one real button (Close) must still be exactly where it always
+        // is - `is_dialog` removes the other two, not shifts this one.
+        let close_hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, None, true);
+        assert_eq!(close_hit, Some(TitlebarHit::Close));
+    }
+
+    #[test]
+    fn a_dialog_recognizes_close_even_with_a_button_order_override_that_does_not_start_with_it() {
+        // An explicit `button_order` still must not be able to put
+        // Minimize/Maximize where a dialog's one real button (Close) is --
+        // see `hit_test`'s own doc comment on why `is_dialog` ignores
+        // `order_override` outright rather than just capping how many of
+        // it get used.
+        let f = frame();
+        let order = [TitlebarButton::Maximize, TitlebarButton::Minimize, TitlebarButton::Close];
+        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, Some(order), true);
+        assert_eq!(hit, Some(TitlebarHit::Close));
+    }
+
+    #[test]
+    fn an_explicit_button_order_moves_the_hit_zones_to_match() {
+        // Same point `maximize_is_left_of_close` above hits as Maximize
+        // under the built-in default - an override putting minimize
+        // there instead must change what a click there actually does,
+        // not just what gets drawn.
+        let f = frame();
+        let order = [TitlebarButton::Close, TitlebarButton::Minimize, TitlebarButton::Maximize];
+        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - BUTTON_PITCH as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, Some(order), false);
+        assert_eq!(hit, Some(TitlebarHit::Minimize));
+    }
+
+    #[test]
+    fn a_button_order_override_applies_the_same_way_on_either_side() {
+        // The whole point of an explicit override: unlike the two built-
+        // in defaults (genuinely different relative orderings per side,
+        // see `ButtonOrder`'s own doc comment), a caller-specified order
+        // reads closest-to-edge-first the same way whichever side it's
+        // on.
+        let f = frame();
+        let order = [TitlebarButton::Maximize, TitlebarButton::Minimize, TitlebarButton::Close];
+        let left_hit = ResizeEdge::hit_test(f, f.x + BUTTON_CLUSTER_MARGIN as i32 + 5, f.y + 5, true, 0, RESIZE_MARGIN, true, Some(order), false);
+        let right_hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, Some(order), false);
+        assert_eq!(left_hit, Some(TitlebarHit::Maximize));
+        assert_eq!(right_hit, Some(TitlebarHit::Maximize));
+    }
+
+    #[test]
     fn middle_of_titlebar_is_drag() {
+        // Past `DECORATED_TOP_RESIZE_MARGIN`, not just `f.y + 5` (this
+        // test's original y) - once the titlebar's own thin top edge
+        // gained a resize zone, a point that shallow no longer tests
+        // "plain drag area" at all. See `decorated_window_very_top_edge_
+        // of_titlebar_resizes_not_drags` for that zone's own coverage.
         let f = frame();
         let (cx, _) = f.center();
-        let hit = ResizeEdge::hit_test(f, cx, f.y + 5, true, 0, RESIZE_MARGIN);
+        let hit = ResizeEdge::hit_test(f, cx, f.y + DECORATED_TOP_RESIZE_MARGIN + 5, true, 0, RESIZE_MARGIN, false, None, false);
         assert_eq!(hit, Some(TitlebarHit::Drag));
     }
 
     #[test]
     fn bottom_right_corner_is_resize() {
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.bottom() - 1, true, 0, RESIZE_MARGIN);
+        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.bottom() - 1, true, 0, RESIZE_MARGIN, false, None, false);
         assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::BottomRight)));
     }
 
@@ -538,7 +927,7 @@ mod tests {
         // outside RESIZE_MARGIN, so a real resize edge can't also explain a
         // `None` here - undecorated, this must not be treated as
         // decoration (or a resize edge) at all, just plain content.
-        let hit = ResizeEdge::hit_test(f, cx, f.y + 20, false, 0, RESIZE_MARGIN);
+        let hit = ResizeEdge::hit_test(f, cx, f.y + 20, false, 0, RESIZE_MARGIN, false, None, false);
         assert_eq!(hit, None);
     }
 
@@ -546,7 +935,7 @@ mod tests {
     fn undecorated_window_still_resizes_from_every_edge_including_top() {
         let f = frame();
         let (cx, _) = f.center();
-        let hit = ResizeEdge::hit_test(f, cx, f.y + 1, false, 0, RESIZE_MARGIN);
+        let hit = ResizeEdge::hit_test(f, cx, f.y + 1, false, 0, RESIZE_MARGIN, false, None, false);
         assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::Top)));
     }
 
@@ -557,23 +946,64 @@ mod tests {
         // click meant to drag-move it via the client's own `xdg_toplevel.
         // move` has to actually reach the client - the full `RESIZE_MARGIN`
         // (10px) swallowed most of a natural grab point near the top as a
-        // resize instead. A *decorated* window's top band is unaffected --
-        // it already has TITLEBAR_HEIGHT worth of unambiguous drag space
-        // above where `RESIZE_MARGIN` even starts to matter.
+        // resize instead. A *decorated* window's own top band gained a
+        // matching (if wider) resize margin of its own since this test was
+        // first written - see `DECORATED_TOP_RESIZE_MARGIN`'s own doc
+        // comment - so this now checks *past* both margins, where the two
+        // must still agree (undecorated: reaches the client; decorated:
+        // plain drag), rather than claiming the decorated band has no top
+        // resize zone at all, which is no longer true.
         let f = frame();
         let (cx, _) = f.center();
-        assert_eq!(ResizeEdge::hit_test(f, cx, f.y + 5, false, 0, RESIZE_MARGIN), None, "5px in: past the narrow undecorated band, must reach the client");
+        assert_eq!(ResizeEdge::hit_test(f, cx, f.y + 5, false, 0, RESIZE_MARGIN, false, None, false), None, "5px in: past the narrow undecorated band, must reach the client");
         assert_eq!(
-            ResizeEdge::hit_test(f, cx, f.y + 5, true, 0, RESIZE_MARGIN),
+            ResizeEdge::hit_test(f, cx, f.y + DECORATED_TOP_RESIZE_MARGIN + 5, true, 0, RESIZE_MARGIN, false, None, false),
             Some(TitlebarHit::Drag),
-            "decorated: 5px in is still well inside the titlebar band, not a resize edge"
+            "decorated: past its own (wider) top resize margin, still plain drag"
         );
+    }
+
+    #[test]
+    fn undecorated_corner_resize_is_not_widened_either() {
+        // Same regression as the top-margin test above, but for a corner --
+        // a real live report was a click on Nemo's own tab-close button,
+        // hard against the window's right edge, near the top, landing on a
+        // phantom resize instead of the client. This point is well past
+        // `UNDECORATED_RESIZE_MARGIN` (3px) on both axes but was still
+        // within the old, decorated-window-sized corner zone
+        // (`CORNER_MARGIN * RESIZE_MARGIN` = 18px) before this fix.
+        let f = frame();
+        let hit = ResizeEdge::hit_test(f, f.right() - 10, f.y + 10, false, 0, RESIZE_MARGIN, false, None, false);
+        assert_eq!(hit, None, "past the narrow undecorated corner margin on both axes, must reach the client");
+    }
+
+    #[test]
+    fn undecorated_bottom_right_corner_also_uses_the_narrow_margin() {
+        // The top corners aren't the only ones a CSD client can draw real
+        // content near - nothing about `CORNER_MARGIN`'s widening should
+        // survive for an undecorated window at any corner.
+        let f = frame();
+        let hit = ResizeEdge::hit_test(f, f.right() - 10, f.bottom() - 10, false, 0, RESIZE_MARGIN, false, None, false);
+        assert_eq!(hit, None, "past the narrow undecorated corner margin on both axes, must reach the client");
+    }
+
+    #[test]
+    fn undecorated_window_resizes_from_right_and_bottom_edges_within_the_narrow_margin() {
+        // Confirms the narrow margin is still a real, working resize zone on
+        // every edge, not just the top - this fix must not trade "buttons
+        // near an edge are clickable" for "can't resize from that edge at
+        // all".
+        let f = frame();
+        let (_, cy) = f.center();
+        let (cx, _) = f.center();
+        assert_eq!(ResizeEdge::hit_test(f, f.right() - 1, cy, false, 0, RESIZE_MARGIN, false, None, false), Some(TitlebarHit::Resize(ResizeEdge::Right)));
+        assert_eq!(ResizeEdge::hit_test(f, cx, f.bottom() - 1, false, 0, RESIZE_MARGIN, false, None, false), Some(TitlebarHit::Resize(ResizeEdge::Bottom)));
     }
 
     #[test]
     fn outside_frame_is_none() {
         let f = frame();
-        assert_eq!(ResizeEdge::hit_test(f, 0, 0, true, 0, RESIZE_MARGIN), None);
+        assert_eq!(ResizeEdge::hit_test(f, 0, 0, true, 0, RESIZE_MARGIN, false, None, false), None);
     }
 
     #[test]
@@ -588,16 +1018,16 @@ mod tests {
         let border_width = 2;
         // One pixel into the border strip, past the left edge.
         let x = f.x - 1;
-        assert_eq!(ResizeEdge::hit_test(f, x, cy, true, 0, RESIZE_MARGIN), None, "sanity check: with no border, this point really is outside the window");
+        assert_eq!(ResizeEdge::hit_test(f, x, cy, true, 0, RESIZE_MARGIN, false, None, false), None, "sanity check: with no border, this point really is outside the window");
         assert_eq!(
-            ResizeEdge::hit_test(f, x, cy, true, border_width, RESIZE_MARGIN),
+            ResizeEdge::hit_test(f, x, cy, true, border_width, RESIZE_MARGIN, false, None, false),
             Some(TitlebarHit::Resize(ResizeEdge::Left)),
             "one pixel into the actual drawn border must still register as the left edge"
         );
         // Just past the border entirely (border_width + 1 outside frame) is
         // still nothing - the fix widens the dead zone's boundary, it
         // doesn't remove it.
-        assert_eq!(ResizeEdge::hit_test(f, f.x - border_width as i32 - 1, cy, true, border_width, RESIZE_MARGIN), None);
+        assert_eq!(ResizeEdge::hit_test(f, f.x - border_width as i32 - 1, cy, true, border_width, RESIZE_MARGIN, false, None, false), None);
     }
 
     #[test]
@@ -614,7 +1044,7 @@ mod tests {
         assert!(corner_reach > RESIZE_MARGIN, "the whole point of this test is that corner reach exceeds a plain edge's");
         let x = f.x + corner_reach - 1;
         let y = f.bottom() - corner_reach + 1;
-        assert_eq!(ResizeEdge::hit_test(f, x, y, true, 0, RESIZE_MARGIN), Some(TitlebarHit::Resize(ResizeEdge::BottomLeft)));
+        assert_eq!(ResizeEdge::hit_test(f, x, y, true, 0, RESIZE_MARGIN, false, None, false), Some(TitlebarHit::Resize(ResizeEdge::BottomLeft)));
     }
 
     #[test]
@@ -625,7 +1055,7 @@ mod tests {
         // - must read as a plain bottom edge, not a corner.
         let x = f.x + corner_reach + 5;
         let y = f.bottom() - 1;
-        assert_eq!(ResizeEdge::hit_test(f, x, y, true, 0, RESIZE_MARGIN), Some(TitlebarHit::Resize(ResizeEdge::Bottom)));
+        assert_eq!(ResizeEdge::hit_test(f, x, y, true, 0, RESIZE_MARGIN, false, None, false), Some(TitlebarHit::Resize(ResizeEdge::Bottom)));
     }
 
     #[test]
@@ -636,7 +1066,7 @@ mod tests {
         // `resize_edge_at` never even ran for a y inside the titlebar.
         let f = frame();
         let corner_reach = CORNER_MARGIN * RESIZE_MARGIN;
-        let hit = ResizeEdge::hit_test(f, f.x + corner_reach - 1, f.y + corner_reach - 1, true, 0, RESIZE_MARGIN);
+        let hit = ResizeEdge::hit_test(f, f.x + corner_reach - 1, f.y + corner_reach - 1, true, 0, RESIZE_MARGIN, false, None, false);
         assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::TopLeft)));
     }
 
@@ -647,7 +1077,52 @@ mod tests {
         // convention, rather than competing with a resize zone at exactly
         // the spot a miss is most costly.
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.y + 1, true, 0, RESIZE_MARGIN);
+        // Just inside `BUTTON_CLUSTER_MARGIN`, not the raw corner pixel --
+        // the raw corner itself now sits in that real dead strip (see its
+        // own doc comment), which correctly falls through to drag/resize,
+        // not Close.
+        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 1, f.y + 1, true, 0, RESIZE_MARGIN, false, None, false);
+        assert_eq!(hit, Some(TitlebarHit::Close));
+    }
+
+    #[test]
+    fn decorated_window_very_top_edge_of_titlebar_resizes_not_drags() {
+        // The actual regression: reported live as "can't resize tmux's
+        // window from the top, but can in Firefox" - a decorated window's
+        // titlebar band claimed *every* button-free pixel as `Drag`
+        // unconditionally, with no top-edge resize zone at all outside the
+        // two tiny diagonal corners, unlike an undecorated window's own
+        // (narrower) top-edge margin. `x` is the titlebar's horizontal
+        // middle, clear of both the corner zones and either side's button
+        // boxes, so this is testing the plain top edge specifically.
+        let f = frame();
+        let x = f.x + f.width as i32 / 2;
+        let hit = ResizeEdge::hit_test(f, x, f.y + DECORATED_TOP_RESIZE_MARGIN - 1, true, 0, RESIZE_MARGIN, false, None, false);
+        assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::Top)));
+    }
+
+    #[test]
+    fn decorated_window_titlebar_below_the_top_margin_still_drags() {
+        // Sanity check for the fix above: only the thin top margin itself
+        // gained a resize zone - the rest of the titlebar (where most
+        // real drags actually start) must still read as `Drag`, not have
+        // silently grown a resize zone everywhere.
+        let f = frame();
+        let x = f.x + f.width as i32 / 2;
+        let hit = ResizeEdge::hit_test(f, x, f.y + DECORATED_TOP_RESIZE_MARGIN + 5, true, 0, RESIZE_MARGIN, false, None, false);
+        assert_eq!(hit, Some(TitlebarHit::Drag));
+    }
+
+    #[test]
+    fn decorated_window_top_edge_over_a_button_still_hits_the_button() {
+        // The other half of the fix: the new top-margin resize zone must
+        // not swallow clicks meant for a button just because that button
+        // also happens to sit within the first few rows of the titlebar --
+        // exactly the "buttons... not swallowing" risk this was written to
+        // avoid. Right-aligned close button's box starts at `right - 30`;
+        // well inside it, at the very top row.
+        let f = frame();
+        let hit = ResizeEdge::hit_test(f, f.right() - 15, f.y + 1, true, 0, RESIZE_MARGIN, false, None, false);
         assert_eq!(hit, Some(TitlebarHit::Close));
     }
 

@@ -5,122 +5,131 @@
 //! mask is a hardcoded flat alpha, and its destination image is private to
 //! smithay's own module - no public hook for a custom mask picture).
 //!
-//! The technique here instead bakes the mask into a *copy* of the client's
-//! own pixel data before it ever reaches the normal compositing path: read
-//! the surface's committed `wl_shm` buffer, punch premultiplied-alpha holes
-//! (this codebase's existing BGRA convention - see `decoration::
-//! shadow_bitmap`'s doc comment) into the four corner regions, and hand the
-//! result to `MemoryRenderBuffer` - the exact same type and render-element
-//! path already used for the titlebar/border/shadow bitmaps. Rendering it
-//! through the ordinary unmasked `render_texture_from_to` is what makes the
-//! corners actually disappear: a premultiplied-zero source pixel there
-//! contributes nothing, leaving whatever was already drawn underneath (the
-//! desktop, or another window) showing through - a real cutout, not a
-//! flat-colour patch.
+//! The technique here: render the window's *entire* surface tree (root
+//! plus every subsurface, exactly what the ordinary unmasked path already
+//! draws) into a private off-screen buffer, read that back as plain BGRA8
+//! bytes, and punch the four corner holes into *those* - the composited
+//! result, not any one client buffer - before handing it to
+//! `MemoryRenderBuffer`, the same type and render-element path already
+//! used for the titlebar/border/shadow bitmaps.
 //!
-//! Deliberately narrow scope, same as the GLES version: only a window's
-//! *main* surface (no subsurfaces), and only the two common `wl_shm`
-//! formats this compositor's own bitmaps already use (`Argb8888`/
-//! `Xrgb8888`) - anything else, a non-`wl_shm` buffer (dmabuf, a GL
-//! client), or a non-identity buffer transform falls back to `None`, which
-//! the caller treats as "render this window's content unrounded" rather
-//! than an error.
+//! A previous version of this instead tried to identify *which one*
+//! surface in the tree held "the real content" (a root-plus-one-child
+//! GTK4/WebRender pattern, confirmed live against Firefox and Chrome) and
+//! masked that single client buffer directly, skipping everything else in
+//! the tree. That was cheaper - no extra render pass - but structurally
+//! fragile: it assumed the *rest* of the tree (whatever the chosen surface
+//! didn't cover) was always invisible padding, true for Chrome's own
+//! shadow-margin inset but false for Firefox, whose tab strip/title row is
+//! painted on the *root* surface, outside its own content child. The
+//! moment that surface-picking heuristic got permissive enough to actually
+//! mask Firefox's real, common case, it started *silently deleting
+//! Firefox's own tab strip* - reported live as "Firefox's titlebar turned
+//! invisible", confirmed by toggling `general.rounded_corners` off, which
+//! brought it straight back. Rendering the whole tree and masking the
+//! *output* instead of guessing which *input* is real sidesteps the whole
+//! question - the same reason a GPU shader-based compositor (niri,
+//! cosmic-comp) never has this class of bug at all: by the time its own
+//! shader runs, the subsurface tree is already flattened into one texture,
+//! so there is nothing left to misidentify.
+//!
+//! Only `wl_shm`/dmabuf-agnostic now - unlike the old per-buffer read,
+//! this never touches a client's own buffer format at all, only the
+//! renderer's own composited output, so the format/transform restrictions
+//! the previous version needed (`Argb8888`/`Xrgb8888` only, no dmabuf
+//! without a dedicated read path, `Transform::Normal` only) no longer
+//! apply - whatever the renderer can already draw (which is everything it
+//! draws for the ordinary unmasked path too), this can mask.
 //!
 //! Cost, and why this stays default-off on this backend (`general.
 //! rounded_corners`, see `WindowManager::rounded_corners_enabled`'s doc
-//! comment): unlike the GLES shader, which the GPU evaluates once per pixel
-//! at zero extra CPU cost, this masks a full copy of the surface's pixel
-//! data on the CPU. The mask math itself only touches the four small
-//! corner boxes, but producing a tightly-packed buffer `MemoryRenderBuffer::
-//! from_slice` accepts (it asserts a `width * 4` stride; a client's own SHM
-//! stride is often larger, padded for alignment) means copying the whole
-//! buffer row by row regardless. The caller is expected to cache the
-//! result and only call this again when the surface's content has actually
-//! changed (see `CompState::content_epoch`), so the real per-frame cost for
-//! idle/static windows is nothing - but a constantly-repainting client
-//! (video, a terminal under heavy scrollback) pays this on every commit for
-//! as long the feature stays on, which is exactly the untested-on-real-
-//! hardware cost the opt-in default exists to avoid forcing on anyone.
+//! comment): a full extra off-screen render pass (allocate a buffer, draw
+//! the tree into it, read the result back) on every real content change,
+//! not just a raw memory copy the old approach needed - strictly more
+//! expensive per rebuild than before, though still gated by the same
+//! `CompState::content_epoch` cache as before, so an idle/static window
+//! still costs nothing per frame, only per genuine repaint.
 
 use crate::rounded_corners::RoundedCorners;
 use smithay::backend::allocator::Fourcc;
-use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
-use smithay::backend::renderer::utils::{with_renderer_surface_state, RendererSurfaceState};
-use smithay::reexports::wayland_server::protocol::wl_shm;
+use smithay::backend::renderer::damage::OutputDamageTracker;
+use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
+use smithay::backend::renderer::element::Kind;
+use smithay::backend::renderer::pixman::PixmanRenderer;
+use smithay::backend::renderer::{Bind, ExportMem, Offscreen};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::Transform;
-use smithay::wayland::compositor::get_children;
-use smithay::wayland::shm::{with_buffer_contents, BufferData};
+use smithay::utils::{Buffer as BufferCoord, Rectangle, Transform};
 
-/// Builds a rounded-corner-masked copy of `surface`'s own committed content,
-/// or `None` if that isn't possible right now - see this module's doc
-/// comment for every case that falls back rather than erroring. `radius` is
-/// in the same logical-pixel units as `decoration::CORNER_RADIUS`; scaled
-/// up to buffer pixels internally using the surface's own buffer scale.
-pub(crate) fn masked_content_buffer(surface: &WlSurface, radius: f32, corners: RoundedCorners) -> Option<MemoryRenderBuffer> {
-    // The module doc comment above has always claimed "only a window's main
-    // surface (no subsurfaces)... falls back to None" - but nothing here
-    // actually checked that; this function read `surface`'s own buffer
-    // unconditionally regardless of whether it had children. A window whose
-    // real content is painted into a subsurface (a common GTK4/WebRender
-    // pattern - confirmed live: Firefox does this) has its own root
-    // surface holding only a blank/background buffer, so masking succeeded
-    // and produced a buffer, just the wrong one - the actual page content
-    // in the child subsurface was never read at all, and the window
-    // rendered as blank with rounded corners on instead of falling back to
-    // the unmasked path (`surface_content_elements`), which does walk the
-    // full surface tree and shows real content correctly.
-    if !get_children(surface).is_empty() {
+/// Renders `surface`'s whole subsurface tree into a private `size`-sized
+/// off-screen buffer - `loc` is the tree's own root-surface-relative
+/// origin to render at, exactly like `render_elements_from_surface_tree`'s
+/// own `location` parameter elsewhere in this codebase (`udev/capture.rs`);
+/// the caller passes the *negated* `content_offset`
+/// (`dwindow.geometry().loc`, the client's own declared shadow-margin
+/// inset) so the buffer's own `(0, 0)` lands exactly on the window's real
+/// visible content top-left, the same correction every other render path
+/// in this compositor already applies (see `udev/render.rs`'s own `pos`
+/// computation) - then punches the four rounded-corner holes into the
+/// result. Returns tightly-packed BGRA8 bytes (`size.0 * size.1 * 4`),
+/// ready for `MemoryRenderBuffer::from_slice`, or `None` if the off-screen
+/// render itself failed (a genuine renderer error, not "this window isn't
+/// shaped right for masking" - there is no such restriction anymore).
+///
+/// `radius` is already in the same units as `size` (this compositor's
+/// outputs are always scale `1.0`, per `WindowManager::rounded_corners_
+/// enabled`'s own doc comment, so there is no separate buffer-scale
+/// factor to fold in here the way the old per-client-buffer read needed).
+pub(crate) fn masked_content_buffer(renderer: &mut PixmanRenderer, surface: &WlSurface, loc: (i32, i32), size: (i32, i32), radius: f32, corners: RoundedCorners) -> Option<Vec<u8>> {
+    let (w, h) = size;
+    if w <= 0 || h <= 0 {
         return None;
     }
-    let (buffer, scale, transform) = with_renderer_surface_state(surface, |state: &mut RendererSurfaceState| {
-        let buffer = state.buffer()?.clone();
-        Some((buffer, state.buffer_scale(), state.buffer_transform()))
-    })??;
-    // A rotated/flipped buffer would need the mask rotated with it; not
-    // worth the extra math for a cosmetic, already-narrow-scope pass.
-    if transform != Transform::Normal {
+    // Transparent clear (not opaque black, unlike `udev/capture.rs`'s own
+    // off-screen render): this buffer holds only the window's own content,
+    // with nothing behind it to composite against yet - any area the
+    // surface tree doesn't actually draw into (a subsurface smaller than
+    // its own declared geometry, say) needs to stay real, punch-through
+    // transparency so the border/desktop already drawn underneath on the
+    // real output shows through there, not a solid black patch.
+    let elements = render_elements_from_surface_tree::<_, crate::elements::OverlayElement<PixmanRenderer>>(renderer, surface, loc, 1.0, 1.0, Kind::Unspecified);
+    let mut target = match renderer.create_buffer(Fourcc::Argb8888, (w, h).into()) {
+        Ok(t) => t,
+        Err(e) => {
+            log::debug!("rounded_corners_pixman: masked_content_buffer: create_buffer failed ({e:?}) - giving up unmasked");
+            return None;
+        }
+    };
+    let mut framebuffer = match renderer.bind(&mut target) {
+        Ok(fb) => fb,
+        Err(e) => {
+            log::debug!("rounded_corners_pixman: masked_content_buffer: bind failed ({e:?}) - giving up unmasked");
+            return None;
+        }
+    };
+    let mut tracker = OutputDamageTracker::new((w, h), 1.0, Transform::Normal);
+    if let Err(e) = tracker.render_output(renderer, &mut framebuffer, 0, &elements, [0.0, 0.0, 0.0, 0.0]) {
+        log::debug!("rounded_corners_pixman: masked_content_buffer: render_output failed ({e:?}) - giving up unmasked");
         return None;
     }
-    let radius_px = radius * scale as f32;
-
-    let (data, w, h) = with_buffer_contents(&buffer, move |ptr, len, data: BufferData| -> Option<(Vec<u8>, i32, i32)> {
-        if !matches!(data.format, wl_shm::Format::Argb8888 | wl_shm::Format::Xrgb8888) {
+    let region: Rectangle<i32, BufferCoord> = Rectangle::new((0, 0).into(), (w, h).into());
+    let mapping = match renderer.copy_framebuffer(&framebuffer, region, Fourcc::Argb8888) {
+        Ok(m) => m,
+        Err(e) => {
+            log::debug!("rounded_corners_pixman: masked_content_buffer: copy_framebuffer failed ({e:?}) - giving up unmasked");
             return None;
         }
-        let (w, h, stride, offset) = (data.width, data.height, data.stride, data.offset);
-        if w <= 0 || h <= 0 || stride <= 0 || offset < 0 {
+    };
+    let pixels = match renderer.map_texture(&mapping) {
+        Ok(p) => p,
+        Err(e) => {
+            log::debug!("rounded_corners_pixman: masked_content_buffer: map_texture failed ({e:?}) - giving up unmasked");
             return None;
         }
-        let needed = offset as usize + stride as usize * h as usize;
-        if needed > len {
-            return None;
-        }
-        // SAFETY: `pool.with_data` (inside `with_buffer_contents`) already
-        // validated `ptr`/`len` cover the whole pool; `needed` above
-        // re-checks this buffer's own slice sits inside that before a
-        // single byte is read.
-        let src = unsafe { std::slice::from_raw_parts(ptr.add(offset as usize), stride as usize * h as usize) };
-
-        // Repack into a tight `width * 4` stride: `MemoryRenderBuffer::
-        // from_slice` computes its own stride from `width` alone and
-        // asserts the data matches it, so the source's (often padded) SHM
-        // stride can't be handed through as-is.
-        let row_bytes = w as usize * 4;
-        let mut out = vec![0u8; row_bytes * h as usize];
-        for y in 0..h as usize {
-            let src_row = &src[y * stride as usize..y * stride as usize + row_bytes];
-            out[y * row_bytes..(y + 1) * row_bytes].copy_from_slice(src_row);
-        }
-
-        let radius_px = radius_px.min(w as f32 / 2.0).min(h as f32 / 2.0);
-        apply_corner_mask(&mut out, w, h, row_bytes as i32, radius_px, corners);
-        Some((out, w, h))
-    })
-    .ok()
-    .flatten()?;
-
-    Some(MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (w, h), scale, Transform::Normal, None))
+    };
+    let mut out = pixels.to_vec();
+    let radius_px = radius.min(w as f32 / 2.0).min(h as f32 / 2.0);
+    apply_corner_mask(&mut out, w, h, w * 4, radius_px, corners);
+    Some(out)
 }
 
 /// Zeroes (fading over ~2px, matching `rounded_corners::FRAGMENT_SHADER`'s

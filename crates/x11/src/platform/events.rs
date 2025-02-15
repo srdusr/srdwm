@@ -31,8 +31,43 @@ impl X11Platform {
                 self.conn.flush().map_err(err)?;
                 Ok(None)
             }
-            XEvent::UnmapNotify(ev) => Ok(self.unmanage(ev.window)),
-            XEvent::DestroyNotify(ev) => Ok(self.unmanage(ev.window)),
+            XEvent::UnmapNotify(ev) => {
+                let struts_changed = self.forget_strut_window(ev.window);
+                let unmanaged = self.unmanage(ev.window);
+                // `unmanage`'s own `Event::WindowDestroyed` wins if this
+                // window was somehow both a managed client *and* a tracked
+                // strut window (shouldn't happen in practice - see
+                // `track_strut_window`'s own doc comment - but `unmanage`
+                // returning `Some` either way takes priority, since a
+                // closed window matters more to core than a reservation
+                // change on the very same event).
+                Ok(unmanaged.or_else(|| struts_changed.then(struts::monitors_changed_event)))
+            }
+            XEvent::DestroyNotify(ev) => {
+                let struts_changed = self.forget_strut_window(ev.window);
+                let unmanaged = self.unmanage(ev.window);
+                Ok(unmanaged.or_else(|| struts_changed.then(struts::monitors_changed_event)))
+            }
+            // Only a window we aren't already managing as a regular
+            // top-level client - see `track_strut_window`'s own doc
+            // comment for why a real panel/dock typically needs this path
+            // specifically (override-redirect, so it never goes through
+            // `manage_new_window`/`MapRequest` at all). Fires for *every*
+            // other window that maps too (a client's own subwindows, an
+            // override-redirect tooltip/menu popup), but `read_strut`
+            // inside it is a cheap couple of `GetProperty` round-trips
+            // that come back empty for anything that never sets the
+            // property, so this costs nothing beyond that for the common
+            // case of "not a bar".
+            XEvent::MapNotify(ev) => {
+                if self.xid_to_core.contains_key(&ev.window) {
+                    return Ok(None);
+                }
+                Ok(self.track_strut_window(ev.window).then(struts::monitors_changed_event))
+            }
+            XEvent::PropertyNotify(ev) if ev.atom == self.atoms._NET_WM_STRUT || ev.atom == self.atoms._NET_WM_STRUT_PARTIAL => {
+                Ok(self.update_strut_property(ev.window).then(struts::monitors_changed_event))
+            }
             XEvent::ButtonPress(ev) => {
                 let (x, y) = (ev.root_x as i32, ev.root_y as i32);
                 let hit = self.wm.borrow().hit_test(x, y);

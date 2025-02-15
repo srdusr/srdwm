@@ -34,6 +34,28 @@ impl CompState {
         }
     }
 
+    /// Forces a fresh `redraw_decoration_buffer` call every frame while the
+    /// titlebar-button glyph-reveal-on-hover animation is still in
+    /// progress; called once per redraw from both backends' poll loops,
+    /// alongside `tick_animations`. Needed for the same reason that one
+    /// is: `redraw_decoration_buffer`'s own signature-based cache only
+    /// rebuilds when *called*, and nothing else calls it once a pointer
+    /// stops moving over an already-hovered button - without this, the
+    /// glyph would jump straight from invisible to full opacity on the
+    /// one motion event that started the hover, then never update again
+    /// for the rest of the animation's own duration, since no further
+    /// motion event arrives to drive it. Does nothing in `theme.
+    /// button_glyph_always` mode or once the animation has actually
+    /// finished (`HOVER_GLYPH_DURATION` elapsed) - both are already a
+    /// stable, cached final state with nothing left to advance.
+    pub(crate) fn tick_hover_glyph_animation(&mut self) {
+        let Some((id, _, start)) = self.hovered_titlebar_button else { return };
+        if self.wm.borrow().theme.button_glyph_always || start.elapsed() >= decoration::HOVER_GLYPH_DURATION {
+            return;
+        }
+        self.redraw_decoration_buffer(id);
+    }
+
     /// Re-applies `WindowManager`'s own stacking order to `Space`, bottom
     /// to top.
     ///

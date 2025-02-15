@@ -387,10 +387,15 @@ session_lock, shm, viewporter, xdg_decoration, xdg_shell, xwayland_shell.
       on exit.** `IpcServer`'s `Drop` impl already removes its socket path
       unconditionally; verified while auditing `foreign_toplevel`/protocol
       cleanup paths this pass.
-- [ ] `jq: parse error: Invalid numeric literal at line 1, column 28` repeats
-      continuously in `~/.local/state/wm-session-latest.log` - something in the
-      session scripts pipes non-JSON into `jq` in a loop. Harmless, but it buries
-      real errors.
+- [x] FIXED - `jq: parse error: Invalid numeric literal at line 1, column 28`
+      repeated continuously in `~/.local/state/wm-session-latest.log` --
+      `hyprctl`'s own "not running" message goes to stdout, not stderr, so
+      every script that still called it unconditionally after the
+      Hyprland-to-srdwm migration fed that sentence straight into `jq` as
+      if it were JSON. Fixed with an `[ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]`
+      guard added to `~/.scripts/sys/night-light`, `reading-mode`, and
+      `~/.scripts/utils/toggle-blur`, `move_terminal` - confirmed present
+      in all four as of 2026-08-19.
 
 ---
 

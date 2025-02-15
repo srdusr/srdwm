@@ -48,9 +48,15 @@ impl Platform for WaylandPlatform {
                 // `WindowManager`, never `state.space`, so an IPC focus
                 // change left rendering/hit-testing on the stale topmost
                 // window until something else happened to raise it.
+                //
+                // `raise_in_space`, not `focus_window` - see that
+                // function's doc comment: the full version re-runs the
+                // workspace-follow side effect on the already-focused
+                // window and silently reverts an `activate_workspace` IPC
+                // dispatch from the same cycle.
                 let focused = self.wm.borrow().focused_id();
                 if let Some(id) = focused {
-                    crate::input::focus_window(&mut self.state, id);
+                    crate::input::raise_in_space(&mut self.state, id);
                 }
             }
         }

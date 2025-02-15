@@ -197,6 +197,58 @@
     }
 
     #[test]
+    fn srd_monitor_split_stores_a_split_request_by_connector_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        engine.lua.load(r#"srd.monitor.split("eDP-1", 2, "rows")"#).exec().unwrap();
+        let split = wm.borrow().monitor_split("eDP-1").unwrap();
+        assert_eq!(split.parts, 2);
+        assert!(split.rows);
+    }
+
+    #[test]
+    fn srd_monitor_split_direction_defaults_to_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        engine.lua.load(r#"srd.monitor.split("HDMI-A-1", 3)"#).exec().unwrap();
+        let split = wm.borrow().monitor_split("HDMI-A-1").unwrap();
+        assert_eq!(split.parts, 3);
+        assert!(!split.rows);
+    }
+
+    #[test]
+    fn srd_monitor_scale_stores_a_factor_by_connector_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        engine.lua.load(r#"srd.monitor.scale("HDMI-A-1", 0.75)"#).exec().unwrap();
+        assert_eq!(wm.borrow().monitor_scale("HDMI-A-1"), Some(0.75));
+    }
+
+    #[test]
+    fn srd_monitor_scale_with_a_non_positive_factor_clears_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        engine.lua.load(r#"srd.monitor.scale("HDMI-A-1", 0.75)"#).exec().unwrap();
+        engine.lua.load(r#"srd.monitor.scale("HDMI-A-1", 0)"#).exec().unwrap();
+        assert_eq!(wm.borrow().monitor_scale("HDMI-A-1"), None);
+    }
+
+    #[test]
+    fn srd_monitor_split_with_one_part_clears_an_existing_split() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        engine.lua.load(r#"srd.monitor.split("eDP-1", 2)"#).exec().unwrap();
+        assert!(wm.borrow().monitor_split("eDP-1").is_some());
+        engine.lua.load(r#"srd.monitor.split("eDP-1", 1)"#).exec().unwrap();
+        assert!(wm.borrow().monitor_split("eDP-1").is_none());
+    }
+
+    #[test]
     fn srd_window_scratchpad_hides_the_focused_window_and_show_brings_it_back() {
         let dir = tempfile::tempdir().unwrap();
         let wm = Rc::new(RefCell::new(WindowManager::new()));

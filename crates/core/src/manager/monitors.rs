@@ -82,6 +82,48 @@ impl WindowManager {
                 window.geometry = target;
             }
         }
+        self.apply_monitor_layouts();
+    }
+
+    /// Applies `primary_layout`/`secondary_layout` to whichever workspace
+    /// [`Self::workspace_for_monitor`] resolves for the primary monitor,
+    /// and for any other monitor that has *already* been given its own
+    /// distinct workspace via an independent switch - see those fields'
+    /// own doc comments for why this is a no-op outside `per_monitor_
+    /// workspaces` mode. Deliberately skips a non-primary monitor still
+    /// showing the same fallback workspace as the primary (nothing
+    /// distinct to apply `secondary_layout` to yet without also
+    /// clobbering what `primary_layout` just set on that same shared
+    /// workspace).
+    ///
+    /// Runs on every `set_monitors` call (startup and every hotplug
+    /// alike) rather than on every workspace switch - applying it
+    /// continuously would fight a workspace's own manually-set layout
+    /// every time a monitor switched back to it.
+    fn apply_monitor_layouts(&mut self) {
+        if !self.per_monitor_workspaces || (self.primary_layout.is_empty() && self.secondary_layout.is_empty()) {
+            return;
+        }
+        let Some(primary_id) = self.primary_monitor().map(|m| m.id) else { return };
+        let primary_ws = self.workspace_for_monitor(primary_id);
+        let registered: Vec<String> = self.available_layouts().iter().map(|s| s.to_string()).collect();
+        if !self.primary_layout.is_empty() && registered.contains(&self.primary_layout) {
+            self.set_layout(primary_ws, self.primary_layout.clone());
+        }
+        if self.secondary_layout.is_empty() || !registered.contains(&self.secondary_layout) {
+            return;
+        }
+        let monitors = self.monitors.clone();
+        for m in &monitors {
+            if m.id == primary_id {
+                continue;
+            }
+            let ws = self.workspace_for_monitor(m.id);
+            if ws == primary_ws {
+                continue;
+            }
+            self.set_layout(ws, self.secondary_layout.clone());
+        }
     }
 
     pub fn monitors(&self) -> &[Monitor] {
@@ -117,12 +159,141 @@ impl WindowManager {
         std::mem::take(&mut self.output_position_requests)
     }
 
+    /// Queues a request to enable or disable the output named `name` --
+    /// "primary only"/a per-display toggle, the two AGS monitor-layout
+    /// panel rows gated pending this. Same "core has no real output
+    /// handle, the backend drains and applies on its own next poll" shape
+    /// as `request_output_position` above, and the same reasoning:
+    /// turning a real CRTC's power state on or off is backend/hardware
+    /// work, not something this crate can do itself.
+    ///
+    /// By *name*, not `MonitorId` like `request_output_position` - a
+    /// disabled output is administratively removed from `monitors()`
+    /// entirely (the same real unplug/replug code path a genuine hotplug
+    /// already goes through, see the udev platform's own drain site), so
+    /// its id - an index into whatever's currently connected - stops
+    /// meaning anything the moment it's disabled. The connector's own
+    /// name survives the round trip; nothing else does.
+    pub fn request_output_enabled(&mut self, name: String, enabled: bool) {
+        self.output_enable_requests.retain(|(existing, _)| *existing != name);
+        self.output_enable_requests.push((name, enabled));
+    }
+
+    /// [`Self::drain_output_position_requests`]'s counterpart for
+    /// enable/disable requests.
+    pub fn drain_output_enable_requests(&mut self) -> Vec<(String, bool)> {
+        std::mem::take(&mut self.output_enable_requests)
+    }
+
+    /// Reports (or updates) `name`'s last-known state as an
+    /// administratively-disabled-but-still-connected output - called by
+    /// the backend at the moment it disables a connector, purely so `srd
+    /// monitors`/the `monitors` subscribe event can keep listing it (as
+    /// requested directly by the AGS peer session: a control that removes
+    /// its own target from view the moment it's used is one-way, not a
+    /// toggle). Deliberately separate from `monitors`/`set_monitors` --
+    /// see `DisabledMonitor`'s own doc comment for why this must never
+    /// touch real placement.
+    pub fn set_disabled_monitor(&mut self, name: String, geometry: Rect, full_geometry: Rect, primary: bool) {
+        self.disabled_monitors.insert(name, DisabledMonitor { geometry, full_geometry, primary });
+    }
+
+    /// Clears `name`'s disabled-monitor record - called by the backend
+    /// once it re-enables the connector (it's live again, `monitors()`
+    /// itself will report it) or discovers it's been genuinely unplugged
+    /// while disabled (nothing left to offer re-enabling at all; see
+    /// `reprobe_outputs`'s own doc comment on why "off" and "not
+    /// connected" have to be reported differently).
+    pub fn clear_disabled_monitor(&mut self, name: &str) {
+        self.disabled_monitors.remove(name);
+    }
+
+    /// Every currently-known disabled-but-connected output, by name - see
+    /// `set_disabled_monitor`'s own doc comment.
+    pub fn disabled_monitors(&self) -> impl Iterator<Item = (&str, &DisabledMonitor)> {
+        self.disabled_monitors.iter().map(|(name, m)| (name.as_str(), m))
+    }
+
+    /// `srd.monitor.split(name, parts, direction)` - divides connector
+    /// `name`'s real output into `parts` equal logical monitors from the
+    /// next time a backend queries `monitors()`. `parts <= 1` clears any
+    /// existing split for `name` rather than storing a meaningless
+    /// one-part split.
+    pub fn set_monitor_split(&mut self, name: String, parts: u32, rows: bool) {
+        if parts <= 1 {
+            self.monitor_splits.remove(&name);
+        } else {
+            self.monitor_splits.insert(name, MonitorSplit { parts, rows });
+        }
+    }
+
+    /// `name`'s current split request, if any - read by a backend's own
+    /// `monitors()` query.
+    pub fn monitor_split(&self, name: &str) -> Option<MonitorSplit> {
+        self.monitor_splits.get(name).copied()
+    }
+
+    /// `srd.monitor.scale(name, factor)` - a backend applies this the
+    /// next time it brings connector `name`'s head up (startup, hotplug,
+    /// or re-enable). `factor <= 0.0` clears any existing override rather
+    /// than storing a meaningless non-positive scale.
+    pub fn set_monitor_scale(&mut self, name: String, factor: f64) {
+        if factor > 0.0 {
+            self.monitor_scales.insert(name, factor);
+        } else {
+            self.monitor_scales.remove(&name);
+        }
+    }
+
+    /// `name`'s current scale override, if any - read by a backend when
+    /// bringing that connector's head up.
+    pub fn monitor_scale(&self, name: &str) -> Option<f64> {
+        self.monitor_scales.get(name).copied()
+    }
+
     pub fn primary_monitor(&self) -> Option<&Monitor> {
         self.monitors.iter().find(|m| m.primary).or_else(|| self.monitors.first())
     }
 
     pub(super) fn monitor_for(&self, id: MonitorId) -> Option<&Monitor> {
         self.monitors.iter().find(|m| m.id == id).or_else(|| self.primary_monitor())
+    }
+
+    /// Records which monitor the pointer is over right now - see `pointer_
+    /// monitor`'s own doc comment for why core needs to be told this rather
+    /// than knowing it already, and `add_window`'s target-monitor fallback
+    /// chain for the one thing it's actually used for. Called from a real
+    /// backend's pointer-motion handler; never `srd`/IPC-driven (nothing
+    /// external has a legitimate reason to claim where the pointer is).
+    pub fn set_pointer_monitor(&mut self, id: Option<MonitorId>) {
+        self.pointer_monitor = id;
+    }
+
+    /// The bounding rect of every registered monitor's own `full_geometry`
+    /// combined - the whole multi-monitor desktop's real screen area, not
+    /// just one output's. `None` only when there are no monitors at all
+    /// (never true in practice once startup has run).
+    ///
+    /// Exists specifically so `update_drag` can clamp a dragged window to
+    /// "somewhere on some real screen" instead of "within the one monitor
+    /// it happened to start the drag on" - the latter (what this
+    /// replaced) made it *mathematically impossible* to drag a window from
+    /// one monitor to another at all: the clamp bounds were computed once,
+    /// from `w.monitor` at drag-start, and never updated as the drag
+    /// crossed into a different monitor's own screen space, so `new_geom.x`
+    /// could never exceed the starting monitor's own right edge no matter
+    /// how far or fast the pointer moved. Reported live: a second monitor
+    /// connected and fully working at the compositor/DRM level (`srd
+    /// monitors` listed it, hotplug brought it up) still couldn't receive
+    /// a dragged window at all.
+    pub(super) fn all_monitors_bounds(&self) -> Option<Rect> {
+        self.monitors.iter().map(|m| m.full_geometry).reduce(|a, b| {
+            let x = a.x.min(b.x);
+            let y = a.y.min(b.y);
+            let right = a.right().max(b.right());
+            let bottom = a.bottom().max(b.bottom());
+            Rect::new(x, y, (right - x) as u32, (bottom - y) as u32)
+        })
     }
 
 }

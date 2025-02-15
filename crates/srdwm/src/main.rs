@@ -174,28 +174,80 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     let focus_follows_mouse = engine.get_bool("general.focus_follows_mouse", false);
     let auto_raise = engine.get_bool("general.auto_raise", false);
 
-    // Only the three `theme.*` keys with an unambiguous, already-rendered
-    // counterpart are wired - see `srdwm_core::ThemeConfig`'s doc comment.
-    // `theme.colors.foreground`/`theme.decorations.title_bar.foreground`
-    // and `theme.decorations.border.inactive_color` are deliberately left
-    // alone: their own shipped defaults ("#eceff4", "#2e3440") don't match
-    // what unfocused text/border actually render as today (an accent-
-    // dimming scheme, not a second explicit colour), so wiring them in as
-    // written would silently change - in `border.inactive_color`'s case,
-    // erase - the unfocused appearance for anyone who never touched
-    // theme.* at all. A real design decision belongs there, not a guess
-    // made in passing while sweeping for dead keys.
+    // `theme.colors.foreground` stays unwired: it has no unambiguous
+    // rendered counterpart of its own (nothing currently paints "generic
+    // foreground text" outside the titlebar, which has its own two keys
+    // below), so wiring it would be a guess at what it should affect.
+    //
+    // Everything else here has a real, non-destructive default: each key's
+    // fallback in `get_string`/`get_f64` below is the exact value
+    // `ThemeConfig::default()` already ships, so a config that never
+    // touches `theme.*` renders identically to before this function read
+    // it at all - these are additions, not behaviour changes.
     let mut theme = srdwm_core::ThemeConfig::default();
     if let Some(rgb) = srdwm_core::parse_hex_color(&engine.get_string("theme.decorations.title_bar.background", "#2e3440")) {
         theme.titlebar_bg = rgb;
     }
+    if let Some(rgb) = srdwm_core::parse_hex_color(&engine.get_string("theme.decorations.title_bar.foreground_focused", "#88c0d0")) {
+        theme.titlebar_fg_focused = rgb;
+    }
+    if let Some(rgb) = srdwm_core::parse_hex_color(&engine.get_string("theme.decorations.title_bar.foreground_unfocused", "#4c566a")) {
+        theme.titlebar_fg_unfocused = rgb;
+    }
+    // "center" or "left" (default) - see `ThemeConfig::title_centered`'s
+    // own doc comment. Anything other than exactly "center" is treated as
+    // "left", the existing default, rather than erroring on a typo.
+    theme.title_centered = engine.get_string("theme.decorations.title_bar.text_align", "left") == "center";
+    // "left" or "right" (default) - see `ThemeConfig::buttons_left`'s own
+    // doc comment. Anything other than exactly "left" is treated as
+    // "right", the existing default.
+    theme.buttons_left = engine.get_string("theme.decorations.title_bar.button_side", "right") == "left";
+    // `"close,minimize,maximize"`-style override for the three buttons'
+    // relative order - see `ThemeConfig::button_order`'s own doc
+    // comment. Unset (empty string, the default `get_string` fallback
+    // here) leaves this project's own two built-in defaults untouched. A
+    // set-but-unparseable value (a typo, a missing button, a repeat) logs
+    // and falls back the same way rather than silently hiding a button.
+    let button_order_str = engine.get_string("theme.decorations.title_bar.button_order", "");
+    theme.button_order = if button_order_str.is_empty() {
+        None
+    } else {
+        let parsed = srdwm_core::parse_button_order(&button_order_str);
+        if parsed.is_none() {
+            log::warn!("theme.decorations.title_bar.button_order = '{button_order_str}' is not a valid ordering of close, minimize, maximize; keeping the built-in default");
+        }
+        parsed
+    };
+    // "hover" (default, classic macOS: glyph hidden until hovered, then
+    // animates in) or "always" (modern GNOME/Adwaita: glyph always
+    // visible) - see `ThemeConfig::button_glyph_always`'s own doc
+    // comment for the research behind offering both.
+    theme.button_glyph_always = engine.get_string("theme.decorations.title_bar.button_glyph", "hover") == "always";
+    // "traffic_lights" (default: filled, coloured macOS-style dots) or
+    // "traditional" (plain glyphs straight on the titlebar background,
+    // square maximize, no fill) - see `ThemeConfig::traffic_light_buttons`'s
+    // own doc comment. Anything other than exactly "traditional" keeps the
+    // traffic-light default, same fallback shape as every other string
+    // switch above.
+    theme.traffic_light_buttons = engine.get_string("theme.decorations.title_bar.button_style", "traffic_lights") != "traditional";
     let border_width = engine.get_f64("theme.decorations.border.width", 2.0).max(0.0) as u32;
     theme.default_border_width = border_width;
-    let corner_radius = engine.get_f64("theme.decorations.border.radius", 6.0).max(0.0) as u32;
+    // 12, not the original 6: matches real macOS's own ~0.36 radius-to-
+    // titlebar-height proportion (docs/TODO.md's macOS-comparison research)
+    // against `TITLEBAR_HEIGHT = 32` - see that constant's own doc comment
+    // for where that value comes from.
+    let corner_radius = engine.get_f64("theme.decorations.border.radius", 12.0).max(0.0) as u32;
     theme.default_corner_radius = corner_radius;
     if let Some(rgb) = srdwm_core::parse_hex_color(&engine.get_string("theme.decorations.border.active_color", "#88c0d0")) {
         theme.default_border_color = rgb;
     }
+    // A *factor* applied to `border.active_color`, not a second explicit
+    // colour - `border.inactive_color` still doesn't exist as a config
+    // key, because an absolute override would erase the dimming scheme
+    // instead of participating in it (see `ThemeConfig::border_inactive_
+    // dim`'s doc comment). `1.0` keeps unfocused identical to focused;
+    // `0.0` fades it to black.
+    theme.border_inactive_dim = engine.get_f64("theme.decorations.border.inactive_dim", theme.border_inactive_dim as f64).clamp(0.0, 1.0) as f32;
     // "server" (srdwm draws the titlebar, Windows/macOS-style) or "client"
     // (srdwm steps back for anything with no decoration opinion of its
     // own, GNOME-style) - see `ThemeConfig::default_decorated`'s own doc
@@ -248,6 +300,18 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     wm.theme = theme;
     wm.lock = lock;
     wm.auto_back_and_forth = engine.get_bool("workspace.auto_back_and_forth", false);
+    // `false` (the default) keeps srdwm's original single-shared-workspace
+    // design exactly as it always was; `true` switches to Hyprland/niri-
+    // style independent per-monitor workspace sets. See `WindowManager::
+    // per_monitor_workspaces`'s own doc comment for what this actually
+    // changes.
+    wm.per_monitor_workspaces = engine.get_bool("workspace.per_monitor", false);
+    // Validated/defaulted since the config engine's beginning but never
+    // read anywhere until now - see `WindowManager::primary_layout`'s own
+    // doc comment for what actually applies them (a no-op outside
+    // `workspace.per_monitor` mode).
+    wm.primary_layout = engine.get_string("monitor.primary_layout", "");
+    wm.secondary_layout = engine.get_string("monitor.secondary_layout", "");
 }
 
 /// Applies `general.default_layout` to the workspaces that exist at
@@ -407,17 +471,38 @@ fn sync(wm: &Rc<RefCell<WindowManager>>, platform: &mut dyn Platform, last_synce
     // change silently undid itself within milliseconds, confirmed via the
     // core diagnostic logging two `switch_workspace` calls a few
     // milliseconds apart, the second putting it right back where it
-    // started. Re-asserting real platform focus still happens on every
-    // *genuine* focus change, which is everything the comment above this
-    // one actually needed fixed.
+    // started. This gate alone wasn't the complete fix, though - see the
+    // unconditional update just below for the other half.
     if focused != *last_synced_focus {
         if let Some(id) = focused {
             if let Err(e) = platform.focus(id) {
                 log::warn!("focus({id}) failed: {e}");
             }
         }
-        *last_synced_focus = focused;
     }
+    // Unconditional, not just inside the block above: a real mouse click
+    // changes `wm.focused_id()` through a completely separate, synchronous
+    // path (`input::focus_window`, called directly from the click handler)
+    // that never touches `last_synced_focus` at all. Updating it only when
+    // *this* function was the one to act on a change meant the very first
+    // real click after startup left it permanently stale - every dirty
+    // tick from then on saw `focused != *last_synced_focus` (comparing the
+    // click's real, current value against this now-ancient one), treated
+    // it as a fresh genuine change, and called `platform.focus()` again
+    // for a focus that hadn't actually moved since the last tick.
+    // `focus_window`'s own workspace-follow side effect then fired on that
+    // spurious re-assertion and switched back to the still-focused
+    // window's own (unchanged) workspace - silently reverting any
+    // `activate_workspace` IPC call within roughly a millisecond. Reported
+    // live as `srd dispatch activate workspace` having no visible effect;
+    // confirmed via temporary diagnostic logging in `switch_workspace`/
+    // `focus_window` showing exactly this switch-then-immediate-revert
+    // pair. This line now runs every tick regardless, so `last_synced_
+    // focus` always reflects the real current focus by the time this
+    // function returns - genuine changes (from any source: click, IPC,
+    // Alt-Tab) are still caught by the comparison above, but a tick where
+    // nothing changed can no longer be mistaken for one where it did.
+    *last_synced_focus = focused;
     let (visible, hidden) = {
         let wm = wm.borrow();
         // Bottom-to-top stacking order, not `visible_windows()`'s arbitrary
@@ -614,6 +699,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     dirty = true;
                 }
                 Event::WindowMoved { .. } | Event::WindowResized { .. } => dirty = true,
+                // `CoreEvent::WindowFocused` existed as a variant already
+                // (pushed by `input.rs`'s `focus_window` on every real
+                // focus change) but had no arm here at all - it fell
+                // through to the catch-all below, which does not set
+                // `dirty`. A focus change that doesn't also move, resize,
+                // create, or destroy a window (the common case: clicking a
+                // second, already-visible window) never reached `sync()`
+                // at all through this loop, so nothing here ever gave the
+                // border/titlebar recolor a second chance if the direct,
+                // synchronous `set_window_activated` path inside the click
+                // handler itself didn't already catch it. Reported live as
+                // a window's border staying stuck at whatever focus state
+                // it last happened to redraw with, in either direction,
+                // regardless of which window was actually focused now.
+                Event::WindowFocused(_) => dirty = true,
                 Event::WorkspaceChanged => dirty = true,
                 // Laptop lid. The handler is a plain Lua function, so the
                 // config decides what to do (lock, suspend, nothing).

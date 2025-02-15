@@ -309,7 +309,14 @@ fn apply_or_test(state: &mut CompState, config: &ZwlrOutputConfigurationV1, data
                 output.change_current_state(None, None, Some(Scale::Fractional(*s)), None);
             }
             if let Some((x, y)) = position {
-                apply_output_position(state, &output, Point::from((*x, *y)));
+                // A real `wlr-output-management-v1` client's own position
+                // request is logical, by protocol convention - `apply_
+                // output_position` wants physical (see its own doc
+                // comment), so it gets converted here rather than assumed.
+                let output_scale = output.current_scale().fractional_scale();
+                let physical: Point<i32, smithay::utils::Logical> =
+                    (((*x as f64) * output_scale).round() as i32, ((*y as f64) * output_scale).round() as i32).into();
+                apply_output_position(state, &output, physical);
             }
         }
     }
@@ -327,16 +334,48 @@ fn apply_or_test(state: &mut CompState, config: &ZwlrOutputConfigurationV1, data
 /// (used to translate render geometry into head-local space) each keep
 /// their own copy for reasons documented on their own fields, and would
 /// otherwise silently drift from what `Output` now reports.
-pub(crate) fn apply_output_position(state: &mut CompState, output: &Output, new_location: Point<i32, smithay::utils::Logical>) {
-    output.change_current_state(None, None, None, Some(new_location));
+///
+/// `new_location` is *physical* pixels - the same space `Platform::
+/// monitors()` reports `full_x`/`full_y` in (see that function's own doc
+/// comment for why), which is what `entry.location`/`head.location` are
+/// everywhere else in this compositor (render geometry, damage tracking,
+/// cursor clamping). `output.change_current_state`'s own position
+/// parameter is a real Wayland-protocol value, and `wl_output`/
+/// `xdg_output` report position to clients in *logical* points - always,
+/// not a choice this compositor makes - so it gets a separately scaled
+/// copy here rather than the raw physical value. Storing the unconverted
+/// physical value in `change_current_state` too (what this used to do)
+/// looked harmless locally but told every real Wayland client the wrong
+/// logical position for any output whose scale isn't exactly `1.0`,
+/// reported from the AGS peer session as a dead gap between two monitors'
+/// desktop space wide enough to drop a window or a pointer into: their
+/// own arrangement math chains outputs by the physical width `srd
+/// monitors` reports, correctly, but a `1.25`-scale output being told a
+/// `1920`-logical-point position when its real logical width was `1536`
+/// opened exactly that gap.
+///
+/// Callers already holding a *logical* position (a real `wlr-output-
+/// management-v1` client's own request, which is logical by protocol
+/// convention) must convert to physical before calling this - see this
+/// function's own call site in `handle_apply_or_test` for that
+/// conversion.
+pub(crate) fn apply_output_position(state: &mut CompState, output: &Output, new_location_physical: Point<i32, smithay::utils::Logical>) {
+    let scale = output.current_scale().fractional_scale();
+    let logical: Point<i32, smithay::utils::Logical> =
+        ((new_location_physical.x as f64 / scale).round() as i32, (new_location_physical.y as f64 / scale).round() as i32).into();
+    output.change_current_state(None, None, None, Some(logical));
     if let Some(entry) = state.outputs.iter_mut().find(|e| &e.output == output) {
-        entry.location = new_location;
+        entry.location = new_location_physical;
     }
     if let Some(udev) = state.udev.as_mut() {
         if let Some(head) = udev.heads.iter_mut().find(|h| &h.output == output) {
-            head.location = new_location;
+            head.location = new_location_physical;
         }
     }
+    // Remembered for next startup - see `monitor_layout`'s own module doc
+    // comment for why this compositor persists its own layout rather than
+    // leaving that to whichever panel happens to be running.
+    crate::monitor_layout::save_output(&output.name(), crate::monitor_layout::PersistedOutput { x: new_location_physical.x, y: new_location_physical.y, enabled: true });
 }
 
 fn announce_head(state: &mut CompState, manager: &ZwlrOutputManagerV1, output: &Output, client: &Client, dh: &DisplayHandle) {

@@ -151,42 +151,58 @@ where
 /// masked copy of `surface`'s content - see `rounded_corners_pixman`'s
 /// module doc comment for what this actually does and why it needs a cache
 /// at all. `epoch` is the window's current `CompState::content_epoch`
-/// value (bumped once per real commit, in `commit()`); the cached entry is
-/// only rebuilt when that no longer matches what it was last built from, so
-/// a window that isn't currently repainting costs nothing here beyond one
-/// `HashMap` lookup per frame.
+/// value (bumped once per real commit, in `commit()`); `loc`/`size` are
+/// `rounded_corners_pixman::masked_content_buffer`'s own tree-render
+/// origin and off-screen buffer dimensions (the caller's already-computed
+/// negated `content_offset` and content rect) - the cached entry is
+/// rebuilt whenever any of `epoch`/`radius`/`loc`/`size` no longer match
+/// what it was last built from, so a window that isn't currently
+/// repainting, resizing, or having its shadow-margin geometry renegotiated
+/// costs nothing here beyond one `HashMap` lookup per frame.
 ///
-/// Free function taking the two fields it needs directly, rather than a
+/// Free function taking the fields it needs directly, rather than a
 /// `CompState` method, so it can be called from inside `udev/render.rs`'s
 /// loop alongside the already-live `self.udev.as_mut()` borrow - see that
 /// call site.
 ///
-/// `None` either because masking genuinely isn't possible right now (falls
-/// through to `rounded_corners_pixman::masked_content_buffer`'s own `None`
-/// cases) or because it hasn't been attempted yet this call; either way the
-/// caller's fallback is the same: render `surface`'s content unrounded via
-/// [`surface_content_elements`].
+/// `None` either because the off-screen render itself failed (a genuine
+/// renderer error - there is no longer any "this window isn't shaped
+/// right for masking" restriction, see `masked_content_buffer`'s own doc
+/// comment) or because it hasn't been attempted yet this call; either way
+/// the caller's fallback is the same: render `surface`'s content unrounded
+/// via [`surface_content_elements`].
 pub(crate) fn rounded_content_buffer<'a>(
-    cache: &'a mut std::collections::HashMap<srdwm_core::WindowId, (u64, u32, smithay::backend::renderer::element::memory::MemoryRenderBuffer)>,
+    cache: &'a mut std::collections::HashMap<srdwm_core::WindowId, (u64, u32, (i32, i32), (i32, i32), smithay::backend::renderer::element::memory::MemoryRenderBuffer)>,
+    renderer: &mut smithay::backend::renderer::pixman::PixmanRenderer,
     epoch: u64,
     id: srdwm_core::WindowId,
     surface: &WlSurface,
+    loc: (i32, i32),
+    size: (i32, i32),
     radius: f32,
     corners: crate::rounded_corners::RoundedCorners,
 ) -> Option<&'a smithay::backend::renderer::element::memory::MemoryRenderBuffer> {
     let radius_bits = radius.to_bits();
-    let stale = cache.get(&id).map(|(built, r, _)| *built != epoch || *r != radius_bits).unwrap_or(true);
+    let stale = cache.get(&id).map(|(built, r, l, s, _)| *built != epoch || *r != radius_bits || *l != loc || *s != size).unwrap_or(true);
     if stale {
-        match crate::rounded_corners_pixman::masked_content_buffer(surface, radius, corners) {
-            Some(buf) => {
-                cache.insert(id, (epoch, radius_bits, buf));
+        match crate::rounded_corners_pixman::masked_content_buffer(renderer, surface, loc, size, radius, corners) {
+            Some(data) => {
+                let buffer = smithay::backend::renderer::element::memory::MemoryRenderBuffer::from_slice(
+                    &data,
+                    smithay::backend::allocator::Fourcc::Argb8888,
+                    size,
+                    1,
+                    smithay::utils::Transform::Normal,
+                    None,
+                );
+                cache.insert(id, (epoch, radius_bits, loc, size, buffer));
             }
             None => {
                 cache.remove(&id);
             }
         }
     }
-    cache.get(&id).map(|(_, _, b)| b)
+    cache.get(&id).map(|(_, _, _, _, b)| b)
 }
 
 /// Every mapped layer-shell surface on `output` whose [`Layer`] `include`
@@ -199,7 +215,35 @@ pub(crate) fn rounded_content_buffer<'a>(
 /// on `map.layers()` before rendering, so surfaces sharing one `Layer`
 /// keep the same relative stacking smithay's convenience wrapper gave
 /// them, now that this function replaces it.
-pub(crate) fn output_layer_elements<R>(renderer: &mut R, output: &Output, origin: (i32, i32), include: impl Fn(Layer) -> bool) -> Vec<OverlayElement<R>>
+///
+/// Takes no `origin`/global-position parameter, unlike every *other*
+/// per-head element builder in `udev/render.rs` - deliberately: those all
+/// convert a window's `geometry` (stored in *global*, whole-desktop space)
+/// into this one head's local framebuffer space by subtracting the head's
+/// own `origin`. `LayerMap::layer_geometry` is different - confirmed
+/// against smithay 0.7.0's own source (`desktop/wayland/layer.rs`): its
+/// `zone`/layer positions are built from the output's own mode size alone,
+/// with no global offset baked in at all, so it is *already* head-local.
+/// An earlier version of this function added `origin` to it anyway (to
+/// "match" the other element builders' own pattern without checking
+/// whether the input was actually the same kind of value) - harmless for
+/// a single-output setup or this output's own primary/first head, where
+/// `origin` is always `(0, 0)`, but on a second head at a real nonzero
+/// `origin` (e.g. `(1920, 0)`) it shifted every layer-shell surface - a
+/// wallpaper, a bar - clean off the right edge of that head's own
+/// 1920px-wide local framebuffer, never drawn at all despite the surface
+/// being genuinely mapped, configured, and holding real committed pixel
+/// data the entire time. Reported live as a real second monitor showing
+/// nothing but its own clear colour, confirmed root-caused by adding a
+/// temporary diagnostic (`LAYER-ELEMENTS-DIAG`, since removed) that logged
+/// `layer_count`/`has_buffer` per output - both outputs showed identical,
+/// fully-populated state the whole time, which is what pointed at a
+/// positioning bug downstream of element-gathering rather than anything
+/// about the surfaces or the render/flip pipeline itself (the pipeline
+/// itself was separately confirmed alive on this exact head by moving the
+/// real cursor there and seeing it render correctly, a different code path
+/// with no `layer_geometry` involved at all).
+pub(crate) fn output_layer_elements<R>(renderer: &mut R, output: &Output, include: impl Fn(Layer) -> bool) -> Vec<OverlayElement<R>>
 where
     R: Renderer + ImportAll + ImportMem,
     R::TextureId: Clone + Send + 'static,
@@ -211,8 +255,7 @@ where
             continue;
         }
         let Some(geo) = map.layer_geometry(layer) else { continue };
-        let location = (origin.0 + geo.loc.x, origin.1 + geo.loc.y);
-        elements.extend(surface_content_elements(renderer, layer.wl_surface(), location, 1.0));
+        elements.extend(surface_content_elements(renderer, layer.wl_surface(), (geo.loc.x, geo.loc.y), 1.0));
     }
     elements
 }
@@ -388,17 +431,43 @@ pub(crate) fn popup_surface_under(state: &CompState, pos: Point<f64, Logical>) -
 /// the caller: that case is now handled by a second, always-unconditional
 /// pass over the focused/hovered windows specifically, independent of
 /// whether this function's damage-gated pass runs at all this tick.
+///
+/// `origin` is the rendering head's own position in the shared global
+/// space - needed because `damage` comes straight from that head's own
+/// `OutputDamageTracker`, which (like every other per-head render element
+/// in `udev/render.rs`) operates entirely in that head's own *local*
+/// framebuffer space, starting at `(0, 0)` regardless of where the head
+/// actually sits in the multi-monitor desktop. `space.element_geometry`,
+/// by contrast, is always in *global* space (`Space` tracks every window
+/// across the whole desktop, not per-output). Comparing the two directly
+/// - what this function used to do - only ever produced a real overlap
+/// for a head whose own `origin` happened to be `(0, 0)`, i.e. the first/
+/// primary monitor in a left-to-right layout; every window on any other
+/// monitor could never be found "touched" by that monitor's own damage at
+/// all, no matter how much of it was actually changing on screen. A
+/// client relying on this path alone - a video window the user had
+/// switched focus *away* from, since the separate always-unconditional
+/// pass above only covers the focused/hovered window - never received
+/// another frame callback once srdwm's own bootstrap-configure frame
+/// callback was used up, and simply stopped rendering new frames forever:
+/// reported live as a paused-looking video on a second monitor, audio
+/// still playing underneath (a completely separate pipeline, unaffected).
+/// Same root cause and same fix shape as `output_layer_elements`'s own
+/// local/global mismatch, found earlier the same session.
 pub(crate) fn windows_touched_by_damage<'a>(
     space: &'a Space<DWindow>,
     damage: &'a [Rectangle<i32, Physical>],
+    origin: Point<i32, Logical>,
     scale: Scale<f64>,
 ) -> impl Iterator<Item = &'a DWindow> + 'a {
+    let origin_phys = origin.to_physical_precise_round(scale);
     space.elements().filter(move |w| {
         space
             .element_geometry(w)
             .map(|geo| {
                 let phys = geo.to_physical_precise_round(scale);
-                damage.iter().any(|d| d.overlaps(phys))
+                let local = Rectangle::new(phys.loc - origin_phys, phys.size);
+                damage.iter().any(|d| d.overlaps(local))
             })
             .unwrap_or(false)
     })

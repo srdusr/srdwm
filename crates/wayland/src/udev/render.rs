@@ -8,6 +8,7 @@ impl CompState {
     /// instead of the slowest one gating the rest.
     pub(crate) fn render_udev_frame(&mut self) {
         self.tick_animations();
+        self.tick_hover_glyph_animation();
         self.tick_dirty_broadcasts();
         let locked = self.lock.locked;
         let elapsed = self.start_time.elapsed();
@@ -47,9 +48,22 @@ impl CompState {
         // looked up fresh per head (head-local `origin` translation).
         let ids: Vec<srdwm_core::WindowId> = if locked { Vec::new() } else { self.wm.borrow().visible_windows_front_to_back().map(|w| w.id).collect() };
         let focused = self.wm.borrow().focused_id();
-        // Default `false` here, unlike winit's `unwrap_or(true)` - see
-        // `rounded_corners_pixman`'s module doc comment for the CPU cost
-        // that makes this backend opt-in rather than on by default.
+        // Stays default `false` here, unlike winit's `unwrap_or(true)` --
+        // see `rounded_corners_pixman`'s module doc comment for the real
+        // CPU cost this backend's masking technique has: a full row-by-row
+        // buffer copy on *every commit* of a constantly-repainting client,
+        // and that doc comment names video specifically as the case that
+        // pays it in full, every frame, for as long as the feature is on.
+        // Flipping this default was tried and reverted in the same pass
+        // that fixed this backend's render-loop latency (see `poll_events`'
+        // own history) - turning it on here would have directly undone
+        // that fix for exactly the content (video) it mattered most for.
+        // The actual "not all windows curved" complaint this was meant to
+        // address (an undecorated/CSD window like Firefox, with no
+        // compositor-drawn titlebar and only a thin border strip to look
+        // rounded at all) is better addressed by giving that border strip
+        // enough rows to show a real curve - see `ThemeConfig::
+        // default_border_width`'s own doc comment.
         let rounded_corners_enabled = self.wm.borrow().rounded_corners_enabled.unwrap_or(false);
         let popup_targets = if locked { Vec::new() } else { crate::elements::popup_targets(self) };
 
@@ -58,13 +72,69 @@ impl CompState {
         // `captures` taken above nowhere to go this pass - put them back
         // rather than silently dropping a client's pending screenshot
         // because a VT switch happened to be in progress at that instant.
-        let Some(udev) = self.udev.as_ref() else {
+        let Some(udev) = self.udev.as_mut() else {
             self.screencopy_pending.extend(captures);
             return;
         };
         if !udev.active {
             self.screencopy_pending.extend(captures);
             return;
+        }
+        // A workspace switch changes *which windows* `custom_elements`
+        // includes as drastically as a VT switch changes what's been
+        // scanned out in the meantime (see `register_session_notifier`'s
+        // own `head.ages = [0, 0]` for that case) - reported live as
+        // visible corruption (stale, wrong-coloured blocks, worst on a
+        // window that was actively repainting - a scrolling terminal --
+        // right as the switch happened) confined to exactly the frame or
+        // two around a switch, then never self-correcting, consistent with
+        // one transient frame's content getting baked into a buffer slot
+        // and never fully overwritten again since later frames only patch
+        // whatever's *actually* still changing. `render_output`'s own
+        // per-element diffing (`elements_gone`/moved-element damage, plus
+        // each element's own `damage_since`) should in principle already
+        // produce correct total damage for a completely different element
+        // list - this is a defensive belt-and-braces reset, not a
+        // fallback for a specific proven bug in that diffing, matched to
+        // the one other place in this codebase that already resets `ages`
+        // for the same underlying reason ("what's in this buffer might not
+        // be what the tracker's own history thinks it is").
+        let current_workspace = self.wm.borrow().current_workspace();
+        if udev.last_rendered_workspace != Some(current_workspace) {
+            udev.last_rendered_workspace = Some(current_workspace);
+            for head in &mut udev.heads {
+                head.ages = [0, 0];
+            }
+        }
+        // A head whose page-flip event never arrives (kernel-dropped, or a
+        // DRM event this driver never sends for reasons this backend has no
+        // visibility into) would otherwise sit in `flip_pending` forever:
+        // `session.rs`'s DRM-fd handler is the only other place that clears
+        // it, and it can only do that in response to an event that actually
+        // shows up. A head stuck this way is excluded from `ready` below on
+        // every single tick from then on - silently frozen on whatever it
+        // last displayed, with no error logged anywhere (the flip that set
+        // `flip_pending` had already succeeded when it was issued), which
+        // is exactly what a real second monitor did live: it rendered
+        // nothing but its own initial clear colour for the rest of the
+        // session, from moments after being connected. `FLIP_TIMEOUT` is
+        // far above any real vblank interval (even 30Hz is ~33ms) but short
+        // enough that a genuine loss is invisible in practice; forcing
+        // `flip_pending` back to `false` here just lets the normal path
+        // below retry - if a flip is still genuinely in flight, the
+        // kernel's own EBUSY on the next `page_flip` call surfaces as the
+        // existing "udev: page flip failed" log line instead of a silent
+        // freeze.
+        const FLIP_TIMEOUT: Duration = Duration::from_millis(200);
+        for head in udev.heads.iter_mut() {
+            if head.flip_pending && head.flip_pending_since.elapsed() > FLIP_TIMEOUT {
+                log::warn!(
+                    "udev: no page-flip event for output {} after {:?}; forcing recovery",
+                    head.output.name(),
+                    head.flip_pending_since.elapsed()
+                );
+                head.flip_pending = false;
+            }
         }
         let ready: Vec<(usize, Output)> = udev
             .heads
@@ -83,7 +153,7 @@ impl CompState {
         // frame-callback loop below (after `udev` is no longer borrowed)
         // can notify only the windows that damage actually overlapped --
         // see `windows_touched_by_damage`'s doc comment in elements.rs.
-        let mut presented: Vec<(Output, Vec<Rectangle<i32, Physical>>)> = Vec::new();
+        let mut presented: Vec<(Output, Point<i32, Logical>, Vec<Rectangle<i32, Physical>>)> = Vec::new();
         for (index, output) in ready {
             let lock_surface = self.lock_surface_for(&output).cloned();
             // Extracted before the `self.udev` borrow below starts - see
@@ -116,6 +186,16 @@ impl CompState {
                     origin,
                     hsize,
                 ));
+                // Night light/reading mode - a translucent full-output
+                // overlay, pushed right after the cursor so it colours
+                // everything else (windows, bars, menus) but never the
+                // pointer itself. See `color_filter::render_element` for
+                // why an overlay rather than a true per-pixel shader.
+                let color_filter = self.wm.borrow().color_filter;
+                let buf = self.color_filter_buffers.entry(output.name()).or_insert_with(SolidColorBuffer::default);
+                if let Some(elem) = crate::color_filter::render_element(buf, color_filter, hsize) {
+                    custom_elements.push(crate::elements::OverlayElement::Solid(elem));
+                }
                 // The right-click titlebar menu, if open - pushed right
                 // after the cursor so it's still topmost over every window
                 // but never hides the pointer itself (you need to see what
@@ -164,7 +244,6 @@ impl CompState {
                     custom_elements.extend(crate::elements::output_layer_elements(
                         &mut udev.renderer,
                         &output,
-                        (origin.x, origin.y),
                         |layer| matches!(layer, Layer::Top | Layer::Overlay),
                     ));
                 }
@@ -203,23 +282,165 @@ impl CompState {
                     // windows) has to agree with what `sync_geometry` mapped
                     // the content to, or they drift apart again.
                     let geom = self.window_anims.get(&id).map(crate::state::WindowAnim::current_rect).unwrap_or(w.geometry);
-                    // Drawn first among this window's own decoration, and
-                    // positioned from the same animated `geom` as everything
-                    // else here - not `w.geometry` - for the identical
-                    // reason: a shadow that stayed at the pre-tween rect
-                    // while the window slid past it would look exactly as
-                    // detached as the border did before that fix. Not
-                    // fragment-clipped against `occluders` like the titlebar/
-                    // border below: at `SHADOW_MAX_ALPHA`'s low opacity, a
-                    // shadow bleeding slightly onto a window stacked in front
-                    // of this one reads as a soft edge, not the hard-line
-                    // bleed-through that made the titlebar/border need it.
-                    if let Some(shadow) = self.shadow_buffers.get(&id) {
-                        let rect = decoration::shadow_rect(geom);
-                        let pos = ((rect.x - origin.x) as f64, (rect.y - origin.y) as f64);
-                        match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, shadow, None, None, None, Kind::Unspecified) {
-                            Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
-                            Err(e) => log::warn!("udev: failed to import shadow buffer: {e}"),
+                    // `geom` above is this compositor's own request/target;
+                    // `frame` corrects its far edge to match what the
+                    // client's surface really committed (a terminal's
+                    // cell-quantized size, most commonly) - see
+                    // `effective_frame`'s own doc comment. Everything below
+                    // that has to visually hug the real edge (titlebar/
+                    // border placement, the shadow, the occlusion test
+                    // against windows behind this one) reads `frame`; only
+                    // the actual content position still reads `geom`/`band`
+                    // directly, since that's already correctly anchored via
+                    // `content_offset` below regardless of this correction.
+                    let frame = crate::state::CompState::effective_frame_of(&self.wm, &self.id_to_window, id, geom);
+                    // Computed here, ahead of the border strips below,
+                    // purely so they can know it - the actual content
+                    // element that reads this same masked buffer is still
+                    // pushed later, in its own usual place in the loop, and
+                    // gets a cheap cache hit from `rounded_content_buffer`'s
+                    // own `epoch`/`radius_bits` check rather than doing the
+                    // masking work twice. `w.decorated` alone used to gate
+                    // whether the border strips' own "extra" rows (see
+                    // `decoration::border_top_visible_rows`'s doc comment)
+                    // were safe to draw past their nominal `border_width` --
+                    // correct for a decorated window (a titlebar band
+                    // absorbs them) but not for an undecorated one, which
+                    // relies on content-masking instead, and several real
+                    // clients (Firefox, confirmed live) never actually get
+                    // masked at all (`masked_content_buffer`'s own
+                    // subsurface early-out). Cropping unconditionally
+                    // whenever undecorated (the fix's first version) closed
+                    // the wedge bug but cost every undecorated window its
+                    // own visible corner curve even when masking *did*
+                    // succeed, which is unnecessary - this makes that
+                    // decision follow the real per-window, per-frame
+                    // outcome instead of just the static `decorated` flag.
+                    // `masked.is_some()` alone used to be the whole check,
+                    // back when masking meant identifying and reading one
+                    // specific client subsurface directly - wrong the
+                    // moment the resolved child excluded more of the root
+                    // than the client's own declared shadow margin (a GTK4
+                    // client legitimately reserves an invisible margin for
+                    // its own drop shadow, but Firefox's tab strip/title row
+                    // is painted on the *root* surface outside its content
+                    // child, and once that surface-picking heuristic got
+                    // permissive enough to mask Firefox too, it silently
+                    // deleted Firefox's real tab strip - reported live as
+                    // "Firefox's titlebar turned invisible", confirmed by
+                    // toggling `general.rounded_corners` off, which brought
+                    // it straight back). `rounded_corners_pixman::masked_
+                    // content_buffer` no longer has that failure mode at
+                    // all: it renders the window's *whole* surface tree into
+                    // its own off-screen buffer and masks the composited
+                    // result, the same thing a GPU shader-based compositor
+                    // does by construction - so `.is_some()` is genuinely
+                    // the whole answer again. `loc`/`content_size` mirror
+                    // the real content push's own `content_offset`/`band`
+                    // correction below (`pos`'s own doc comment) - both
+                    // call sites have to agree on the origin/size a mask was
+                    // built at, or `rounded_content_buffer`'s cache would
+                    // never consider one stale after a resize.
+                    let content_will_be_masked = if rounded_corners_enabled && self.wm.borrow().resizing_window() != Some(id) {
+                        let content_offset = self.id_to_window.get(&id).map(|dw| dw.geometry().loc).unwrap_or_default();
+                        let band = if w.decorated { srdwm_core::TITLEBAR_HEIGHT as i32 } else { 0 };
+                        let content_size = (frame.width as i32, (frame.height as i32 - band).max(0));
+                        let loc = (-content_offset.x, -content_offset.y);
+                        self.id_to_window
+                            .get(&id)
+                            .and_then(crate::elements::window_wl_surface)
+                            .map(|surface| {
+                                let epoch = self.content_epoch.get(&id).copied().unwrap_or(0);
+                                let corners = if w.decorated { crate::rounded_corners::RoundedCorners::BOTTOM_ONLY } else { crate::rounded_corners::RoundedCorners::ALL };
+                                crate::elements::rounded_content_buffer(&mut self.rounded_content_buffers, &mut udev.renderer, epoch, id, &surface, loc, content_size, w.corner_radius as f32, corners).is_some()
+                            })
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    let border_curve_is_safe = w.decorated || content_will_be_masked;
+                    // Temporary: a peer session precisely measured a real
+                    // window's border curving correctly while its content
+                    // stayed hard-square (radius 0), despite both this
+                    // probe and the real content-render call ~200 lines
+                    // below passing identical arguments against the same
+                    // cache - logs the three inputs that decide which
+                    // branch each one actually takes, so a live repro
+                    // says definitively whether `w.decorated` is really
+                    // `false` here (the rule's own intent) or the mask
+                    // genuinely succeeds-then-somehow-doesn't-render.
+                    // Remove once resolved.
+                    log::debug!(
+                        "udev::render: corner-mask state for {} (id {id:?}): decorated={} content_will_be_masked={content_will_be_masked} border_curve_is_safe={border_curve_is_safe} resizing={}",
+                        w.app_id,
+                        w.decorated,
+                        self.wm.borrow().resizing_window() == Some(id)
+                    );
+                    // Pushed *before* the titlebar band below, deliberately --
+                    // unlike the bottom/side strips further down, this one
+                    // isn't confined to `geometry`'s own outside: whenever
+                    // `corner_radius > border_width` (the common case: 12 vs
+                    // 4 by default), `border_top_visible_rows` deliberately
+                    // extends this buffer `corner_radius - border_width` rows
+                    // *past* its nominal thickness, straight down into the
+                    // titlebar band's own top rows, so the one shared curve
+                    // has room to finish (see that function's and `render_
+                    // border_top`'s own doc comments). For that overlap to
+                    // read as one continuous curve rather than the titlebar's
+                    // own, differently-centred corner mask poking a square
+                    // notch through it, this element's border-coloured
+                    // corner columns have to actually paint over the
+                    // titlebar's own attempt at those same pixels - which
+                    // only happens if this pushes first. Reported live,
+                    // confirmed via a zoomed screenshot: pushed after the
+                    // titlebar (the previous order), the titlebar's own
+                    // smaller, square-under-the-curve corner rendered on top
+                    // instead, since `custom_elements` composites earlier-
+                    // pushed entries over later ones - exactly backwards
+                    // from what this overlap needs.
+                    if w.border_width > 0 {
+                        let strips = decoration::border_strips(frame, w.border_width);
+                        // Strip 0 (top) rounded on its own two corners - see
+                        // `render_border_top`'s own doc comment - so it's a
+                        // cached bitmap (rebuilt only in `redraw_decoration_
+                        // buffer`, same as the titlebar itself), not
+                        // rasterized fresh here every frame. Not fragment-
+                        // clipped like the left/right strips further down --
+                        // cropping a bitmap's source rect per fragment is
+                        // real extra work for a strip that's only `border_
+                        // width` pixels tall to begin with, so this only
+                        // handles the all-or-nothing case: skip entirely
+                        // once *fully* covered, accept a small residual
+                        // bleed while only partially covered.
+                        if strips[0].width > 0 && strips[0].height > 0 && !strips[0].subtract_all(&occluders).is_empty() {
+                            if let Some(buffer) = self.border_top_decorations.get(&id) {
+                                // See `decoration::border_top_visible_rows`'s
+                                // own doc comment: an undecorated window's
+                                // top strip crops away this buffer's
+                                // titlebar-band-only "extra" rows, which
+                                // otherwise paint a border-coloured wedge
+                                // straight onto its real content - reported
+                                // live on a real Firefox window, confirmed
+                                // via a screenshot to be neither Firefox's
+                                // own rendering nor the separate content-
+                                // mask feature.
+                                let (row0, rows, shift) = decoration::border_top_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);
+                                let pos = ((strips[0].x - origin.x) as f64, (strips[0].y - origin.y + shift as i32) as f64);
+                                let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((strips[0].width as f64, rows as f64))));
+                                // Temporary: chasing a live report that the
+                                // bottom two corners render square while the
+                                // top two curve correctly, on the same
+                                // window, same frame. Logs this strip's own
+                                // computed rows/shift/position so a live
+                                // repro can be compared directly against the
+                                // matching bottom-strip line below. Remove
+                                // once resolved.
+                                log::debug!("udev::render: TOP border strip for {} (id {id:?}): row0={row0} rows={rows} shift={shift} pos={pos:?} strip_rect={:?}", w.app_id, strips[0]);
+                                match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, src, None, Kind::Unspecified) {
+                                    Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                                    Err(e) => log::warn!("udev: failed to import top border buffer: {e}"),
+                                }
+                            }
                         }
                     }
                     if let Some(deco) = self.decorations.get(&id) {
@@ -235,7 +456,7 @@ impl CompState {
                         // visible fragment can come from the matching
                         // sub-rect of the source image rather than the
                         // whole thing.
-                        let titlebar_rect = srdwm_core::Rect::new(geom.x, geom.y, geom.width, srdwm_core::TITLEBAR_HEIGHT);
+                        let titlebar_rect = srdwm_core::Rect::new(frame.x, frame.y, frame.width, srdwm_core::TITLEBAR_HEIGHT);
                         for fragment in crate::elements::visible_border_fragments(titlebar_rect, &occluders) {
                             let pos = ((fragment.x - origin.x) as f64, (fragment.y - origin.y) as f64);
                             let src = Rectangle::new(
@@ -248,47 +469,47 @@ impl CompState {
                             }
                         }
                     }
-                    // Border strips sit entirely outside this window's own
-                    // `geometry` (see `decoration::border_strips`), so they
-                    // never overlap its own decoration/content - draw
-                    // order against those doesn't matter here, only against
-                    // other windows', which iterating `ids` in stacking
-                    // order already gets right *for windows also drawn via
-                    // this same custom_elements loop* - but not against
-                    // any window's own *content*, which is why `occluders`
-                    // below is still needed even with that ordering.
+                    // The bottom strip sits entirely outside this window's
+                    // own `geometry` with no titlebar-style overlap into
+                    // content the way the top strip's own "extra" rows do
+                    // above, so push order against the titlebar doesn't
+                    // matter for it - only against other windows', which
+                    // iterating `ids` in stacking order already gets right
+                    // *for windows also drawn via this same custom_elements
+                    // loop* - but not against any window's own *content*,
+                    // which is why `occluders` below is still needed even
+                    // with that ordering.
+                    //
+                    // The left/right side strips are a different story --
+                    // see their own push site further down for why they
+                    // (unlike the bottom strip) *do* need cropping against
+                    // this same top/bottom-strip overlap, a real bug this
+                    // comment used to claim didn't exist here at all.
                     if w.border_width > 0 {
-                        let color = crate::state::effective_border_color(w.border_color, focused == Some(id));
-                        let strips = decoration::border_strips(geom, w.border_width);
-                        // Strips 0/1 (top/bottom) rounded on their own two
-                        // corners - see `render_border_top`/
-                        // `render_border_bottom`'s doc comments - so both
-                        // are cached bitmaps (rebuilt only in
-                        // `redraw_decoration_buffer`, same as the titlebar
-                        // itself), not rasterized fresh here every frame.
-                        // Not fragment-clipped like the left/right strips
-                        // below - cropping a bitmap's source rect per
-                        // fragment is real extra work for a strip that's
-                        // only `border_width` pixels tall to begin with, so
-                        // this only handles the all-or-nothing case: skip
-                        // entirely once *fully* covered, accept a small
-                        // residual bleed while only partially covered.
-                        if strips[0].width > 0 && strips[0].height > 0 && !strips[0].subtract_all(&occluders).is_empty() {
-                            if let Some(buffer) = self.border_top_decorations.get(&id) {
-                                let pos = ((strips[0].x - origin.x) as f64, (strips[0].y - origin.y) as f64);
-                                match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, None, None, Kind::Unspecified) {
-                                    Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
-                                    Err(e) => log::warn!("udev: failed to import top border buffer: {e}"),
-                                }
-                            }
-                        }
-                        // Same all-or-nothing bitmap treatment as the top
-                        // strip, for its own two corners - see
-                        // `decoration::render_border_bottom`'s doc comment.
+                        let color = crate::state::effective_border_color(w.border_color, focused == Some(id), self.wm.borrow().theme.border_inactive_dim);
+                        let strips = decoration::border_strips(frame, w.border_width);
+                        // Strip 1 (bottom), the top strip's own mirror --
+                        // see `decoration::render_border_bottom`'s doc
+                        // comment. Same all-or-nothing bitmap treatment.
                         if strips[1].width > 0 && strips[1].height > 0 && !strips[1].subtract_all(&occluders).is_empty() {
                             if let Some(buffer) = self.border_bottom_decorations.get(&id) {
-                                let pos = ((strips[1].x - origin.x) as f64, (strips[1].y - origin.y) as f64);
-                                match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, None, None, Kind::Unspecified) {
+                                // See `decoration::border_bottom_visible_
+                                // rows`'s own doc comment: relies on
+                                // `BOTTOM_ONLY` content-masking having made
+                                // this corner of a decorated window's
+                                // content transparent already, which several
+                                // real undecorated clients (Firefox,
+                                // confirmed live) never actually get - same
+                                // wedge bug as the top strip, confirmed on
+                                // the same window's bottom-left corner via a
+                                // real screenshot, not assumed.
+                                let (row0, rows, shift) = decoration::border_bottom_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);
+                                let pos = ((strips[1].x - origin.x) as f64, (strips[1].y - origin.y - shift as i32) as f64);
+                                let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((strips[1].width as f64, rows as f64))));
+                                // Temporary: see the matching TOP border log
+                                // above. Remove once resolved.
+                                log::debug!("udev::render: BOTTOM border strip for {} (id {id:?}): row0={row0} rows={rows} shift={shift} pos={pos:?} strip_rect={:?}", w.app_id, strips[1]);
+                                match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, src, None, Kind::Unspecified) {
                                     Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
                                     Err(e) => log::warn!("udev: failed to import bottom border buffer: {e}"),
                                 }
@@ -304,9 +525,45 @@ impl CompState {
                         // visible after subtracting `occluders`, since a
                         // whole unclipped strip is exactly the bug fixed
                         // here.
+                        //
+                        // Cropped top and bottom by `extra` - the same
+                        // `corner_radius - border_width` gap `border_top_
+                        // visible_rows`/`border_bottom_visible_rows` extend
+                        // the top/bottom strips *into* whenever the radius
+                        // exceeds the border's own nominal thickness (the
+                        // common case: 12+ vs 4 at this theme's defaults).
+                        // These side strips are plain flat fills with no
+                        // curve awareness of their own (see this file's own
+                        // stale comment just below, corrected here: "sit
+                        // entirely outside... no titlebar-style overlap"
+                        // was wrong - they *do* overlap the top/bottom
+                        // strip's own extended, curved region), and used to
+                        // span the window's full nominal height
+                        // unconditionally. Since the top/bottom strip is
+                        // pushed *before* these (earlier = topmost, see
+                        // this loop's own ordering), its own curve's
+                        // transparent cutout should be what shows through
+                        // there - but a flat, uncropped side strip sitting
+                        // directly underneath filled that same "supposed to
+                        // be cut away" region with solid colour instead,
+                        // which the curve's transparency does nothing to
+                        // hide, since the side strip isn't part of what the
+                        // curve is cutting *out of*. Reported live as a
+                        // straight vertical line poking out from inside an
+                        // otherwise-correctly-curved corner, confirmed via
+                        // raw pixel sampling: solid border colour at a
+                        // fixed x, starting right at the window's nominal
+                        // top edge, running in parallel with the real
+                        // curve rather than being replaced by it.
+                        let extra = if border_curve_is_safe { w.border_width.max(w.corner_radius).saturating_sub(w.border_width) } else { 0 };
+                        let mut side_strips = [strips[2], strips[3]];
+                        for s in &mut side_strips {
+                            s.y += extra as i32;
+                            s.height = s.height.saturating_sub(2 * extra);
+                        }
                         let pool = self.border_side_buffers.entry(id).or_default();
                         let mut buf_index = 0;
-                        for strip in &strips[2..] {
+                        for strip in &side_strips {
                             if strip.width == 0 || strip.height == 0 {
                                 continue;
                             }
@@ -315,6 +572,43 @@ impl CompState {
                                 buf_index += 1;
                                 custom_elements.push(crate::elements::OverlayElement::Solid(crate::elements::border_side_render_element(buf, fragment, color, (origin.x, origin.y))));
                             }
+                        }
+                    }
+                    // Shadow, positioned from the same animated `geom` as
+                    // everything else here - not `w.geometry` - for the
+                    // same reason a stale-position border read as detached
+                    // from a mid-tween window before that fix: see `geom`'s
+                    // own doc comment above. Pushed *after* the titlebar/
+                    // border above, not before - `custom_elements` treats
+                    // earlier-pushed as topmost (see `border_side_render_
+                    // element`'s doc comment), and a shadow pushed first
+                    // rendered on top of this same window's own border
+                    // strips, alpha-blending black over them and muting the
+                    // configured border colour into a hazy, indistinct
+                    // smear instead of a crisp line. Reported live as
+                    // "spacing before the border" - confirmed by sampling
+                    // pixels straight across a window's edge: no run of the
+                    // configured border colour appeared anywhere, just a
+                    // gradient straight from content black into the
+                    // shadow's own falloff. `shadow_bitmap`'s own doc
+                    // comment already assumed "the window's own border/
+                    // titlebar/content always draws over it" - true for
+                    // content (spatially disjoint from the shadow's
+                    // rendered rect either way) but not for the border,
+                    // which sits inside the shadow's footprint and needs
+                    // the *later* push, not the earlier one, to actually
+                    // end up on top of it. Not fragment-clipped against
+                    // `occluders` like the titlebar/border above: at
+                    // `SHADOW_MAX_ALPHA`'s low opacity, a shadow bleeding
+                    // slightly onto a window stacked in front of this one
+                    // reads as a soft edge, not the hard-line bleed-through
+                    // that made the titlebar/border need it.
+                    if let Some(shadow) = self.shadow_buffers.get(&id) {
+                        let rect = decoration::shadow_rect(frame);
+                        let pos = ((rect.x - origin.x) as f64, (rect.y - origin.y) as f64);
+                        match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, shadow, None, None, None, Kind::Unspecified) {
+                            Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                            Err(e) => log::warn!("udev: failed to import shadow buffer: {e}"),
                         }
                     }
                     // The window's own content, at its own `opacity` --
@@ -354,7 +648,35 @@ impl CompState {
                             let content_offset = dwindow.geometry().loc;
                             let pos = (geom.x - origin.x - content_offset.x, geom.y + band - origin.y - content_offset.y);
                             let mut rounded_elem = None;
-                            if rounded_corners_enabled {
+                            // Skipped for whichever window is being
+                            // interactively resized right now, specifically
+                            // (not gated on `is_resizing()` alone, which
+                            // would also blank every *other* window's own
+                            // masking for the duration): `rounded_content_
+                            // buffer`'s own doc comment already flagged this
+                            // backend's real CPU cost - a full row-by-row
+                            // copy of the surface's *entire* pixel buffer on
+                            // every commit, unlike the free-on-GPU winit/
+                            // GLES path - and a resize is exactly the case
+                            // that pays it hardest: content reflows and
+                            // recommits on every single frame of the drag,
+                            // not just once. Reported live as "resizing is
+                            // very laggy" the first time this session real
+                            // hardware actually exercised `general.
+                            // rounded_corners` turned on at all (it defaults
+                            // off for exactly this reason). The corner mask
+                            // is cosmetic and this is the one moment its
+                            // absence is least likely to be noticed --
+                            // attention is on the edge being dragged, not
+                            // the opposite corner's curve - so skipping it
+                            // for the resize's duration and letting it
+                            // reappear the instant it ends (no cache
+                            // invalidation needed either way: `epoch`
+                            // already only rebuilds on a real content
+                            // change) is a real fix, not a visible
+                            // regression.
+                            let being_resized = self.wm.borrow().resizing_window() == Some(id);
+                            if rounded_corners_enabled && !being_resized {
                                 let epoch = self.content_epoch.get(&id).copied().unwrap_or(0);
                                 // Bottom-only for a decorated window, same
                                 // reasoning as `winit/render.rs`'s identical split:
@@ -362,11 +684,24 @@ impl CompState {
                                 // under the titlebar band's own rounded
                                 // bitmap.
                                 let corners = if w.decorated { crate::rounded_corners::RoundedCorners::BOTTOM_ONLY } else { crate::rounded_corners::RoundedCorners::ALL };
-                                if let Some(buffer) =
-                                    crate::elements::rounded_content_buffer(&mut self.rounded_content_buffers, epoch, id, &surface, w.corner_radius as f32, corners)
-                                {
-                                    match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, (pos.0 as f64, pos.1 as f64), buffer, Some(w.opacity), None, None, Kind::Unspecified)
-                                    {
+                                // `content_offset`/`band` above already give
+                                // this window's own content origin/size; the
+                                // mask's own off-screen buffer is rendered
+                                // and sized to match exactly, so (unlike the
+                                // old per-subsurface-buffer approach) the
+                                // result can simply be placed at plain `pos`
+                                // below - see `rounded_corners_pixman`'s own
+                                // module doc comment for why this no longer
+                                // needs a separate offset or a safety check
+                                // against `content_offset` at all: the whole
+                                // surface tree is what gets masked now, not
+                                // one guessed-at subsurface, so there is
+                                // nothing left it could silently exclude.
+                                let content_size = (frame.width as i32, (frame.height as i32 - band).max(0));
+                                let loc = (-content_offset.x, -content_offset.y);
+                                let masked = crate::elements::rounded_content_buffer(&mut self.rounded_content_buffers, &mut udev.renderer, epoch, id, &surface, loc, content_size, w.corner_radius as f32, corners);
+                                if let Some(buffer) = masked {
+                                    match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, (pos.0 as f64, pos.1 as f64), buffer, Some(w.opacity), None, None, Kind::Unspecified) {
                                         Ok(elem) => rounded_elem = Some(elem),
                                         Err(e) => log::warn!("udev: failed to import rounded content buffer: {e}"),
                                     }
@@ -380,7 +715,7 @@ impl CompState {
                             }
                         }
                     }
-                    occluders.push(geom);
+                    occluders.push(frame);
                 }
                 // Background/bottom layer-shell (wallpaper engines) last --
                 // bottommost, matching smithay's own `space_render_elements`
@@ -388,7 +723,6 @@ impl CompState {
                 custom_elements.extend(crate::elements::output_layer_elements(
                     &mut udev.renderer,
                     &output,
-                    (origin.x, origin.y),
                     |layer| matches!(layer, Layer::Background | Layer::Bottom),
                 ));
             }
@@ -499,7 +833,7 @@ impl CompState {
             };
             if has_damage {
                 let head = &mut udev.heads[index];
-                if let Err(e) = head.copy_and_flip(&udev.card, back) {
+                if let Err(e) = head.copy_and_flip(&udev.card, back, &damage_rects) {
                     log::error!("udev: page flip failed: {e}");
                     continue;
                 }
@@ -523,7 +857,7 @@ impl CompState {
                 // reason not to redraw at whatever rate this loop cycled,
                 // forever, since it kept getting told a new frame was
                 // wanted whether or not the screen had changed at all.
-                presented.push((output, damage_rects));
+                presented.push((output, origin, damage_rects));
             }
         }
 
@@ -537,7 +871,7 @@ impl CompState {
         }
 
         // Frame callbacks + lock confirmation, once the `udev` borrow is done.
-        for (output, damage_rects) in presented {
+        for (output, origin, damage_rects) in presented {
             if locked {
                 let surface = self.lock_surface_for(&output).cloned();
                 crate::lock::send_lock_frame(surface.as_ref(), &output, elapsed);
@@ -545,7 +879,7 @@ impl CompState {
             } else {
                 let out = output.clone();
                 let scale = Scale::from(out.current_scale().fractional_scale());
-                for w in crate::elements::windows_touched_by_damage(&self.space, &damage_rects, scale) {
+                for w in crate::elements::windows_touched_by_damage(&self.space, &damage_rects, origin, scale) {
                     w.send_frame(&out, elapsed, None, |_, _| Some(out.clone()));
                 }
             }

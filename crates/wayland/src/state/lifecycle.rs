@@ -74,6 +74,45 @@ impl CompState {
         let Some(w) = self.wm.borrow().window(id).cloned() else { return };
         let focused = self.wm.borrow().focused_id() == Some(id);
         let theme = self.wm.borrow().theme;
+        // Read fresh every call, not cached from creation - a client can
+        // call `xdg_toplevel.set_parent` well after its own initial map
+        // (a "Save As" dialog opened from an already-open main window,
+        // say), and this function already re-runs on every relevant state
+        // change. Written back onto the real `Window` (not just used
+        // locally) so `ResizeEdge::hit_test`'s own `is_dialog` parameter
+        // - read from `core`, which has no protocol concept to derive
+        // this from itself - agrees with whatever got drawn here. An
+        // XWayland window's own `WM_TRANSIENT_FOR` isn't read yet, so this
+        // stays `false` for those specifically - see `Window::is_dialog`'s
+        // own doc comment.
+        let is_dialog = self.id_to_window.get(&id).and_then(|dw| dw.toplevel()).map(|t| t.parent().is_some()).unwrap_or(false);
+        if let Some(win) = self.wm.borrow_mut().window_mut(id) {
+            win.is_dialog = is_dialog;
+        }
+        // Corrects `w.geometry`'s far edge to match what the client's
+        // surface really committed, when that's known - see
+        // `effective_frame`'s own doc comment. Every bitmap this method
+        // builds (titlebar, top/bottom border, shadow) is sized from
+        // `frame`, not `w.geometry` directly, so a client that settles on
+        // a slightly different real size than requested (a terminal
+        // snapping to a whole number of character cells, most commonly)
+        // gets decoration that actually hugs its real edge instead of the
+        // asked-for one.
+        let frame = self.effective_frame(id, w.geometry);
+        // Eased (ease-out-cubic, same curve `WindowAnim::current_rect`
+        // already uses - see that doc comment) progress of the glyph-
+        // reveal-on-hover animation, discretized to a `u8` alpha. `theme.
+        // button_glyph_always` skips the timing/easing math entirely and
+        // just asks for full opacity outright - see `render_titlebar`'s
+        // own `glyph_always` parameter for where that's actually applied
+        // (it overrides this per-button, not just here).
+        let hovered_button = self.hovered_titlebar_button.and_then(|(hid, hit, start)| {
+            (hid == id).then(|| {
+                let t = (start.elapsed().as_secs_f32() / decoration::HOVER_GLYPH_DURATION.as_secs_f32()).min(1.0);
+                let eased = 1.0 - (1.0 - t).powi(3);
+                (hit, (eased * 255.0).round() as u8)
+            })
+        });
         // `main.rs`'s `sync()` calls `Platform::redraw_decoration` - which
         // always reaches here - for every visible window on every dirty
         // tick, not only the window that actually changed (see `Comp
@@ -85,8 +124,8 @@ impl CompState {
         // call turns those redundant calls into a cheap signature
         // comparison instead of a full re-rasterization.
         let signature = DecorationSignature {
-            width: w.geometry.width,
-            height: w.geometry.height,
+            width: frame.width,
+            height: frame.height,
             decorated: w.decorated,
             focused,
             title: w.title.clone(),
@@ -96,6 +135,13 @@ impl CompState {
             maximized: w.maximized,
             fullscreen: w.fullscreen,
             shadows_enabled: self.wm.borrow().shadows_enabled,
+            hovered_button,
+            title_centered: theme.title_centered,
+            buttons_left: theme.buttons_left,
+            button_glyph_always: theme.button_glyph_always,
+            button_order: theme.button_order,
+            traffic_light_buttons: theme.traffic_light_buttons,
+            is_dialog,
         };
         if self.decoration_signatures.get(&id) == Some(&signature) {
             return;
@@ -103,13 +149,30 @@ impl CompState {
         self.decoration_signatures.insert(id, signature);
         if w.decorated {
             let fg = if focused { theme.titlebar_fg_focused } else { theme.titlebar_fg_unfocused };
-            let width = w.geometry.width.max(1);
+            let width = frame.width.max(1);
             // Always rounded now, bordered or not - `render_border_top`
             // gives a bordered window's border strip the matching rounded
             // cut, so there's no more square-frame-around-a-round-titlebar
             // clash to avoid. See `render_titlebar`'s `round_corners` doc
             // comment.
-            let data = decoration::render_titlebar(width, TITLEBAR_HEIGHT, &w.title, theme.titlebar_bg, fg, true, w.corner_radius);
+            let data = decoration::render_titlebar(
+                width,
+                TITLEBAR_HEIGHT,
+                &w.title,
+                theme.titlebar_bg,
+                fg,
+                true,
+                w.corner_radius,
+                w.border_width,
+                focused,
+                hovered_button,
+                theme.title_centered,
+                theme.buttons_left,
+                theme.button_glyph_always,
+                theme.button_order,
+                theme.traffic_light_buttons,
+                is_dialog,
+            );
             let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (width as i32, TITLEBAR_HEIGHT as i32), 1, Transform::Normal, None);
             self.decorations.insert(id, buffer);
         } else {
@@ -126,20 +189,54 @@ impl CompState {
         // this every render frame (an earlier version of this method did)
         // was a real, continuous cost, not just a redundant one.
         if w.border_width > 0 {
-            let color = effective_border_color(w.border_color, focused);
-            let strips = decoration::border_strips(w.geometry, w.border_width);
+            let color = effective_border_color(w.border_color, focused, theme.border_inactive_dim);
+            let strips = decoration::border_strips(frame, w.border_width);
+            // `render_border_top`/`render_border_bottom` both return a
+            // buffer `border_width.max(corner_radius)` rows tall now, not
+            // always exactly `border_width` - see their own doc comments
+            // for why a strip thinner than the corner radius needs the
+            // extra rows to let the curve actually resolve before handing
+            // off to the (curve-blind) side strips. `render.rs`'s call
+            // site positions this taller buffer to match: the top strip
+            // grows downward from its existing anchor (unchanged), the
+            // bottom strip grows upward, so its anchor shifts up by
+            // exactly the extra height.
+            let strip_h = w.border_width.max(w.corner_radius);
             if strips[0].width > 0 && strips[0].height > 0 {
                 let data = decoration::render_border_top(strips[0].width, w.border_width, color, w.corner_radius);
-                let buffer =
-                    MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (strips[0].width as i32, w.border_width as i32), 1, Transform::Normal, None);
+                let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (strips[0].width as i32, strip_h as i32), 1, Transform::Normal, None);
                 self.border_top_decorations.insert(id, buffer);
             } else {
                 self.border_top_decorations.remove(&id);
             }
             if strips[1].width > 0 && strips[1].height > 0 {
                 let data = decoration::render_border_bottom(strips[1].width, w.border_width, color, w.corner_radius);
-                let buffer =
-                    MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (strips[1].width as i32, w.border_width as i32), 1, Transform::Normal, None);
+                // Temporary: chasing a live report that the bottom two
+                // corners render as a solid, uncurved block for the buffer's
+                // own "extra" rows (0..height-thickness) while the nominal
+                // rows (height-thickness..height) curve correctly. Dumps the
+                // alpha byte at x=0..11 for row 0 (should already show some
+                // cutting per a standalone simulation of this exact
+                // algorithm) and the last nominal row, straight out of the
+                // buffer this function just built - before it's wrapped
+                // into a MemoryRenderBuffer at all, so this is ground truth
+                // for whether `render_border_bottom` itself is the problem
+                // or something downstream of it is. Remove once resolved.
+                let w_usize = strips[1].width.max(1) as usize;
+                let h_usize = strip_h.max(1) as usize;
+                let alpha_row = |row: usize| -> Vec<u8> {
+                    (0..12.min(w_usize)).map(|x| data.get((row * w_usize + x) * 4 + 3).copied().unwrap_or(255)).collect()
+                };
+                log::debug!(
+                    "udev::lifecycle: BOTTOM border buffer for {} (id {id:?}): dims={w_usize}x{h_usize} row0_alpha={:?} row3_alpha={:?} row7_alpha={:?} row8_alpha={:?} row11_alpha={:?}",
+                    w.app_id,
+                    alpha_row(0),
+                    alpha_row(3.min(h_usize.saturating_sub(1))),
+                    alpha_row(7.min(h_usize.saturating_sub(1))),
+                    alpha_row(8.min(h_usize.saturating_sub(1))),
+                    alpha_row(11.min(h_usize.saturating_sub(1))),
+                );
+                let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (strips[1].width as i32, strip_h as i32), 1, Transform::Normal, None);
                 self.border_bottom_decorations.insert(id, buffer);
             } else {
                 self.border_bottom_decorations.remove(&id);
@@ -158,8 +255,29 @@ impl CompState {
         // against.
         let shadows_enabled = self.wm.borrow().shadows_enabled;
         if shadows_enabled && !w.maximized && !w.fullscreen {
-            let data = decoration::shadow_bitmap(w.geometry.width, w.geometry.height);
-            let rect = decoration::shadow_rect(w.geometry);
+            // A decorated window's corners are *always* rounded (the
+            // titlebar/border strips round to `corner_radius` regardless of
+            // this setting - see their own call sites); an undecorated
+            // (CSD) window's own content only gets rounded when `general.
+            // rounded_corners` is on (default off on this backend - see
+            // `WindowManager::rounded_corners_enabled`'s doc comment). The
+            // shadow has to match whichever is actually true for *this*
+            // window, or it mismatches in the other direction: a rounded
+            // shadow around a still-square undecorated window with content
+            // rounding off.
+            let rounded_corners_enabled = self.wm.borrow().rounded_corners_enabled.unwrap_or(false);
+            let shadow_radius = if w.decorated || rounded_corners_enabled { w.corner_radius } else { 0 };
+            // Dimmed the same way `effective_border_color` dims an
+            // unfocused window's border - see `shadow_bitmap`'s own
+            // `max_alpha` doc comment for the real-desktop convention this
+            // matches (Hyprland's `color`/`color_inactive` shadow split).
+            let max_alpha = if focused {
+                decoration::SHADOW_MAX_ALPHA
+            } else {
+                (decoration::SHADOW_MAX_ALPHA as f32 * theme.border_inactive_dim).round().clamp(0.0, 255.0) as u8
+            };
+            let data = decoration::shadow_bitmap(frame.width, frame.height, shadow_radius, max_alpha);
+            let rect = decoration::shadow_rect(frame);
             let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (rect.width as i32, rect.height as i32), 1, Transform::Normal, None);
             self.shadow_buffers.insert(id, buffer);
         } else {

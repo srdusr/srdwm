@@ -80,13 +80,13 @@ pub(super) fn validate(s: &SharedState) -> Vec<String> {
     check_range("layout.dynamic.gaps.outer", 0.0, 100.0);
     check_range("layout.floating.gaps.inner", 0.0, 100.0);
     check_range("layout.floating.gaps.outer", 0.0, 100.0);
-    check_range("general.border_width", 0.0, 20.0);
     check_range("theme.decorations.border.width", 0.0, 20.0);
     check_range("theme.decorations.border.radius", 0.0, 100.0);
     check_range("general.animation_duration", 0.0, 1000.0);
     check_range("general.resize_margin", 1.0, 50.0);
     check_range("performance.max_fps", 30.0, 240.0);
     check_range("performance.window_cache_size", 10.0, 10000.0);
+    check_range("theme.decorations.border.inactive_dim", 0.0, 1.0);
 
     let layouts: Vec<String> = s.wm.borrow().available_layouts().iter().map(|l| l.to_string()).collect();
     for key in ["general.default_layout", "monitor.primary_layout", "monitor.secondary_layout"] {
@@ -110,6 +110,8 @@ pub(super) fn validate(s: &SharedState) -> Vec<String> {
         "theme.decorations.border.inactive_color",
         "theme.decorations.title_bar.background",
         "theme.decorations.title_bar.foreground",
+        "theme.decorations.title_bar.foreground_focused",
+        "theme.decorations.title_bar.foreground_unfocused",
     ];
     for key in color_keys {
         if let Some(v) = s.values.get(key).and_then(ConfigValue::as_str) {
@@ -138,7 +140,6 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     set("general.default_layout", String("dynamic".into()));
     set("general.smart_placement", Bool(true));
     set("general.window_gap", Number(8.0));
-    set("general.border_width", Number(2.0));
     set("general.animations", Bool(true));
     set("general.animation_duration", Number(200.0));
     set("general.shadows", Bool(true));
@@ -163,12 +164,11 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     set("monitor.primary_layout", String("dynamic".into()));
     set("monitor.secondary_layout", String("tiling".into()));
     set("monitor.auto_detect", Bool(true));
-    // Deliberately *not* seeded, unlike everything else here: srdwm has one
-    // flat workspace list shared by every monitor (see WindowManager's
-    // `current_workspace` doc comment), not Hyprland-style independent
-    // per-monitor workspace sets - "this monitor's primary workspace" and
-    // "this monitor's workspace count" describe a design that doesn't
-    // exist. `workspace.count` is the one knob that actually does anything.
+    // "This monitor's workspace *count*" specifically is still deliberately
+    // not seeded/implemented - `workspace.count` is one flat number for
+    // the whole desktop, not per-monitor. Independent per-monitor
+    // workspace *sets* (which workspace each monitor is showing) is a
+    // different, now-real knob: see `workspace.per_monitor` below.
 
     // The `window.*` namespace this codebase's own `docs/DEFAULTS.md`
     // documented (focus_follows_mouse/mouse_follows_focus/auto_raise/
@@ -190,6 +190,13 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     // absence from this function, though that one differs by backend
     // rather than being simply unbuilt.
     set("workspace.auto_back_and_forth", Bool(false));
+    // `false`: srdwm's original single-shared-workspace design (switching
+    // workspace changes what's visible on every monitor at once) - `true`
+    // switches to Hyprland/niri-style independent per-monitor workspace
+    // sets, each monitor tracking and displaying its own current
+    // workspace. See `WindowManager::per_monitor_workspaces`'s own doc
+    // comment.
+    set("workspace.per_monitor", Bool(false));
 
     set("performance.vsync", Bool(true));
     set("performance.max_fps", Number(60.0));
@@ -246,6 +253,11 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     set("theme.decorations.border.radius", Number(6.0));
     set("theme.decorations.border.active_color", String("#88c0d0".into()));
     set("theme.decorations.border.inactive_color", String("#2e3440".into()));
+    // The actually-wired unfocused-border knob (`apply_general_settings`,
+    // `srdwm_core::ThemeConfig::border_inactive_dim`): a factor applied to
+    // `border.active_color`, not the unused absolute `inactive_color`
+    // above. `1.0` matches focused exactly; `0.0` fades to black.
+    set("theme.decorations.border.inactive_dim", Number(0.35));
     set("theme.decorations.border.focused_style", String("solid".into()));
     set("theme.decorations.border.unfocused_style", String("solid".into()));
     set("theme.decorations.title_bar.height", Number(24.0));
@@ -253,6 +265,11 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     set("theme.decorations.title_bar.font", String("JetBrains Mono 10".into()));
     set("theme.decorations.title_bar.background", String("#2e3440".into()));
     set("theme.decorations.title_bar.foreground", String("#eceff4".into()));
+    // The actually-wired pair (`apply_general_settings`): titlebar text has
+    // always used two colours - brighter on the focused window, dimmer on
+    // every other one - never the single `foreground` key above.
+    set("theme.decorations.title_bar.foreground_focused", String("#88c0d0".into()));
+    set("theme.decorations.title_bar.foreground_unfocused", String("#4c566a".into()));
 
     set("platform.backend", String("auto".into()));
     set("platform.x11.use_ewmh", Bool(true));

@@ -30,12 +30,67 @@ either.
 ```lua
 srd.set("monitor.primary_layout", "dynamic")           -- Default: "dynamic"
 srd.set("monitor.secondary_layout", "tiling")          -- Default: "tiling"
-srd.set("monitor.auto_detect", true)                   -- Default: true
 ```
-srdwm has one flat workspace list shared by every monitor, not an
-independent set per monitor - there is no "this monitor's primary
-workspace"/"this monitor's workspace count" to configure. `workspace.count`
-below is the actual knob.
+These two keys set the layout for the primary monitor and for secondary
+monitors. They apply only when `workspace.per_monitor` is `true`. Set
+`workspace.per_monitor` to `false` (the default) and every monitor shares
+one workspace. In that mode there is no separate primary/secondary
+workspace to apply a different layout to, so these keys do nothing.
+
+`monitor.auto_detect` is not implemented. Monitor detection runs
+unconditionally; there is no toggle for it.
+
+#### `srd.monitor.split(name, parts[, direction])`
+
+Splits one physical monitor into `parts` equal logical monitors. Each
+logical monitor gets its own name (`eDP-1-1`, `eDP-1-2`, and so on), its
+own id, and its own placement rules. Windows tile and place within one
+logical monitor the same way they do on a real one.
+
+`direction` is `"columns"` (default) or `"rows"`. Columns place the
+logical monitors side by side. Rows stack them.
+
+```lua
+srd.monitor.split("eDP-1", 2)              -- two side-by-side halves
+srd.monitor.split("HDMI-A-1", 2, "rows")   -- two stacked halves
+```
+
+This does not create a second `wl_output`. A client that asks for
+`wl_output.enter` or the output's scale still sees the one real output.
+Fullscreen and maximize inside a logical monitor stay within that logical
+monitor's own bounds; they do not spill into the other half.
+
+`srd monitors` and the `monitors` event mark each split part with
+`"split": true`. An ordinary, undivided output reports `"split": false`.
+A display-arrangement UI should read this field and treat a split part
+differently from a real output: do not offer to move it, resize it, or
+extend a physical arrangement onto it, since there is no independent
+output behind it.
+
+#### `srd.monitor.scale(name, factor)`
+
+Sets the output scale for one monitor by connector name.
+
+srdwm sets scale automatically by default. It reads each monitor's
+physical size and resolution from EDID, computes real pixel density
+(PPI), and scales down monitors below roughly 109 PPI - a large monitor
+at the same resolution as a smaller one, for example. It never scales a
+monitor above `1.0` on its own.
+
+Use `srd.monitor.scale` to override the automatic value for one
+connector:
+
+```lua
+srd.monitor.scale("HDMI-A-1", 0.75)
+```
+
+Set `factor` to `0` or less to clear an override and return that
+connector to the automatic value.
+
+A scale change, automatic or explicit, takes effect the next time srdwm
+brings that connector's output up: at startup, at hotplug, or after
+`srd dispatch set output enabled <name> true`. It does not apply to an
+already-running output on a plain config reload.
 
 ### Window Behavior (`window.*`)
 Not implemented: this whole namespace duplicated `general.*`'s own focus
@@ -152,19 +207,22 @@ srd.theme.set_colors({
 ```lua
 srd.theme.set_decorations({
     border = {
-        width = 2,                                      -- Default: 2
-        radius = 6,                                      -- Default: 6 (corner radius, logical px)
+        width = 4,                                      -- Default: 4
+        radius = 12,                                     -- Default: 12 (corner radius, logical px)
         active_color = "#88c0d0",                       -- Default: Nord blue
-        inactive_color = "#2e3440",                     -- Default: Nord dark
+        inactive_color = "#2e3440",                     -- Accepted, not read: see inactive_dim below
+        inactive_dim = 0.35,                            -- Default: 0.35 - unfocused border = active_color scaled by this factor (0 = black, 1 = same as focused). The real unfocused-border knob; inactive_color above is validated but never applied, since an absolute override would erase the dimming scheme instead of participating in it.
         focused_style = "solid",                        -- Default: "solid"
         unfocused_style = "solid"                       -- Default: "solid"
     },
     title_bar = {
-        height = 24,                                    -- Default: 24
+        height = 32,                                    -- Not actually read - see the note below the table
         show = true,                                    -- Default: true
         font = "JetBrains Mono 10",                     -- Default: "JetBrains Mono 10"
         background = "#2e3440",                         -- Default: Nord dark
-        foreground = "#eceff4"                          -- Default: Nord light
+        foreground = "#eceff4",                         -- Accepted, not read: see foreground_focused/foreground_unfocused below
+        foreground_focused = "#88c0d0",                 -- Default: Nord blue - titlebar text/icon colour on the focused window
+        foreground_unfocused = "#4c566a"                -- Default: Nord dark gray - titlebar text/icon colour on every other window
     },
     - Which decoration mode a window gets before any per-window rule or
     - the window's own `xdg-decoration` request has a say. "server"
@@ -181,6 +239,111 @@ srd.theme.set_decorations({
     default_mode = "server"                             -- Default: "server"
 })
 ```
+
+`title_bar.height` above is accepted but not read: the real titlebar band
+is `srdwm_core::TITLEBAR_HEIGHT`, a compile-time constant (currently `32`)
+shared between hit-testing and rendering so the two can never disagree.
+Setting this key has no effect; it's kept in the table only so a preset
+copied from here doesn't read as silently missing a value real desktops
+all expose.
+
+Four more `theme.decorations.title_bar.*` keys are flat `srd.set` values, not part of
+the `set_decorations` table above:
+
+```lua
+srd.set("theme.decorations.title_bar.text_align", "left")     -- Default: "left"
+srd.set("theme.decorations.title_bar.button_side", "right")   -- Default: "right"
+srd.set("theme.decorations.title_bar.button_order", "")        -- Default: "" (unset)
+srd.set("theme.decorations.title_bar.button_glyph", "hover")   -- Default: "hover"
+srd.set("theme.decorations.title_bar.button_style", "traffic_lights")  -- Default: "traffic_lights"
+```
+
+`text_align` sets `"center"` for the macOS convention (title centered on
+the whole titlebar width, ignoring the button cluster the way real macOS
+does) or `"left"` (default) for the Windows/GTK convention. Any value
+other than exactly `"center"` keeps `"left"`.
+
+`button_side` sets `"left"` for the macOS convention (close, minimize,
+maximize, left to right) or `"right"` for the Windows/GTK convention
+(minimize, maximize, close). Any value other than exactly `"left"` keeps
+`"right"`.
+
+`button_order` overrides the relative order of the three buttons on
+whichever side `button_side` selects. Set it to a comma-separated list
+naming each button once: `"close,minimize,maximize"`. Unset (the
+default) keeps `button_side`'s own built-in order. A value that does not
+name each button exactly once is rejected with a warning in the log; the
+built-in order stays in effect.
+
+`button_side` and `button_order` are independent settings: `button_side`
+alone chooses which convention's default order applies; `button_order`
+replaces that order with your own, applied to whichever side `button_side`
+selected. This matches KWin's `ButtonsOnLeft`/`ButtonsOnRight`, GNOME/
+Adwaita's `decoration-layout`, and Openbox's `titlelayout` - each
+independently uses a comma- or letter-separated button list for exactly
+this purpose.
+
+`button_glyph` sets `"always"` to keep each button's icon visible at all
+times (modern GNOME/Adwaita), or `"hover"` (the default, classic macOS)
+to hide the icon until the pointer is over that button.
+
+`button_style` sets `"traffic_lights"` (the default) for filled, coloured
+macOS-style dots with a glossy gradient and a "zoom" double-arrow maximize
+icon, or `"traditional"` for plain glyphs (X / square / dash) drawn
+straight on the titlebar background - no filled dot except a subtle,
+neutral hover backdrop - and a plain square maximize icon, matching a
+real Windows or GNOME titlebar's own convention instead. Any value other
+than exactly `"traditional"` keeps `"traffic_lights"`. Independent of
+`button_side` and `button_order`: either style can sit on either side in
+either order, though `"traffic_lights"` paired with `button_side =
+"left"` (macOS) and `"traditional"` paired with `button_side = "right"`
+(Windows/GNOME) are the two ready-made combinations `config/srd/
+themes.lua` ships (`macos` and `traditional` presets respectively).
+
+### Getting a full macOS look
+
+`apply(macos)` in `config/srd/themes.lua` covers everything srdwm itself
+draws: centered titlebar text, left-aligned traffic-light buttons with a
+glossy gradient, grey chrome matching a dark GTK theme. It does **not**
+cover any other application's own window decoration - an undecorated
+(client-side-decorated) window like Firefox or a GTK file manager draws
+its *own* titlebar buttons, entirely outside srdwm's control. Getting
+those to match too is three separate, srdwm-external steps, each a normal
+part of *this desktop's* own configuration, not something a compositor
+can apply on an app's behalf:
+
+1. **Button side for every GTK/Firefox-on-Linux app**: Firefox and GTK3/4
+   apps both read `org.gnome.desktop.wm.preferences button-layout`
+   directly for which side to draw their own window buttons on --
+   independent of any srdwm setting.
+   ```sh
+   gsettings set org.gnome.desktop.wm.preferences button-layout 'close,minimize,maximize:'
+   ```
+   (System-wide; revert with `'appmenu:minimize,maximize,close'`, GNOME's
+   own default.)
+
+2. **Firefox's own button colour/gradient**: Firefox draws its titlebar
+   buttons itself and only reads a stylesheet you provide, in your own
+   profile, never srdwm's config. Requires `toolkit.
+   legacyUserProfileCustomizations.stylesheets = true` in `about:config`
+   (one-time per profile) plus a full Firefox restart, and a
+   `userChrome.css` in that profile's own `chrome/` directory targeting
+   `.titlebar-close`/`.titlebar-min`/`.titlebar-max`/`.titlebar-restore`
+   (Firefox's own class names for these buttons - confirmed directly
+   against a real Firefox install's own `browser.xhtml`, inside its
+   `omni.ja`, rather than assumed, since these have changed across
+   versions before).
+
+3. **Other GTK apps' own button colour/gradient** (Nemo, etc.): these
+   follow the system GTK theme, so a user `~/.config/gtk-3.0/gtk.css` /
+   `~/.config/gtk-4.0/gtk.css` overriding `headerbar button.titlebutton`
+   (loaded after whatever theme is active in `gtk-theme-name`) gets the
+   same gradient onto every such app at once, without touching the theme
+   package itself.
+
+None of this ships from srdwm or from this repo's own `config/srd/` --
+it lives in each user's own dotfiles/profile, the same as any other
+per-application customization on Linux.
 
 ## Key Binding Defaults
 

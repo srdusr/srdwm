@@ -15,7 +15,9 @@ srd.load("startup")
 srd.set("general.default_layout", "dynamic")
 srd.set("general.smart_placement", true)
 srd.set("general.window_gap", 8)
-srd.set("general.border_width", 2)
+- Border width lives under theme.decorations.border.width (see themes.lua),
+- not here - see docs/DEFAULTS.md for why general.border_width never
+- existed as a real setting.
 srd.set("general.animations", true)
 srd.set("general.animation_duration", 200)
 

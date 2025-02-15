@@ -33,11 +33,16 @@
 //!   client; everything else is forwarded, mirroring X11's grab-specific-keys
 //!   behavior instead of the coarser "any Super-held key is ours" heuristic
 //!   an earlier pass used.
-//! - xdg-decoration is forced to server-side mode (`Mode::ServerSide`) so
-//!   well-behaved clients don't also draw their own client-side titlebar.
+//! - xdg-decoration offers server-side mode by default (`theme.
+//!   default_decorated`/`srd set decoration_mode`), but a client that
+//!   explicitly requests client-side is honored rather than overridden --
+//!   see `XdgDecorationHandler::request_mode` in `protocols.rs` for why
+//!   forcing server-side unconditionally used to give some clients (Firefox,
+//!   concretely) two overlapping sets of window buttons.
 
 mod appmenu;
 mod blur;
+mod color_filter;
 mod context_menu;
 mod snap_flyout;
 mod cursor;
@@ -49,6 +54,7 @@ mod gtk_shell;
 mod gtk_shell_protocol;
 mod input;
 mod lock;
+mod monitor_layout;
 mod native_lock;
 mod output_management;
 mod output_power;

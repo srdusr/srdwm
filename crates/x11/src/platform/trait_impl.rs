@@ -56,14 +56,37 @@ impl Platform for X11Platform {
                 continue;
             }
             let name = String::from_utf8_lossy(&info.name).to_string();
-            let mut m = Monitor::new(i as u32, name, Rect::new(crtc.x as i32, crtc.y as i32, crtc.width as u32, crtc.height as u32));
+            let full = Rect::new(crtc.x as i32, crtc.y as i32, crtc.width as u32, crtc.height as u32);
+            // Shrunk by whatever `_NET_WM_STRUT`/`_NET_WM_STRUT_PARTIAL`
+            // a panel/dock has reserved - see `struts::usable_rect_for`'s
+            // own doc comment; this is the X11 mirror of `udev/platform.
+            // rs`'s `monitors()` shrinking by `non_exclusive_zone()`.
+            // Reporting the full head size here otherwise means core's
+            // placement/tiling treats a bar's own reserved strip as
+            // ordinary free space, exactly the gap a peer session (aegis)
+            // found and reported live building its own X11-backend bar.
+            let usable = self.usable_rect_for(full);
+            let mut m = Monitor::new(i as u32, name, usable);
+            m.full_geometry = full;
+            // Same as `geometry`, not top-only - see `udev/platform.rs`'s
+            // own `maximize_geometry_for` doc comment for why a dock on
+            // any edge, not just a top menu bar, should keep maximize
+            // from covering it: no edge actually benefits from the
+            // top-only distinction the way a plain top menu bar once did,
+            // and respecting every edge here is what every mainstream
+            // desktop's own maximize convention already does.
+            m.maximize_geometry = usable;
             m.primary = i == 0;
             monitors.push(m);
         }
         if monitors.is_empty() {
             let screen = &self.conn.setup().roots[0];
+            let full = Rect::new(0, 0, screen.width_in_pixels as u32, screen.height_in_pixels as u32);
+            let usable = self.usable_rect_for(full);
             monitors.push({
-                let mut m = Monitor::new(0, "default", Rect::new(0, 0, screen.width_in_pixels as u32, screen.height_in_pixels as u32));
+                let mut m = Monitor::new(0, "default", usable);
+                m.full_geometry = full;
+                m.maximize_geometry = usable;
                 m.primary = true;
                 m
             });

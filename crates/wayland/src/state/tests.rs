@@ -2,12 +2,15 @@
 
     #[test]
     fn focused_window_keeps_its_configured_colour() {
-        assert_eq!(effective_border_color((136, 192, 208), true), (136, 192, 208));
+        // The dim factor is irrelevant when focused - passing an
+        // obviously-wrong one here doubles as proof the early return never
+        // even looks at it.
+        assert_eq!(effective_border_color((136, 192, 208), true, 0.0), (136, 192, 208));
     }
 
     #[test]
     fn unfocused_window_is_dimmed_but_still_recognisably_that_colour() {
-        let dimmed = effective_border_color((136, 192, 208), false);
+        let dimmed = effective_border_color((136, 192, 208), false, 0.35);
         // Dimmer in every channel...
         assert!(dimmed.0 < 136 && dimmed.1 < 192 && dimmed.2 < 208);
         // ...but not black, and the channels' relative order is preserved
@@ -16,6 +19,15 @@
         // unfocused.
         assert!(dimmed.0 > 0 || dimmed.1 > 0 || dimmed.2 > 0);
         assert!(dimmed.2 >= dimmed.1 && dimmed.1 >= dimmed.0);
+    }
+
+    #[test]
+    fn inactive_dim_factor_is_actually_configurable() {
+        // `theme.decorations.border.inactive_dim` - `1.0` keeps an
+        // unfocused border identical to focused, `0.0` removes it entirely
+        // (fully black, matching every channel scaled to zero).
+        assert_eq!(effective_border_color((136, 192, 208), false, 1.0), (136, 192, 208));
+        assert_eq!(effective_border_color((136, 192, 208), false, 0.0), (0, 0, 0));
     }
 
     #[test]

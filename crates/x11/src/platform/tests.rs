@@ -46,3 +46,52 @@
         let keycodes = modmap(2, &[(3, 50)]);
         assert_eq!(modmask_for_keycode_in_mod_slots(99, 2, &keycodes), ModMask::from(0u16));
     }
+
+    fn top_strut(height: u32, start_x: i32, end_x: i32) -> Strut {
+        Strut { top: height, top_start_x: start_x, top_end_x: end_x, ..Strut::default() }
+    }
+
+    #[test]
+    fn a_top_bar_shrinks_the_monitor_it_actually_spans() {
+        let full = Rect::new(0, 0, 1920, 1080);
+        let strut = top_strut(32, 0, 1920);
+        let usable = usable_rect(full, (1920, 1080), std::iter::once(strut));
+        assert_eq!(usable, Rect::new(0, 32, 1920, 1048));
+    }
+
+    #[test]
+    fn a_bar_confined_to_a_different_monitor_leaves_this_one_alone() {
+        // A 1920-wide bar sitting entirely over the first monitor
+        // (x 0..1920) must not shrink a second monitor placed to its
+        // right (x 1920..3840) - struts are screen-global, not
+        // monitor-relative, so this is the only thing that tells them
+        // apart.
+        let second_monitor = Rect::new(1920, 0, 1920, 1080);
+        let strut = top_strut(32, 0, 1920);
+        let usable = usable_rect(second_monitor, (3840, 1080), std::iter::once(strut));
+        assert_eq!(usable, second_monitor);
+    }
+
+    #[test]
+    fn a_bottom_strut_is_measured_from_the_screen_bottom_not_the_monitor() {
+        let full = Rect::new(0, 0, 1920, 1080);
+        let strut = Strut { bottom: 40, bottom_start_x: 0, bottom_end_x: 1920, ..Strut::default() };
+        let usable = usable_rect(full, (1920, 1080), std::iter::once(strut));
+        assert_eq!(usable, Rect::new(0, 0, 1920, 1040));
+    }
+
+    #[test]
+    fn a_strut_larger_than_the_monitor_clamps_to_zero_size_not_a_negative_one() {
+        let full = Rect::new(0, 0, 800, 600);
+        let strut = top_strut(1000, 0, 800);
+        let usable = usable_rect(full, (800, 600), std::iter::once(strut));
+        assert_eq!(usable.height, 0);
+        assert!(usable.width > 0, "only the top edge was reserved, the sides must stay untouched");
+    }
+
+    #[test]
+    fn no_struts_at_all_leaves_the_monitor_exactly_as_reported() {
+        let full = Rect::new(100, 50, 1024, 768);
+        let usable = usable_rect(full, (1920, 1080), std::iter::empty());
+        assert_eq!(usable, full);
+    }

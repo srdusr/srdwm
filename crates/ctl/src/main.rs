@@ -7,14 +7,17 @@
 //! Usage:
 //!   srd clients                        list windows, one JSON object
 //!   srd workspaces                     list workspaces, one JSON object
+//!   srd settings                       current shadows/rounded_corners/
+//!                                       animations/night_light/reading_mode
+//!                                       state, one JSON object
 //!   srd keyboard layout                active XKB layout name, one JSON object
 //!   srd subscribe                      like `clients`, then one JSON
 //!                                       object per line forever, each time
-//!                                       the window list, workspace list, or
-//!                                       keyboard layout actually changes
-//!                                       (one "clients"/"workspaces"/
-//!                                       "keyboard_layout"-tagged line per
-//!                                       event)
+//!                                       the window list, workspace list,
+//!                                       keyboard layout, or monitor list
+//!                                       actually changes (one "clients"/
+//!                                       "workspaces"/"keyboard_layout"/
+//!                                       "monitors"-tagged line per event)
 //!
 //! `dispatch` reads as a real verb phrase, not a joined identifier --
 //! `toggle floating`, not `toggle_floating`. Multi-word actions are
@@ -32,6 +35,14 @@
 //!   srd dispatch move workspace ID WORKSPACE
 //!   srd dispatch activate workspace ID
 //!   srd dispatch cycle keyboard layout  no ID - there's only ever one keyboard
+//!   srd dispatch set output position NAME|ID X Y   NAME (e.g. HDMI-A-1, as
+//!                                    `srd monitors` reports it) or a plain
+//!                                    numeric id, either works
+//!   srd dispatch set output enabled NAME|ID true|false   real DRM power
+//!                                    state, not just hiding it - a
+//!                                    disabled output stops presenting
+//!                                    and its `wl_output` global goes away
+//!                                    until re-enabled
 //!   srd set border_width 3          live theme values, applied immediately
 //!   srd set border_color '#cba6f7'  (hex string)
 //!   srd set corner_radius 10
@@ -39,6 +50,11 @@
 //!   srd set gap_outer 16
 //!   srd set shadows true
 //!   srd set rounded_corners true
+//!   srd set animations true
+//!   srd set night_light true        warm tint; false clears it regardless
+//!   srd set reading_mode true       desaturating tint; same "false clears
+//!                                    either" rule - `srd settings` reads
+//!                                    back which one (if any) is active
 //!   srd set decoration_mode server|client
 //!
 //! The socket is Unix-domain; on platforms without one this always fails
@@ -47,6 +63,22 @@
 
 #[cfg(unix)]
 fn main() {
+    // Rust masks SIGPIPE to SIG_IGN at process startup (so a write past a
+    // closed pipe/socket surfaces as a normal `Err`, not a silent kill) --
+    // restoring the default here (SIG_DFL) is what a well-behaved Unix CLI
+    // tool is expected to do, since `srd subscribe`'s whole design is
+    // printing one line per event forever until its reader goes away.
+    // Without this, that reader closing (AGS quitting, a piped `head -1`,
+    // anything) doesn't kill this process the normal Unix way - instead
+    // the next `println!` gets `Err(BrokenPipe)`, and `std::io::stdio::
+    // _print` panics on that rather than returning it, so the process dies
+    // through a Rust unwind/abort instead of the expected SIGPIPE. Caught
+    // live: a peer session's AGS instance running `srd subscribe` as a
+    // long-lived child over a stdout pipe hit exactly this panic every
+    // single time it quit.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let request = match build_request(&args) {
         Ok(r) => r,
@@ -106,6 +138,7 @@ fn build_request(args: &[String]) -> Result<String, String> {
         Some("clients") => Ok(r#"{"cmd":"clients"}"#.to_string()),
         Some("monitors") => Ok(r#"{"cmd":"monitors"}"#.to_string()),
         Some("workspaces") => Ok(r#"{"cmd":"workspaces"}"#.to_string()),
+        Some("settings") => Ok(r#"{"cmd":"settings"}"#.to_string()),
         Some("keyboard") if args.get(1).map(String::as_str) == Some("layout") => Ok(r#"{"cmd":"keyboard_layout"}"#.to_string()),
         Some("keyboard") => Err("did you mean 'srd keyboard layout'?".to_string()),
         Some("subscribe") => Ok(r#"{"cmd":"subscribe"}"#.to_string()),
@@ -144,15 +177,15 @@ fn build_request(args: &[String]) -> Result<String, String> {
         // need to land unquoted for the server's `as_bool()` to see them
         // as booleans at all, not a string it then has to reject.
         Some("set") => {
-            let key = args
-                .get(1)
-                .ok_or("set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/shadows/rounded_corners/decoration_mode)")?;
+            let key = args.get(1).ok_or(
+                "set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/shadows/rounded_corners/animations/night_light/reading_mode/decoration_mode)",
+            )?;
             let raw = args.get(2).ok_or("set needs a value")?;
             let value = match key.as_str() {
                 "border_width" | "corner_radius" | "gap_inner" | "gap_outer" => {
                     raw.parse::<u64>().map_err(|_| format!("{key} needs a numeric value"))?.to_string()
                 }
-                "shadows" | "rounded_corners" => match raw.as_str() {
+                "shadows" | "rounded_corners" | "animations" | "night_light" | "reading_mode" => match raw.as_str() {
                     "true" | "false" => raw.clone(),
                     _ => return Err(format!("{key} needs 'true' or 'false'")),
                 },
@@ -166,7 +199,7 @@ fn build_request(args: &[String]) -> Result<String, String> {
             Ok(format!(r#"{{"cmd":"set","key":"{key}","value":{value}}}"#))
         }
         _ => Err(
-            "expected 'clients', 'monitors', 'workspaces', 'keyboard layout', 'subscribe', 'dispatch <action> <id>', 'capture workspace <id> <path>', or 'set <key> <value>'"
+            "expected 'clients', 'monitors', 'workspaces', 'settings', 'keyboard layout', 'subscribe', 'dispatch <action> <id>', 'capture workspace <id> <path>', or 'set <key> <value>'"
                 .to_string(),
         ),
     }
@@ -248,6 +281,46 @@ fn build_dispatch(args: &[String]) -> Result<String, String> {
             }
             Ok(r#"{"cmd":"cycle_keyboard_layout"}"#.to_string())
         }
+        // `srd dispatch set output position <name|id> <x> <y>` - the CLI
+        // surface for the IPC layer's own `set_output_position`, which
+        // existed before this but had no way to reach it outside a client
+        // willing to speak the raw socket itself. `<name|id>` accepts
+        // either: try parsing as a plain integer id first (matching every
+        // other dispatch target here), and if that fails, pass it through
+        // as a monitor name instead - `srd monitors` and `wlr-output-
+        // management-v1` both key on name (`eDP-1`), not
+        // an arbitrary index, so a caller listing outputs that way
+        // shouldn't have to look an id up first just to hand it straight
+        // back.
+        "set" => {
+            if args.get(1).map(String::as_str) != Some("output") {
+                return Err(format!("'set' only supports 'output position'/'output enabled' - {usage_hint}"));
+            }
+            let noun = args.get(2).ok_or("'set output' needs a target: position or enabled")?;
+            let target = args.get(3).ok_or("'set output' needs a monitor name or id")?;
+            match noun.as_str() {
+                "position" => {
+                    let x: i64 = args.get(4).ok_or("'set output position' needs an x coordinate")?.parse().map_err(|_| "x must be a number".to_string())?;
+                    let y: i64 = args.get(5).ok_or("'set output position' needs a y coordinate")?.parse().map_err(|_| "y must be a number".to_string())?;
+                    match target.parse::<u64>() {
+                        Ok(id) => Ok(format!(r#"{{"cmd":"set_output_position","id":{id},"x":{x},"y":{y}}}"#)),
+                        Err(_) => Ok(format!(r#"{{"cmd":"set_output_position","name":"{target}","x":{x},"y":{y}}}"#)),
+                    }
+                }
+                "enabled" => {
+                    let enabled = match args.get(4).map(String::as_str) {
+                        Some("true") => true,
+                        Some("false") => false,
+                        _ => return Err("'set output enabled' needs true or false".to_string()),
+                    };
+                    match target.parse::<u64>() {
+                        Ok(id) => Ok(format!(r#"{{"cmd":"set_output_enabled","id":{id},"enabled":{enabled}}}"#)),
+                        Err(_) => Ok(format!(r#"{{"cmd":"set_output_enabled","name":"{target}","enabled":{enabled}}}"#)),
+                    }
+                }
+                _ => Err(format!("unknown 'set output' target '{noun}' - {usage_hint}")),
+            }
+        }
         _ => Err(format!("unknown dispatch action '{verb}' - {usage_hint}")),
     }
 }
@@ -257,6 +330,7 @@ fn print_usage() {
     eprintln!("  srd clients");
     eprintln!("  srd monitors");
     eprintln!("  srd workspaces");
+    eprintln!("  srd settings");
     eprintln!("  srd keyboard layout");
     eprintln!("  srd subscribe");
     eprintln!("  srd dispatch focus <id>");
@@ -271,6 +345,8 @@ fn print_usage() {
     eprintln!("  srd dispatch move workspace <id> <workspace>");
     eprintln!("  srd dispatch activate workspace <id>");
     eprintln!("  srd dispatch cycle keyboard layout");
+    eprintln!("  srd dispatch set output position <name|id> <x> <y>");
+    eprintln!("  srd dispatch set output enabled <name|id> <true|false>");
     eprintln!("  srd capture workspace <id> <path> [<width>x<height>]");
     eprintln!("  srd set border_width <n>");
     eprintln!("  srd set border_color <#hex>");
@@ -279,6 +355,9 @@ fn print_usage() {
     eprintln!("  srd set gap_outer <n>");
     eprintln!("  srd set shadows <true|false>");
     eprintln!("  srd set rounded_corners <true|false>");
+    eprintln!("  srd set animations <true|false>");
+    eprintln!("  srd set night_light <true|false>");
+    eprintln!("  srd set reading_mode <true|false>");
     eprintln!("  srd set decoration_mode <server|client>");
 }
 
@@ -331,6 +410,47 @@ mod tests {
     }
 
     #[test]
+    fn set_output_position_accepts_a_numeric_id() {
+        assert_eq!(
+            build_request(&args(&["dispatch", "set", "output", "position", "1", "1920", "0"])).unwrap(),
+            r#"{"cmd":"set_output_position","id":1,"x":1920,"y":0}"#
+        );
+    }
+
+    #[test]
+    fn set_output_position_accepts_a_name_when_not_purely_numeric() {
+        // `srd monitors`/`wlr-output-management-v1` both key on the real
+        // connector name (`HDMI-A-1`), not an arbitrary id - a caller
+        // that already has the name shouldn't have to look its id up
+        // first just to send it straight back.
+        assert_eq!(
+            build_request(&args(&["dispatch", "set", "output", "position", "HDMI-A-1", "1920", "0"])).unwrap(),
+            r#"{"cmd":"set_output_position","name":"HDMI-A-1","x":1920,"y":0}"#
+        );
+    }
+
+    #[test]
+    fn set_output_position_needs_both_coordinates() {
+        assert!(build_request(&args(&["dispatch", "set", "output", "position", "1", "1920"])).is_err(), "missing y must error");
+        assert!(build_request(&args(&["dispatch", "set", "output", "position", "1", "not-a-number", "0"])).is_err());
+    }
+
+    #[test]
+    fn set_output_enabled_accepts_a_numeric_id_and_a_name() {
+        assert_eq!(build_request(&args(&["dispatch", "set", "output", "enabled", "1", "false"])).unwrap(), r#"{"cmd":"set_output_enabled","id":1,"enabled":false}"#);
+        assert_eq!(
+            build_request(&args(&["dispatch", "set", "output", "enabled", "HDMI-A-1", "true"])).unwrap(),
+            r#"{"cmd":"set_output_enabled","name":"HDMI-A-1","enabled":true}"#
+        );
+    }
+
+    #[test]
+    fn set_output_enabled_rejects_anything_but_true_or_false() {
+        assert!(build_request(&args(&["dispatch", "set", "output", "enabled", "1", "yes"])).is_err());
+        assert!(build_request(&args(&["dispatch", "set", "output", "enabled", "1"])).is_err(), "missing value must error");
+    }
+
+    #[test]
     fn lock_needs_no_id() {
         assert_eq!(build_request(&args(&["dispatch", "lock"])).unwrap(), r#"{"cmd":"lock"}"#);
     }
@@ -366,6 +486,19 @@ mod tests {
         assert_eq!(build_request(&args(&["set", "decoration_mode", "server"])).unwrap(), r#"{"cmd":"set","key":"decoration_mode","value":"server"}"#);
         assert_eq!(build_request(&args(&["set", "decoration_mode", "client"])).unwrap(), r#"{"cmd":"set","key":"decoration_mode","value":"client"}"#);
         assert!(build_request(&args(&["set", "decoration_mode", "both"])).is_err());
+    }
+
+    #[test]
+    fn night_light_and_reading_mode_accept_only_true_or_false() {
+        assert_eq!(build_request(&args(&["set", "night_light", "true"])).unwrap(), r#"{"cmd":"set","key":"night_light","value":true}"#);
+        assert_eq!(build_request(&args(&["set", "night_light", "false"])).unwrap(), r#"{"cmd":"set","key":"night_light","value":false}"#);
+        assert_eq!(build_request(&args(&["set", "reading_mode", "true"])).unwrap(), r#"{"cmd":"set","key":"reading_mode","value":true}"#);
+        assert!(build_request(&args(&["set", "night_light", "warm"])).is_err());
+    }
+
+    #[test]
+    fn settings_query_needs_no_further_arguments() {
+        assert_eq!(build_request(&args(&["settings"])).unwrap(), r#"{"cmd":"settings"}"#);
     }
 }
 

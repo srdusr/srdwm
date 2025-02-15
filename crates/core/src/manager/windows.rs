@@ -26,7 +26,7 @@ impl WindowManager {
         window.border_color = self.theme.default_border_color;
         window.border_width = self.theme.default_border_width;
         window.corner_radius = self.theme.default_corner_radius;
-        window.decorated = self.theme.default_decorated;
+        window.decorated = self.theme.default_decorated && !likely_draws_own_titlebar(&window.app_id);
         let actions = self.rules.iter().find(|r| r.matcher.matches(&window)).map(|r| r.actions.clone());
         // See `Window::rules_applied`'s doc comment: a native Wayland window
         // still has empty title/app_id at this point, so a real (if
@@ -62,7 +62,50 @@ impl WindowManager {
             }
         }
 
-        if let Some(monitor) = self.primary_monitor() {
+        // A remembered size (`remembered_sizes`' own doc comment) wins over
+        // whatever fixed default a backend hardcoded into `window.geometry`
+        // before calling this - but a rule's explicit `geometry` action
+        // below still wins over *this*, since that's a deliberate per-app
+        // override, more specific than "whatever I last resized this app
+        // to". Clamped to the same minimums a live resize itself can never
+        // go below, so a corrupted/stale entry can't hand a new window a
+        // degenerate size.
+        if !window.app_id.is_empty() {
+            if let Some(&(w, h)) = self.remembered_sizes.get(&window.app_id) {
+                window.geometry.width = w.max(MIN_WINDOW_WIDTH);
+                window.geometry.height = h.max(MIN_WINDOW_HEIGHT);
+            }
+        }
+        // Every new window used to land on the *primary* monitor
+        // unconditionally, regardless of which monitor the user was
+        // actually working on - reported live as "why do all windows only
+        // open on the first monitor" once a second, non-primary monitor
+        // was actually in use. Placing on the *focused* window's monitor
+        // instead matches every mainstream desktop's own convention (a new
+        // window opens where you're currently working, not wherever
+        // "primary" happens to be), and needs no new state: `self.focused`
+        // already exists for exactly this kind of "what's the user looking
+        // at right now" question.
+        //
+        // Falling all the way back to the primary monitor whenever nothing
+        // is focused was still wrong for a second, later-reported case:
+        // nothing focused *on the monitor the user is actually at* - an
+        // empty desktop there, or the last-focused window happening to sit
+        // on a different monitor than the one just clicked/hovered before
+        // launching something new - landed the new window on primary
+        // regardless of which monitor was genuinely in use. `pointer_
+        // monitor` (see its own doc comment) is a second, better fallback
+        // for exactly that gap, checked before giving up to primary
+        // entirely - which stays the last resort for the one case neither
+        // signal can answer, a fresh session's very first window before any
+        // pointer motion has been reported at all.
+        let target_monitor = self
+            .focused
+            .and_then(|id| self.windows.get(&id))
+            .and_then(|w| self.monitors.iter().find(|m| m.id == w.monitor))
+            .or_else(|| self.pointer_monitor.and_then(|id| self.monitors.iter().find(|m| m.id == id)))
+            .or_else(|| self.primary_monitor());
+        if let Some(monitor) = target_monitor {
             window.monitor = monitor.id;
             let layout_name = self.workspace(workspace).map(|w| w.layout.clone()).unwrap_or_default();
             if layout_name != "tiling" {
@@ -116,7 +159,17 @@ impl WindowManager {
         let actions = self.rules.iter().find(|r| r.matcher.matches(window)).map(|r| r.actions.clone());
         let Some(window) = self.windows.get_mut(&id) else { return false };
         window.rules_applied = true;
-        let Some(actions) = actions else { return false };
+        // `add_window`'s matching fallback only ever sees this once
+        // `app_id` is actually known - for a native Wayland window that's
+        // usually after creation (`set_app_id` lands later), which is
+        // exactly why this needs its own check here too, not just there.
+        // A rule's own `decorated` action, if any, still wins below.
+        let mut heuristic_changed = false;
+        if actions.as_ref().and_then(|a| a.decorated).is_none() && window.decorated && likely_draws_own_titlebar(&window.app_id) {
+            window.decorated = false;
+            heuristic_changed = true;
+        }
+        let Some(actions) = actions else { return heuristic_changed };
         if let Some(floating) = actions.floating {
             window.floating = floating;
         }

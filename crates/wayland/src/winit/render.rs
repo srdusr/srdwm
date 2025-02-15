@@ -4,6 +4,7 @@ impl WaylandPlatform {
 
     pub(super) fn render_frame(&mut self) -> PlatformResult<()> {
         self.state.tick_animations();
+        self.state.tick_hover_glyph_animation();
         self.state.tick_dirty_broadcasts();
         let size = self.backend.window_size();
         let resized = self.output.current_mode().map(|m| m.size) != Some(size);
@@ -61,6 +62,20 @@ impl WaylandPlatform {
         // rounded-content push (further down) uses `WinitElement::Rounded`
         // directly.
         let mut custom_elements: Vec<crate::rounded_corners::WinitElement> = Vec::new();
+        // Night light/reading mode - pushed first (topmost) so it colours
+        // everything else, including the context menu below: this backend
+        // draws no cursor of its own to exempt (unlike udev/render.rs's
+        // matching push), so there's nothing that needs to stay above it.
+        // See `color_filter::render_element` for why this is a translucent
+        // overlay rather than a true per-pixel shader.
+        {
+            let color_filter = self.wm.borrow().color_filter;
+            let output_name = self.output.name();
+            let buf = self.state.color_filter_buffers.entry(output_name).or_insert_with(SolidColorBuffer::default);
+            if let Some(elem) = crate::color_filter::render_element(buf, color_filter, (size.w, size.h)) {
+                custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Solid(elem)));
+            }
+        }
         // The right-click titlebar menu, if open - pushed first so it's
         // topmost over every window (this backend draws no cursor of its
         // own, see this module's doc comment, so there's no "stay under
@@ -124,7 +139,7 @@ impl WaylandPlatform {
         let rounded_corners_enabled = self.wm.borrow().rounded_corners_enabled.unwrap_or(true);
         if !hide_top_layers {
             custom_elements.extend(
-                crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Top | Layer::Overlay))
+                crate::elements::output_layer_elements(renderer, &self.output, |layer| matches!(layer, Layer::Top | Layer::Overlay))
                     .into_iter()
                     .map(crate::rounded_corners::WinitElement::Base),
             );
@@ -147,24 +162,18 @@ impl WaylandPlatform {
             // (reported live as the border "not flush" with the window
             // during an animated maximize/fullscreen/open-slide transition).
             let geom = self.state.window_anims.get(&id).map(crate::state::WindowAnim::current_rect).unwrap_or(w.geometry);
-            // Same reasoning as udev/render.rs's matching push: positioned from
-            // `geom`, not `w.geometry`, and not fragment-clipped against
-            // `occluders` - see that comment.
-            if let Some(shadow) = self.state.shadow_buffers.get(&id) {
-                let rect = decoration::shadow_rect(geom);
-                let pos = (rect.x as f64, rect.y as f64);
-                match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, shadow, None, None, None, Kind::Unspecified) {
-                    Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
-                    Err(e) => log::warn!("failed to import shadow buffer for window {id}: {e}"),
-                }
-            }
+            // `geom` is this compositor's own request/target; `frame`
+            // corrects its far edge to match what the client's surface
+            // really committed - see `effective_frame`'s own doc comment
+            // and the matching comment in `udev/render.rs`'s render loop.
+            let frame = self.state.effective_frame(id, geom);
             if let Some(deco) = self.state.decorations.get(&id) {
                 // Fragment-clipped, same as udev/render.rs's matching titlebar
                 // push - see that comment for why all-or-nothing (skip
                 // only once *fully* covered) wasn't enough: a titlebar
                 // only partially covered, the common case for cascaded
                 // windows, still bled through the covered part.
-                let titlebar_rect = srdwm_core::Rect::new(geom.x, geom.y, geom.width, srdwm_core::TITLEBAR_HEIGHT);
+                let titlebar_rect = srdwm_core::Rect::new(frame.x, frame.y, frame.width, srdwm_core::TITLEBAR_HEIGHT);
                 for fragment in crate::elements::visible_border_fragments(titlebar_rect, &occluders) {
                     let pos = (fragment.x as f64, fragment.y as f64);
                     let src = Rectangle::new(
@@ -181,9 +190,14 @@ impl WaylandPlatform {
             // `decoration::border_strips`), so they never overlap this same
             // window's own decoration/content pixels - draw order relative
             // to those doesn't matter, only relative to other windows'.
+            // (The left/right strips *do* still need cropping against the
+            // top/bottom strip's own extended curve - see that crop's own
+            // doc comment further down; that's an overlap between two
+            // pieces of this window's own decoration, not with its content,
+            // so it doesn't contradict this paragraph.)
             if w.border_width > 0 {
-                let color = crate::state::effective_border_color(w.border_color, focused == Some(id));
-                let strips = decoration::border_strips(geom, w.border_width);
+                let color = crate::state::effective_border_color(w.border_color, focused == Some(id), self.wm.borrow().theme.border_inactive_dim);
+                let strips = decoration::border_strips(frame, w.border_width);
                 // Strips 0/1 (top/bottom) are rounded on their own two
                 // corners - see `render_border_top`/`render_border_bottom`'s
                 // doc comments - so both are cached bitmaps (rebuilt only in
@@ -199,7 +213,15 @@ impl WaylandPlatform {
                 // all-or-nothing occlusion check.
                 if strips[0].width > 0 && strips[0].height > 0 && !strips[0].subtract_all(&occluders).is_empty() {
                     if let Some(buffer) = self.state.border_top_decorations.get(&id) {
-                        match MemoryRenderBufferRenderElement::from_buffer(renderer, (strips[0].x as f64, strips[0].y as f64), buffer, None, None, None, Kind::Unspecified) {
+                        // See `decoration::border_top_visible_rows`'s own
+                        // doc comment: an undecorated window has no
+                        // titlebar band to safely absorb this buffer's own
+                        // corner-curve-only extra rows, so they're cropped
+                        // away instead of landing on real content.
+                        let (row0, rows, shift) = decoration::border_top_visible_rows(w.decorated, w.border_width, w.corner_radius);
+                        let pos = (strips[0].x as f64, (strips[0].y + shift as i32) as f64);
+                        let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((strips[0].width as f64, rows as f64))));
+                        match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, src, None, Kind::Unspecified) {
                             Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
                             Err(e) => log::warn!("failed to import top border buffer for window {id}: {e}"),
                         }
@@ -210,15 +232,39 @@ impl WaylandPlatform {
                 // render_border_bottom`'s doc comment.
                 if strips[1].width > 0 && strips[1].height > 0 && !strips[1].subtract_all(&occluders).is_empty() {
                     if let Some(buffer) = self.state.border_bottom_decorations.get(&id) {
-                        match MemoryRenderBufferRenderElement::from_buffer(renderer, (strips[1].x as f64, strips[1].y as f64), buffer, None, None, None, Kind::Unspecified) {
+                        // See `decoration::border_bottom_visible_rows`'s
+                        // own doc comment.
+                        let (row0, rows, shift) = decoration::border_bottom_visible_rows(w.decorated, w.border_width, w.corner_radius);
+                        let pos = (strips[1].x as f64, (strips[1].y - shift as i32) as f64);
+                        let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((strips[1].width as f64, rows as f64))));
+                        match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, src, None, Kind::Unspecified) {
                             Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
                             Err(e) => log::warn!("failed to import bottom border buffer for window {id}: {e}"),
                         }
                     }
                 }
+                // Cropped top and bottom by `extra` - see the matching fix
+                // (and its own doc comment) in `udev/render.rs`'s identical
+                // side-strip loop: the top/bottom strip's own curve extends
+                // `corner_radius - border_width` rows into what would
+                // otherwise be these flat, curve-unaware side strips' own
+                // nominal top/bottom rows, and without this crop their
+                // solid fill bled through the curve's own transparent
+                // cutout as a straight vertical line poking out of an
+                // otherwise correctly-rounded corner - reported live,
+                // confirmed via raw pixel sampling on the udev backend;
+                // this backend shares the identical strip geometry and was
+                // never actually confirmed clean, just never specifically
+                // screenshotted the same way.
+                let extra = if w.decorated { w.border_width.max(w.corner_radius).saturating_sub(w.border_width) } else { 0 };
+                let mut side_strips = [strips[2], strips[3]];
+                for s in &mut side_strips {
+                    s.y += extra as i32;
+                    s.height = s.height.saturating_sub(2 * extra);
+                }
                 let pool = self.state.border_side_buffers.entry(id).or_default();
                 let mut buf_index = 0;
-                for strip in &strips[2..] {
+                for strip in &side_strips {
                     if strip.width == 0 || strip.height == 0 {
                         continue;
                     }
@@ -227,6 +273,30 @@ impl WaylandPlatform {
                         buf_index += 1;
                         custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Solid(crate::elements::border_side_render_element(buf, fragment, color, (0, 0)))));
                     }
+                }
+            }
+            // Shadow - pushed *after* the titlebar/border above, not
+            // before. See the matching fix (and its full explanation) in
+            // `udev/render.rs`'s render loop: `custom_elements` treats
+            // earlier-pushed as topmost, so a shadow pushed before this
+            // window's own border rendered on top of it, alpha-blending
+            // black over the configured border colour and muting it into a
+            // hazy smear instead of a crisp line - reported live as
+            // "spacing before the border". Positioned from `geom`, not
+            // `w.geometry`, same reasoning as the border above (a stale-
+            // position shadow during an animated tween looks as detached
+            // as the border did before that fix). Not fragment-clipped
+            // against `occluders` like the titlebar/border above: at
+            // `SHADOW_MAX_ALPHA`'s low opacity, a shadow bleeding slightly
+            // onto a window stacked in front of this one reads as a soft
+            // edge, not the hard-line bleed-through that made the
+            // titlebar/border need it.
+            if let Some(shadow) = self.state.shadow_buffers.get(&id) {
+                let rect = decoration::shadow_rect(frame);
+                let pos = (rect.x as f64, rect.y as f64);
+                match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, shadow, None, None, None, Kind::Unspecified) {
+                    Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
+                    Err(e) => log::warn!("failed to import shadow buffer for window {id}: {e}"),
                 }
             }
             // The window's own content, at its own `opacity` - see the
@@ -266,13 +336,13 @@ impl WaylandPlatform {
                     }
                 }
             }
-            occluders.push(geom);
+            occluders.push(frame);
         }
         // Background/bottom layer-shell (wallpaper engines) last --
         // bottommost, matching smithay's own `space_render_elements`
         // ordering, which this whole custom loop now replaces.
         custom_elements.extend(
-            crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Background | Layer::Bottom))
+            crate::elements::output_layer_elements(renderer, &self.output, |layer| matches!(layer, Layer::Background | Layer::Bottom))
                 .into_iter()
                 .map(crate::rounded_corners::WinitElement::Base),
         );
@@ -325,7 +395,7 @@ impl WaylandPlatform {
             self.backend.submit(None).map_err(err)?;
             let scale = Scale::from(self.output.current_scale().fractional_scale());
             let now = self.state.start_time.elapsed();
-            for w in crate::elements::windows_touched_by_damage(&self.state.space, &damage_rects, scale) {
+            for w in crate::elements::windows_touched_by_damage(&self.state.space, &damage_rects, (0, 0).into(), scale) {
                 w.send_frame(&self.output, now, None, |_, _| Some(self.output.clone()));
             }
         }

@@ -113,6 +113,44 @@ pub(crate) struct DecorationSignature {
     pub(crate) maximized: bool,
     pub(crate) fullscreen: bool,
     pub(crate) shadows_enabled: bool,
+    /// Which of *this* window's own titlebar buttons (if any) is currently
+    /// hovered, and the glyph-reveal animation's current progress (0..=255)
+    /// - see `CompState::hovered_titlebar_button`'s own doc comment.
+    /// Included here, progress and all, so hovering (or un-hovering) a
+    /// button - and every intermediate frame of the reveal animating in
+    /// between - is a real signature change, not silently absorbed by the
+    /// cache this struct exists to drive; a signature that only recorded
+    /// *which* button was hovered, not the animation's own progress, would
+    /// cache the very first frame of the reveal and never rebuild again
+    /// for the rest of it.
+    pub(crate) hovered_button: Option<(srdwm_core::TitlebarHit, u8)>,
+    /// `theme.title_centered` at the time this was rendered - a live
+    /// `srd`-side theme change (there's no `srd set` for this yet, but
+    /// nothing here assumes there never will be) must still invalidate the
+    /// cache like every other themed input already does.
+    pub(crate) title_centered: bool,
+    /// `theme.buttons_left` at render time - same reasoning as `title_
+    /// centered` above.
+    pub(crate) buttons_left: bool,
+    /// `theme.button_glyph_always`/`theme.button_order`/`theme.
+    /// traffic_light_buttons` at render time - same reasoning as `title_
+    /// centered`/`buttons_left` above (no `srd set` for any of the three
+    /// yet either), and the same real gap those two fields were added to
+    /// close: all three are passed straight into `render_titlebar`
+    /// (`redraw_decoration_buffer`'s own call site) but were missing from
+    /// this struct entirely until a full-pipeline audit found the mismatch
+    /// - a live change to any of the three would have compared equal
+    /// against a stale signature and silently never rebuilt the titlebar
+    /// this window already has cached.
+    pub(crate) button_glyph_always: bool,
+    pub(crate) button_order: Option<srdwm_core::ButtonOrder>,
+    pub(crate) traffic_light_buttons: bool,
+    /// `Window::is_dialog` at render time - a client can call `xdg_
+    /// toplevel.set_parent` well after its own initial map (a "Save As"
+    /// dialog opened from an already-open main window, say), so this needs
+    /// the same cache-invalidation treatment as every other live-
+    /// changeable input here, not just a value read once at creation.
+    pub(crate) is_dialog: bool,
 }
 
 /// Everything smithay's protocol handlers need `&mut` access to. This is the
@@ -190,6 +228,23 @@ pub(crate) struct CompState {
     /// menu` rather than instead of it - they cover disjoint sets of
     /// windows (XWayland-backed vs. Wayland-native), not the same one.
     pub(crate) _appmenu_state: appmenu::AppmenuManagerState,
+    /// `zwp_virtual_keyboard_manager_v1` - lets a client (`wtype`, `ydotool
+    /// type`, an accessibility tool, AGS's own global-menu shortcut items)
+    /// inject synthetic key events through the exact same keyboard-focus/
+    /// keymap pipeline a real key press already goes through, rather than
+    /// needing a compositor-specific IPC of its own. Not `Option`-gated,
+    /// same reasoning as `_appmenu_state` just above: injecting a key event
+    /// has nothing GPU/DRM-specific about it either. Smithay's own
+    /// `wayland::virtual_keyboard` module provides the full protocol
+    /// implementation (`delegate_virtual_keyboard_manager!` in
+    /// `protocols.rs` wires it up); this compositor only supplies the
+    /// global itself. Absence of this was reported live as "most options in
+    /// global menu don't work" - every keyboard-shortcut item there is
+    /// delivered via `wtype`, which silently does nothing at all without
+    /// this protocol (`wtype ""` exits 1 with "Compositor does not support
+    /// the virtual keyboard protocol"), a failure the caller (AGS, fire-
+    /// and-forget) never even saw.
+    pub(crate) _virtual_keyboard_state: smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState,
     pub(crate) _foreign_toplevel_state: foreign_toplevel::ForeignToplevelState,
     /// Every bound `zwlr_foreign_toplevel_manager_v1` (one per dock/switcher
     /// client), so a newly-created window can be announced to all of them --
@@ -238,6 +293,15 @@ pub(crate) struct CompState {
     /// the default when no client has said). See `cursor.rs` for why this
     /// has to be drawn by us on the DRM backend.
     pub(crate) cursor_status: smithay::input::pointer::CursorImageStatus,
+    /// Whether `cursor_status`'s current value was last set by us (hovering
+    /// our own decoration's resize edge/drag area) rather than by a client's
+    /// own `wl_pointer.set_cursor` request - see `input.rs::update_cursor_
+    /// shape`'s doc comment for the bug this exists to fix: without it, a
+    /// resize icon forced while hovering a decoration edge stayed on screen
+    /// indefinitely once the pointer moved onto plain client content,
+    /// because nothing about moving onto content gives the client any
+    /// reason to call `set_cursor` again itself.
+    pub(crate) decoration_cursor_active: bool,
     /// Built-in cursor bitmaps (arrow, text, resize directions), built once
     /// at startup rather than per frame.
     pub(crate) cursor_buffers: crate::cursor::CursorBuffers,
@@ -353,6 +417,22 @@ pub(crate) struct CompState {
     /// own blanket call, which never actually checked whether this
     /// specific window was one of the windows that triggered the tick.
     pub(crate) decoration_signatures: HashMap<WindowId, DecorationSignature>,
+    /// Which titlebar button (if any) the pointer is currently over, on
+    /// which window, and *when that hover started* - set from `handle_
+    /// pointer_position`'s own `hit_test` result, read by `redraw_
+    /// decoration_buffer` to brighten that one button's dot and animate
+    /// its glyph in (see `decoration::render_titlebar`'s `hovered`
+    /// parameter). Explicitly requested background-highlight-on-hover
+    /// behaviour for the titlebar buttons, previously unimplemented - see
+    /// `docs/TODO.md`. A single `Option`, not a per-window map: only one
+    /// button can plausibly be hovered at a time, across every window.
+    /// The `Instant` is *only* updated when the hovered button itself
+    /// changes (see the comparison at its own call site, which ignores
+    /// this field) - it marks "hover started here", not "last motion
+    /// event", so `tick_hover_glyph_animation` can measure real elapsed
+    /// hover time instead of resetting every frame the pointer so much as
+    /// twitches while still over the same button.
+    pub(crate) hovered_titlebar_button: Option<(WindowId, srdwm_core::TitlebarHit, Instant)>,
     /// A window's drop-shadow bitmap (`decoration::shadow_bitmap`), cached
     /// the same way and at the same trigger points as `border_top_decorations`
     /// - rebuilt only on creation or a real size change, not per frame, for
@@ -384,19 +464,24 @@ pub(crate) struct CompState {
     /// terminal, with nothing else in this struct tracking that.
     pub(crate) content_epoch: HashMap<WindowId, u64>,
     /// The udev/Pixman-backend rounded-corner masked copy of a window's own
-    /// content (`rounded_corners_pixman::masked_content_buffer`), paired
-    /// with the `content_epoch` value and the `corner_radius` (in bit-cast
-    /// `u32` form - `f32` has no `Eq`) it was built from - see
-    /// `elements::rounded_content_buffer`, which owns rebuilding this. The
-    /// radius half exists because `corner_radius` is now live-settable
-    /// (`srd set corner_radius`/a rule) without any client commit - content
-    /// epoch alone wouldn't notice that change, leaving a stale mask built
-    /// from the old radius on screen until the client's next real repaint.
-    /// Always empty on the winit backend (GLES rounds via a shader instead,
-    /// `rounded_corners_program`), but costs nothing to declare here
-    /// unconditionally, the same call `rounded_corners_program` itself
-    /// already makes.
-    pub(crate) rounded_content_buffers: HashMap<WindowId, (u64, u32, MemoryRenderBuffer)>,
+    /// content (`rounded_corners_pixman::masked_content_buffer`), keyed by
+    /// everything that can make a rebuilt-from-scratch copy necessary --
+    /// see `elements::rounded_content_buffer`, which owns rebuilding this.
+    /// In order: the `content_epoch` value it was built from (bumped once
+    /// per real client commit); the `corner_radius` it was built from, in
+    /// bit-cast `u32` form (`f32` has no `Eq`) - live-settable (`srd set
+    /// corner_radius`/a rule) without any client commit, so `content_epoch`
+    /// alone wouldn't notice a change; the tree-render `loc` it was built
+    /// from (the negated `content_offset`, changes if a client alters its
+    /// own declared shadow-margin geometry); and the off-screen buffer
+    /// `size` it was built at (the window's own content dimensions --
+    /// stale the moment those change, same reason `redraw_decoration_
+    /// buffer`'s own signature check exists for the titlebar/border
+    /// bitmaps). Always empty on the winit backend (GLES rounds via a
+    /// shader instead, `rounded_corners_program`), but costs nothing to
+    /// declare here unconditionally, the same call `rounded_corners_
+    /// program` itself already makes.
+    pub(crate) rounded_content_buffers: HashMap<WindowId, (u64, u32, (i32, i32), (i32, i32), MemoryRenderBuffer)>,
     /// Persistent solid-colour buffers backing a window's other three
     /// border strips (bottom, left, right - `decoration::border_strips`'
     /// order past index 0), reused by position every frame rather than
@@ -410,8 +495,15 @@ pub(crate) struct CompState {
     /// dropping them would lose the damage-tracking stability the whole
     /// scheme exists for the moment fragment counts fluctuate back up.
     pub(crate) border_side_buffers: HashMap<WindowId, Vec<SolidColorBuffer>>,
-    /// Client-visible size (`geometry` minus the titlebar band) last sent to
-    /// each window via `xdg_toplevel.configure`. `sync_geometry` runs on
+    /// Persistent solid-colour buffer backing the whole-output night-light/
+    /// reading-mode overlay, one per output name - same "reuse the buffer
+    /// so its `Id` stays stable across frames" reasoning as `border_side_
+    /// buffers` above. See `color_filter::render_element`.
+    pub(crate) color_filter_buffers: HashMap<String, SolidColorBuffer>,
+    /// Client-visible size (`geometry` minus the titlebar band, converted
+    /// to logical points for whichever monitor the window is currently on
+    /// - see `sync_geometry`'s own doc comment) last sent to each window
+    /// via `xdg_toplevel.configure`. `sync_geometry` runs on
     /// every pointer-motion tick while a window is being dragged or resized
     /// (see `input::handle_pointer_position`); a plain move changes only
     /// position, not size, so without this it was re-sending a configure
@@ -419,6 +511,28 @@ pub(crate) struct CompState {
     /// motion event of every drag, which is what made moving a window
     /// stutter. Only a real size change now does either.
     pub(crate) last_synced_size: HashMap<WindowId, (i32, i32)>,
+    /// A size-changing `xdg_toplevel.configure` that's been sent but not
+    /// yet reflected in the client's own real committed content size --
+    /// `(size requested, when it was sent)`. `sync_geometry` won't send
+    /// *another* size-changing configure for the same window while an
+    /// entry is still here (unless `CONFIGURE_THROTTLE_TIMEOUT` has
+    /// elapsed - see that constant's own doc comment for why this can
+    /// never wedge resize entirely).
+    ///
+    /// Niri throttles the same way (`window/mapped.rs`'s `ConfigureIntent::
+    /// Throttled`, keyed on the configure serial rather than a size/time
+    /// pair, but the same idea) - its own comment: "some clients do not
+    /// batch size requests, leading to bad behavior with very fast input
+    /// devices... this throttling also helps interactive resize
+    /// transactions preserve visual consistency." srdwm had no equivalent
+    /// at all: `sync_geometry` runs on every pointer-motion tick of an
+    /// active resize and only ever compared the newly-requested size
+    /// against the *previous request*, never against what the client had
+    /// actually caught up to - a fast drag (a real high-poll-rate mouse,
+    /// confirmed as niri's own stated motivation) could queue several
+    /// configures before the client acknowledged the first, the exact
+    /// backlog this field exists to prevent.
+    pub(crate) pending_size_configure: HashMap<WindowId, ((i32, i32), Instant)>,
     pub(crate) pending: Rc<RefCell<Vec<CoreEvent>>>,
     pub(crate) bound_keys: Rc<HashSet<String>>,
     /// Combos that repeat while held (`srd.bind_repeat`).
@@ -650,13 +764,12 @@ impl CompState {
 /// `border_color` is a real, used feature (rules set distinct colours per
 /// app), and dimming keeps that distinction visible at a glance while
 /// still making focus unambiguous.
-pub(crate) fn effective_border_color(configured: (u8, u8, u8), focused: bool) -> (u8, u8, u8) {
+pub(crate) fn effective_border_color(configured: (u8, u8, u8), focused: bool, dim: f32) -> (u8, u8, u8) {
     if focused {
         return configured;
     }
-    const DIM: f32 = 0.35;
-    let dim = |c: u8| (c as f32 * DIM) as u8;
-    (dim(configured.0), dim(configured.1), dim(configured.2))
+    let scale = |c: u8| (c as f32 * dim).round().clamp(0.0, 255.0) as u8;
+    (scale(configured.0), scale(configured.1), scale(configured.2))
 }
 
 /// Output lookup. Everything that used to reach for a single

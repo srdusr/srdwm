@@ -154,6 +154,114 @@
     }
 
     #[test]
+    fn ending_a_resize_remembers_the_new_size_for_the_apps_next_window() {
+        let mut wm = wm_with_monitor();
+        // Tiling layout, so `add_window` skips `SmartPlacement`'s grid/
+        // cascade sizing entirely and the asserted geometry below reflects
+        // only the remembered-size lookup itself, not incidental grid math.
+        wm.set_layout(wm.current_workspace(), "tiling");
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.app_id = "alacritty".into();
+        w.geometry = Rect::new(100, 100, 300, 200);
+        wm.add_window(w);
+        wm.start_resize(a, ResizeEdge::BottomRight, 400, 300);
+        wm.update_resize(500, 400);
+        wm.end_resize();
+
+        let b = wm.alloc_window_id();
+        let mut w2 = Window::new(b, "b");
+        w2.app_id = "alacritty".into();
+        // Whatever a backend would have hardcoded before calling add_window --
+        // the remembered size must win over this, not just supplement it.
+        w2.geometry = Rect::new(0, 0, 800, 600);
+        wm.add_window(w2);
+        let placed = wm.window(b).unwrap().geometry;
+        assert_eq!((placed.width, placed.height), (400, 300), "the second alacritty window must open at the size the first was resized to");
+    }
+
+    #[test]
+    fn remembered_size_is_keyed_by_app_id_not_shared_across_different_apps() {
+        let mut wm = wm_with_monitor();
+        // Tiling layout, so `add_window` skips `SmartPlacement`'s grid/
+        // cascade sizing entirely and the asserted geometry below reflects
+        // only the remembered-size lookup itself, not incidental grid math.
+        wm.set_layout(wm.current_workspace(), "tiling");
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.app_id = "alacritty".into();
+        w.geometry = Rect::new(100, 100, 300, 200);
+        wm.add_window(w);
+        wm.start_resize(a, ResizeEdge::BottomRight, 400, 300);
+        wm.update_resize(500, 400);
+        wm.end_resize();
+
+        let b = wm.alloc_window_id();
+        let mut w2 = Window::new(b, "b");
+        w2.app_id = "firefox".into();
+        w2.geometry = Rect::new(0, 0, 800, 600);
+        wm.add_window(w2);
+        let placed = wm.window(b).unwrap().geometry;
+        assert_eq!((placed.width, placed.height), (800, 600), "a different app's default size must be untouched by alacritty's remembered size");
+    }
+
+    #[test]
+    fn maximizing_then_unmaximizing_does_not_change_the_remembered_size() {
+        // Only an interactive drag-resize should update `remembered_sizes` --
+        // maximize/fullscreen have their own separate `restore_geometry` and
+        // are not "a size the user wants their next window to open at".
+        let mut wm = wm_with_monitor();
+        // Tiling layout, so `add_window` skips `SmartPlacement`'s grid/
+        // cascade sizing entirely and the asserted geometry below reflects
+        // only the remembered-size lookup itself, not incidental grid math.
+        wm.set_layout(wm.current_workspace(), "tiling");
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.app_id = "alacritty".into();
+        w.geometry = Rect::new(100, 100, 300, 200);
+        wm.add_window(w);
+        wm.toggle_maximize(a);
+        wm.toggle_maximize(a);
+
+        let b = wm.alloc_window_id();
+        let mut w2 = Window::new(b, "b");
+        w2.app_id = "alacritty".into();
+        w2.geometry = Rect::new(0, 0, 800, 600);
+        wm.add_window(w2);
+        let placed = wm.window(b).unwrap().geometry;
+        assert_eq!((placed.width, placed.height), (800, 600), "maximize/unmaximize alone must not have remembered anything");
+    }
+
+    #[test]
+    fn a_rules_explicit_geometry_still_wins_over_a_remembered_size() {
+        let mut wm = wm_with_monitor();
+        // Tiling layout, so `add_window` skips `SmartPlacement`'s grid/
+        // cascade sizing entirely and the asserted geometry below reflects
+        // only the remembered-size lookup itself, not incidental grid math.
+        wm.set_layout(wm.current_workspace(), "tiling");
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.app_id = "alacritty".into();
+        w.geometry = Rect::new(100, 100, 300, 200);
+        wm.add_window(w);
+        wm.start_resize(a, ResizeEdge::BottomRight, 400, 300);
+        wm.update_resize(500, 400);
+        wm.end_resize();
+
+        wm.add_rule(WindowRule {
+            matcher: crate::rules::WindowMatch { class: Some("alacritty".into()), ..Default::default() },
+            actions: crate::rules::WindowRuleActions { geometry: Some(Rect::new(0, 0, 640, 480)), ..Default::default() },
+        });
+        let b = wm.alloc_window_id();
+        let mut w2 = Window::new(b, "b");
+        w2.app_id = "alacritty".into();
+        w2.geometry = Rect::new(0, 0, 800, 600);
+        wm.add_window(w2);
+        let placed = wm.window(b).unwrap().geometry;
+        assert_eq!((placed.width, placed.height), (640, 480), "a rule's explicit geometry is more specific and must win");
+    }
+
+    #[test]
     fn toggle_maximize_restores_original_geometry() {
         let mut wm = wm_with_monitor();
         let a = wm.alloc_window_id();
@@ -294,6 +402,30 @@
     }
 
     #[test]
+    fn hit_test_does_not_see_through_a_covering_windows_content_to_a_lower_windows_edge() {
+        // Reported live: a resize edge (or other titlebar/border zone)
+        // could still be grabbed on a window that was fully covered by
+        // another window on top of it, as long as the covering window's
+        // own edges didn't happen to land on that exact point. `a`'s left
+        // resize edge sits at x=0; `b` is stacked on top and covers that
+        // point with its own real content, but `b`'s own edges are far
+        // away (left at x=-100, nowhere near x=0), so `b` itself doesn't
+        // register a hit there - the bug was falling through to `a`'s
+        // edge underneath instead of stopping at `b`'s opaque content.
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        let mut wa = Window::new(a, "a");
+        wa.geometry = Rect::new(0, 0, 400, 300);
+        wm.add_window(wa);
+        let b = wm.alloc_window_id();
+        let mut wb = Window::new(b, "b");
+        wb.geometry = Rect::new(-100, 0, 600, 300); // added later -> on top, fully covers a
+        wm.add_window(wb);
+
+        assert_eq!(wm.hit_test(0, 150), None, "a's edge must not be reachable through b's opaque content");
+    }
+
+    #[test]
     fn per_window_resize_margin_overrides_the_wm_wide_default() {
         // Hyprland's per-window `extend_border_grab_area` equivalent.
         let mut wm = wm_with_monitor();
@@ -389,10 +521,10 @@
         let ws2 = wm.add_workspace("2", "dynamic");
         wm.switch_workspace(ws2);
         assert_eq!(wm.current_workspace(), ws2);
-        // Re-selecting the already-active workspace jumps back to 0, the
+        // Re-selecting the already-active workspace jumps back to 1, the
         // one that was active right before.
         wm.switch_workspace(ws2);
-        assert_eq!(wm.current_workspace(), 0);
+        assert_eq!(wm.current_workspace(), 1);
     }
 
     #[test]
@@ -402,6 +534,129 @@
         wm.switch_workspace(ws2);
         wm.switch_workspace(ws2);
         assert_eq!(wm.current_workspace(), ws2);
+    }
+
+    #[test]
+    fn switching_to_a_workspace_with_a_window_focuses_it() {
+        // Regression test: `switch_workspace` used to only ever touch
+        // `current_workspace`, never `self.focused` - reported live as
+        // switching to a workspace with an open window leaving that window
+        // unfocused while whatever was focused *before* the switch (now
+        // invisible, off on the old workspace) kept receiving real
+        // keyboard input.
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let ws2 = wm.add_workspace("2", "dynamic");
+        let b = wm.alloc_window_id();
+        wm.add_window(Window::new(b, "b"));
+        wm.move_window_to_workspace(b, ws2);
+        wm.focus_window(a);
+        assert_eq!(wm.focused_id(), Some(a), "sanity: a is focused on the original workspace");
+
+        wm.switch_workspace(ws2);
+        assert_eq!(wm.focused_id(), Some(b), "switching to a workspace with a window must focus it, not leave the old workspace's window focused");
+    }
+
+    #[test]
+    fn switching_to_an_empty_workspace_clears_focus() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        wm.focus_window(a);
+        let empty_ws = wm.add_workspace("2", "dynamic");
+
+        wm.switch_workspace(empty_ws);
+        assert_eq!(wm.focused_id(), None, "no window on the new workspace to focus, and the old one is no longer visible");
+    }
+
+    #[test]
+    fn per_monitor_workspaces_off_by_default_switch_workspace_still_moves_every_monitor() {
+        // Sanity: the new `per_monitor_workspaces` field must default to
+        // `false` and leave shared-mode behaviour completely unchanged --
+        // every existing workspace test above this one relies on that.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        assert!(!wm.per_monitor_workspaces, "shared mode must be the default");
+        let ws2 = wm.add_workspace("2", "dynamic");
+        wm.switch_workspace(ws2);
+        assert_eq!(wm.workspace_for_monitor(0), ws2);
+        assert_eq!(wm.workspace_for_monitor(1), ws2, "shared mode: every monitor must agree");
+    }
+
+    #[test]
+    fn per_monitor_workspaces_on_switching_one_monitor_leaves_the_other_alone() {
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        wm.per_monitor_workspaces = true;
+        let ws2 = wm.add_workspace("2", "dynamic");
+
+        wm.switch_workspace_on_monitor(ws2, 1);
+
+        assert_eq!(wm.workspace_for_monitor(1), ws2, "monitor 1 switched");
+        assert_eq!(wm.workspace_for_monitor(0), 1, "monitor 0 must still fall back to current_workspace, untouched");
+    }
+
+    #[test]
+    fn per_monitor_workspaces_on_visible_windows_respects_each_monitors_own_workspace() {
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        wm.per_monitor_workspaces = true;
+        let ws2 = wm.add_workspace("2", "dynamic");
+
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "on-monitor-0-workspace-1"));
+        wm.window_mut(a).unwrap().monitor = 0;
+
+        let b = wm.alloc_window_id();
+        wm.add_window(Window::new(b, "on-monitor-1-workspace-2"));
+        wm.window_mut(b).unwrap().monitor = 1;
+        wm.move_window_to_workspace(b, ws2);
+
+        // Before switching monitor 1 to workspace 2, b isn't visible yet
+        // (monitor 1 still falls back to workspace 1).
+        assert!(!wm.visible_windows().any(|w| w.id == b));
+
+        wm.switch_workspace_on_monitor(ws2, 1);
+
+        let visible: Vec<_> = wm.visible_windows().map(|w| w.id).collect();
+        assert!(visible.contains(&a), "monitor 0's own window must still be visible");
+        assert!(visible.contains(&b), "monitor 1's window must become visible once its monitor switches to workspace 2");
+    }
+
+    #[test]
+    fn per_monitor_workspaces_on_multiple_workspaces_can_be_active_at_once() {
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        wm.per_monitor_workspaces = true;
+        let ws2 = wm.add_workspace("2", "dynamic");
+
+        wm.switch_workspace_on_monitor(ws2, 1);
+
+        assert!(wm.is_workspace_visible(1), "monitor 0 is still showing workspace 1");
+        assert!(wm.is_workspace_visible(ws2), "monitor 1 is showing workspace 2");
+    }
+
+    #[test]
+    fn switching_to_a_workspace_where_the_already_focused_window_lives_is_a_no_op_for_focus() {
+        // The auto-focus-on-switch behavior above must not fight
+        // `focus_window`'s own workspace-follow call into `switch_workspace`
+        // (see that function's doc comment): when a window on another
+        // workspace is focused directly, that window - not merely "the
+        // topmost window on its workspace" - must end up focused, even if
+        // it isn't the topmost one.
+        let mut wm = wm_with_monitor();
+        let ws2 = wm.add_workspace("2", "dynamic");
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        wm.move_window_to_workspace(a, ws2);
+        let b = wm.alloc_window_id();
+        wm.add_window(Window::new(b, "b"));
+        wm.move_window_to_workspace(b, ws2);
+        // b was added after a, so it's topmost - focusing a directly must
+        // still result in a being focused, not b.
+        wm.focus_window(a);
+        assert_eq!(wm.focused_id(), Some(a));
     }
 
     #[test]
@@ -421,7 +676,7 @@
         let id = wm.alloc_window_id();
         wm.add_window(Window::new(id, "a"));
         wm.move_window_to_workspace(id, ws2);
-        assert_eq!(wm.current_workspace(), 0, "sanity: still on the default workspace");
+        assert_eq!(wm.current_workspace(), 1, "sanity: still on the default workspace");
 
         wm.focus_window(id);
         assert_eq!(wm.current_workspace(), ws2, "focusing a window must bring its workspace along");
@@ -482,7 +737,7 @@
         // workspace id that was never really visited.
         wm.auto_back_and_forth = true;
         wm.switch_workspace(ws2);
-        assert_eq!(wm.current_workspace(), 0);
+        assert_eq!(wm.current_workspace(), 1);
     }
 
     #[test]
@@ -642,6 +897,75 @@
     }
 
     #[test]
+    fn disabled_monitor_is_reported_but_never_shows_up_in_monitors() {
+        // The whole point of keeping this separate from `set_monitors`:
+        // real placement (`monitors()`) must never see a disabled output,
+        // even though `srd monitors`/AGS's panel now needs to list it.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        wm.set_disabled_monitor("HDMI-A-1".to_string(), Rect::new(1920, 0, 1920, 1080), Rect::new(1920, 0, 1920, 1080), false);
+
+        assert_eq!(wm.monitors().len(), 2, "disabled_monitors must not leak into real placement's monitor list");
+        let disabled: Vec<_> = wm.disabled_monitors().collect();
+        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled[0].0, "HDMI-A-1");
+    }
+
+    #[test]
+    fn re_enabling_clears_the_disabled_monitor_record() {
+        let mut wm = WindowManager::new();
+        wm.set_disabled_monitor("HDMI-A-1".to_string(), Rect::new(0, 0, 1920, 1080), Rect::new(0, 0, 1920, 1080), false);
+        assert_eq!(wm.disabled_monitors().count(), 1);
+
+        wm.clear_disabled_monitor("HDMI-A-1");
+        assert_eq!(wm.disabled_monitors().count(), 0);
+    }
+
+    #[test]
+    fn primary_secondary_layout_is_a_no_op_outside_per_monitor_workspaces_mode() {
+        // Shared mode: every monitor shows the same one workspace, so a
+        // primary/secondary split has nothing distinct to apply to.
+        let mut wm = WindowManager::new();
+        wm.primary_layout = "dynamic".to_string();
+        wm.secondary_layout = "tiling".to_string();
+        wm.set_monitors(two_monitors());
+        assert_eq!(wm.workspace(1).unwrap().layout, "dynamic", "must not touch the shared workspace's layout");
+    }
+
+    #[test]
+    fn primary_secondary_layout_applies_once_workspaces_are_split_per_monitor() {
+        let mut wm = WindowManager::new();
+        wm.per_monitor_workspaces = true;
+        wm.primary_layout = "dynamic".to_string();
+        wm.secondary_layout = "tiling".to_string();
+        wm.set_monitors(two_monitors());
+        // Give the secondary monitor its own workspace, same as a real
+        // independent per-monitor switch would.
+        let ws2 = wm.add_workspace("2", "dynamic");
+        wm.switch_workspace_on_monitor(ws2, 1);
+        // Re-applied on the next monitor-list refresh (a hotplug or
+        // restart), not continuously - see `apply_monitor_layouts`'s own
+        // doc comment for why it doesn't hook every workspace switch.
+        wm.set_monitors(two_monitors());
+
+        assert_eq!(wm.workspace(wm.workspace_for_monitor(0)).unwrap().layout, "dynamic");
+        assert_eq!(wm.workspace(ws2).unwrap().layout, "tiling");
+    }
+
+    #[test]
+    fn primary_secondary_layout_does_not_clobber_the_still_shared_workspace() {
+        // Neither monitor has been independently switched yet - both
+        // still resolve to the same fallback workspace. secondary_layout
+        // must not stomp what primary_layout just set on it.
+        let mut wm = WindowManager::new();
+        wm.per_monitor_workspaces = true;
+        wm.primary_layout = "dynamic".to_string();
+        wm.secondary_layout = "tiling".to_string();
+        wm.set_monitors(two_monitors());
+        assert_eq!(wm.workspace(1).unwrap().layout, "dynamic");
+    }
+
+    #[test]
     fn unplugging_a_monitor_rehomes_its_windows_to_the_primary() {
         let mut wm = WindowManager::new();
         wm.set_monitors(two_monitors());
@@ -747,6 +1071,69 @@
             "window must be pulled back on-screen, got {:?}",
             got.geometry
         );
+    }
+
+    #[test]
+    fn a_new_window_lands_on_the_focused_windows_monitor_not_always_primary() {
+        // Real bug, reported live: "why do all windows only open on the
+        // first monitor" - `add_window` used to resolve its target
+        // monitor via `primary_monitor()` unconditionally, so a second
+        // monitor being the one the user was actually working on never
+        // mattered at all.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+
+        let first = wm.alloc_window_id();
+        wm.add_window(Window::new(first, "on-primary"));
+        assert_eq!(wm.window(first).unwrap().monitor, 0, "sanity: nothing focused yet falls back to primary");
+
+        // `add_window` itself focuses whatever it just added, so moving
+        // this window onto the secondary monitor and leaving it focused is
+        // enough to make it "the window the user is currently on" for the
+        // next one.
+        wm.window_mut(first).unwrap().monitor = 1;
+
+        let second = wm.alloc_window_id();
+        wm.add_window(Window::new(second, "should-follow-focus"));
+        assert_eq!(wm.window(second).unwrap().monitor, 1, "a new window must land on the focused window's monitor, not primary");
+    }
+
+    #[test]
+    fn a_new_window_lands_on_the_pointers_monitor_when_nothing_is_focused_there() {
+        // Real bug, reported live: with nothing focused (a fresh session,
+        // or the last-focused window sitting on a *different* monitor than
+        // the one just clicked/hovered), a new window still fell all the
+        // way back to primary - even though the user was demonstrably at
+        // the second monitor when they launched it. `set_pointer_monitor`
+        // is what a real backend's pointer-motion handler calls to tell
+        // core this.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        wm.set_pointer_monitor(Some(1));
+
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "should-follow-pointer"));
+        assert_eq!(wm.window(id).unwrap().monitor, 1, "a new window must land on the pointer's monitor when nothing is focused, not primary");
+    }
+
+    #[test]
+    fn a_focused_window_still_wins_over_the_pointers_monitor() {
+        // The pointer is only a fallback for when nothing is focused --
+        // see `add_window`'s own doc comment for why focus stays the
+        // primary signal (matches every mainstream desktop's "new window
+        // opens where you're working" convention, which is about the
+        // focused context, not incidental cursor position).
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+
+        let first = wm.alloc_window_id();
+        wm.add_window(Window::new(first, "focused-on-primary"));
+        wm.window_mut(first).unwrap().monitor = 0;
+        wm.set_pointer_monitor(Some(1));
+
+        let second = wm.alloc_window_id();
+        wm.add_window(Window::new(second, "should-still-follow-focus"));
+        assert_eq!(wm.window(second).unwrap().monitor, 0, "a focused window's monitor must win over the pointer's");
     }
 
     // ---- Fullscreen ------------------------------------------------------

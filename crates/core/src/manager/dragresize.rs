@@ -28,7 +28,16 @@ impl WindowManager {
         // maximize avoid it. Clamping a drag to the shrunk usable area
         // made it physically impossible to ever drag a window past a
         // dock, at any speed or angle.
-        let monitor_bounds = self.windows.get(&drag.window).and_then(|w| self.monitor_for(w.monitor)).map(|m| m.full_geometry);
+        //
+        // `all_monitors_bounds`, not `monitor_for(w.monitor)` (the window's
+        // own *starting* monitor, looked up once and never updated as the
+        // drag moves) - see that function's own doc comment for the real
+        // multi-monitor bug this fixes: the old single-monitor clamp made
+        // it mathematically impossible to ever drag a window from one
+        // monitor onto another, confirmed live with two real monitors
+        // connected, one of them otherwise fully working at the
+        // compositor/DRM level.
+        let monitor_bounds = self.all_monitors_bounds();
         if let Some(bounds) = monitor_bounds {
             new_geom.x = new_geom.x.clamp(bounds.x - new_geom.width as i32 + 40, bounds.right() - 40);
             new_geom.y = new_geom.y.clamp(bounds.y, bounds.bottom() - 40);
@@ -43,6 +52,25 @@ impl WindowManager {
     /// near a monitor edge.
     pub fn end_drag(&mut self) {
         if let Some(drag) = self.drag.take() {
+            // `w.monitor` only ever gets set at window creation (or by
+            // `set_monitors`, reactively, on the *next* hotplug) - a drag
+            // that crossed onto a different monitor leaves it stale
+            // pointing at wherever the window *started*, same gap
+            // `set_monitors`'s own doc comment already documents for the
+            // hotplug-rehoming case. Corrected here, before computing the
+            // snap zone below, not after - using the stale value there
+            // would check the *wrong* monitor's snap zones (e.g. still
+            // snapping against monitor 1's left edge for a window that's
+            // now actually sitting near monitor 2's), the same bug this is
+            // fixing for maximize/fullscreen one level up.
+            if let Some(w) = self.windows.get(&drag.window) {
+                if let Some(now_on) = self.monitors.iter().find(|m| m.geometry.overlaps(&w.geometry)) {
+                    let now_on_id = now_on.id;
+                    if let Some(w) = self.windows.get_mut(&drag.window) {
+                        w.monitor = now_on_id;
+                    }
+                }
+            }
             let snapped = self.windows.get(&drag.window).and_then(|w| {
                 self.monitor_for(w.monitor).and_then(|m| SmartPlacement::snap_zone(w.geometry, m, &self.placement))
             });
@@ -73,11 +101,35 @@ impl WindowManager {
     }
 
     pub fn end_resize(&mut self) {
+        // Remembers this app's new size for its *next* window - see
+        // `remembered_sizes`' own doc comment for why this is the one
+        // resize-ending path that updates it (not maximize/fullscreen, not
+        // a drag-to-edge snap). Keyed by `app_id`, so a window that never
+        // got one (a backend/client that hasn't reported it yet) simply
+        // isn't remembered - no worse than today, and consistent with how
+        // window rules already treat an empty `app_id` as unmatchable.
+        if let Some(r) = &self.resize {
+            if let Some(w) = self.windows.get(&r.window) {
+                if !w.app_id.is_empty() {
+                    self.remembered_sizes.insert(w.app_id.clone(), (w.geometry.width, w.geometry.height));
+                }
+            }
+        }
         self.resize = None;
     }
 
     pub fn is_resizing(&self) -> bool {
         self.resize.is_some()
+    }
+
+    /// Which window is currently being interactively resized, if any - so
+    /// a backend can skip an expensive-but-cosmetic per-window effect
+    /// (content corner-masking, concretely - see its own call site's
+    /// comment) for just that one window while its content is reflowing
+    /// on every single frame, without touching every *other* window's own
+    /// masking.
+    pub fn resizing_window(&self) -> Option<WindowId> {
+        self.resize.as_ref().map(|r| r.window)
     }
 
     /// The edge currently being dragged, if a resize is in progress - so a

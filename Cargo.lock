@@ -2115,6 +2115,7 @@ dependencies = [
 name = "srd-cli"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "srdwm-platform",
 ]
 

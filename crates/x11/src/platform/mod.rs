@@ -54,6 +54,8 @@ x11rb::atom_manager! {
         _NET_WM_STATE_MAXIMIZED_HORZ,
         _NET_CLIENT_LIST,
         _NET_ACTIVE_WINDOW,
+        _NET_WM_STRUT,
+        _NET_WM_STRUT_PARTIAL,
         UTF8_STRING,
         // Global-menu properties - see `read_global_menu`'s doc comment.
         // A native X11 client is exactly the same GTK/Qt app the Wayland
@@ -82,6 +84,36 @@ struct Frame {
     frame: XWindow,
     client: XWindow,
     supports_delete: bool,
+}
+
+/// One window's own `_NET_WM_STRUT_PARTIAL` (or the older, span-free
+/// `_NET_WM_STRUT`) reservation - the X11 equivalent of a Wayland
+/// layer-shell surface's exclusive zone (`zwlr_layer_surface_v1::set_
+/// exclusive_zone`, read on the Wayland backends via `layer_map_for_
+/// output(...).non_exclusive_zone()`). At most one edge is ever nonzero
+/// for a real panel/dock (a bar reserves *one* strip, not several), but
+/// the property itself allows all four at once, so all four are kept.
+///
+/// Values are in root-window (screen-global) pixels, matching every other
+/// X11 geometry value in this backend - there is no separate logical/
+/// physical scale to convert between the way the Wayland backends' own
+/// `zone_physical` conversion needs (`udev/platform.rs`'s `monitors()`),
+/// since this compositor's X11 backend has no independent output-scale
+/// concept at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Strut {
+    left: u32,
+    right: u32,
+    top: u32,
+    bottom: u32,
+    left_start_y: i32,
+    left_end_y: i32,
+    right_start_y: i32,
+    right_end_y: i32,
+    top_start_x: i32,
+    top_end_x: i32,
+    bottom_start_x: i32,
+    bottom_end_x: i32,
 }
 
 fn err(e: impl std::fmt::Display) -> PlatformError {
@@ -150,6 +182,22 @@ pub struct X11Platform {
     /// D-Bus service itself can independently fail (see that module's own
     /// `None` handling).
     appmenu_registrar: Option<srdwm_platform::AppmenuRegistrarState>,
+    /// Every currently-mapped window's own `_NET_WM_STRUT_PARTIAL`/`_NET_
+    /// WM_STRUT` reservation, keyed by its X window id - populated on
+    /// `MapNotify` (see `events.rs`) and kept fresh via `PropertyNotify`
+    /// on the same two atoms, removed on `UnmapNotify`/`DestroyNotify`.
+    /// Read by `monitors()` to shrink each monitor's own usable rect the
+    /// same way the Wayland backends' layer-shell exclusive zones already
+    /// do - see that method's own doc comment. Deliberately keyed on
+    /// *any* mapped window that sets the property, not gated on `_NET_WM_
+    /// WINDOW_TYPE_DOCK` specifically: the EWMH spec's actual reservation
+    /// mechanism is the strut property itself, and real struts also come
+    /// from override-redirect panels that never go through `manage_new_
+    /// window`/`xid_to_core` at all (confirmed live by a peer session's
+    /// own aegis bar, an override-redirect `_NET_WM_WINDOW_TYPE_DOCK`
+    /// window) - so this can't be folded into the existing managed-
+    /// window bookkeeping.
+    struts: HashMap<XWindow, Strut>,
 }
 
 
@@ -169,8 +217,12 @@ mod actions;
 mod connect;
 mod events;
 mod global_menu;
+mod struts;
 mod trait_impl;
 mod window;
+
+#[cfg(test)]
+use struts::usable_rect;
 
 #[cfg(test)]
 mod tests;

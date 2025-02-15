@@ -29,7 +29,7 @@ impl WaylandPlatform {
         let hide_top_layers = self.wm.borrow().visible_windows_front_to_back().any(|w| w.fullscreen);
         let mut custom_elements: Vec<crate::elements::OverlayElement<GlesRenderer>> = Vec::new();
         if !hide_top_layers {
-            custom_elements.extend(crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Top | Layer::Overlay)));
+            custom_elements.extend(crate::elements::output_layer_elements(renderer, &self.output, |layer| matches!(layer, Layer::Top | Layer::Overlay)));
         }
         for id in self.wm.borrow().visible_windows_front_to_back().map(|w| w.id).collect::<Vec<_>>() {
             let Some(w) = self.wm.borrow().window(id).cloned() else { continue };
@@ -41,11 +41,22 @@ impl WaylandPlatform {
             if let Some(dwindow) = self.state.id_to_window.get(&id) {
                 if let Some(surface) = crate::elements::window_wl_surface(dwindow) {
                     let band = if w.decorated { srdwm_core::TITLEBAR_HEIGHT as i32 } else { 0 };
-                    custom_elements.extend(crate::elements::surface_content_elements(renderer, &surface, (w.geometry.x, w.geometry.y + band), w.opacity));
+                    // `content_offset`: same `xdg_surface.set_window_geometry`
+                    // subtraction every other render/capture path in this
+                    // codebase already does (`udev/render.rs`, `winit/
+                    // render.rs`, `udev/capture.rs`) - missed here
+                    // specifically. A CSD client's invisible shadow margin
+                    // landed at `w.geometry.x, w.geometry.y + band` instead
+                    // of its real visible content, so a screenshot taken on
+                    // this backend showed the same content_offset-sized gap
+                    // the on-screen render loops already had fixed.
+                    let content_offset = dwindow.geometry().loc;
+                    let pos = (w.geometry.x - content_offset.x, w.geometry.y + band - content_offset.y);
+                    custom_elements.extend(crate::elements::surface_content_elements(renderer, &surface, pos, w.opacity));
                 }
             }
         }
-        custom_elements.extend(crate::elements::output_layer_elements(renderer, &self.output, (0, 0), |layer| matches!(layer, Layer::Background | Layer::Bottom)));
+        custom_elements.extend(crate::elements::output_layer_elements(renderer, &self.output, |layer| matches!(layer, Layer::Background | Layer::Bottom)));
 
         // A throwaway damage tracker, so this pass always draws the whole
         // scene (age 0) and never perturbs the on-screen tracker's history.

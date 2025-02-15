@@ -10,6 +10,12 @@ pub struct UdevPlatform {
     clients: Vec<Client>,
     pending: Rc<RefCell<Vec<CoreEvent>>>,
     ipc: Option<srdwm_platform::IpcServer>,
+    /// Last time `ipc.poll()` actually ran - see its call site in
+    /// `poll_events` for why this exists at all.
+    last_ipc_poll: Instant,
+    /// Last time the unconditional end-of-cycle `render_udev_frame()` call
+    /// actually ran - see its own call site for why.
+    last_render: Instant,
 }
 
 impl UdevPlatform {
@@ -52,16 +58,24 @@ impl UdevPlatform {
         let mut heads: Vec<UdevHead> = Vec::new();
         let mut output_entries: Vec<crate::state::OutputEntry> = Vec::new();
         let mut used_crtcs: Vec<crtc::Handle> = Vec::new();
+        // Two accumulators - see `bring_up_head`'s own doc comment on its
+        // `logical_x` parameter for why a second head's logical position
+        // can't just be derived from the physical offset and its own
+        // scale alone once an earlier head has a *different* scale.
         let mut x_offset = 0;
+        let mut logical_x = 0;
         for probe in &connected {
             let Some(crtc) = pick_crtc(&card, probe, &used_crtcs) else {
                 log::warn!("udev: no free CRTC left for connector {}; not driving it", probe.name);
                 continue;
             };
-            let (head, entry) = bring_up_head(&card, &display_handle, probe, crtc, x_offset)?;
-            log::info!("udev: head {}: {} {}x{} at x={x_offset}", heads.len(), probe.name, head.size.0, head.size.1);
+            let scale = wm.borrow().monitor_scale(&probe.name);
+            let (head, entry) = bring_up_head(&card, &display_handle, probe, crtc, x_offset, logical_x, scale)?;
+            log::info!("udev: head {}: {} {}x{} at x={x_offset} (logical x={logical_x})", heads.len(), probe.name, head.size.0, head.size.1);
             used_crtcs.push(crtc);
+            let resolved_scale = head.output.current_scale().fractional_scale();
             x_offset += head.size.0;
+            logical_x += (head.size.0 as f64 / resolved_scale).round() as i32;
             heads.push(head);
             output_entries.push(entry);
         }
@@ -114,9 +128,11 @@ impl UdevPlatform {
             active: true,
             pointer_pos: (width as f64 / 2.0, height as f64 / 2.0).into(),
             session: session.clone(),
+            disabled_connectors: std::collections::HashSet::new(),
+            last_rendered_workspace: None,
         };
 
-        let state = CompState {
+        let mut state = CompState {
             compositor_state,
             xdg_shell_state,
             _xdg_decoration_state: xdg_decoration_state,
@@ -143,6 +159,7 @@ impl UdevPlatform {
             _screencopy_state: crate::screencopy::ScreencopyState::new::<CompState>(&display_handle),
             screencopy_pending: Vec::new(),
             _appmenu_state: crate::appmenu::AppmenuManagerState::new::<CompState>(&display_handle),
+            _virtual_keyboard_state: smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState::new::<CompState, _>(&display_handle, |_client| true),
             _foreign_toplevel_state: crate::foreign_toplevel::ForeignToplevelState::new::<CompState>(&display_handle),
             foreign_toplevel_managers: Vec::new(),
             foreign_toplevel_handles: HashMap::new(),
@@ -172,6 +189,7 @@ impl UdevPlatform {
             last_broadcast_workspace: None,
             lock: Default::default(),
             cursor_status: smithay::input::pointer::CursorImageStatus::default_named(),
+            decoration_cursor_active: false,
             cursor_buffers: crate::cursor::make_buffers(),
             last_titlebar_click: None,
             gesture_swipe: None,
@@ -189,12 +207,15 @@ impl UdevPlatform {
             border_top_decorations: HashMap::new(),
             border_bottom_decorations: HashMap::new(),
             decoration_signatures: HashMap::new(),
+            hovered_titlebar_button: None,
             shadow_buffers: HashMap::new(),
             rounded_corners_program: None,
             content_epoch: HashMap::new(),
             rounded_content_buffers: HashMap::new(),
             border_side_buffers: HashMap::new(),
+            color_filter_buffers: HashMap::new(),
             last_synced_size: HashMap::new(),
+            pending_size_configure: HashMap::new(),
             pending: pending.clone(),
             bound_keys: Rc::new(bound_keys.iter().cloned().collect::<HashSet<_>>()),
             repeat_keys: Rc::new(repeat_keys.iter().cloned().collect::<HashSet<_>>()),
@@ -208,6 +229,15 @@ impl UdevPlatform {
             ewmh: None,
             appmenu_registrar: None,
         };
+
+        // Before the Wayland socket even binds, deliberately - see
+        // `restore_monitor_layout`'s and `monitor_layout`'s own doc
+        // comments for why this compositor restores its own remembered
+        // layout itself rather than leaving it to whichever panel happens
+        // to be running: no client can possibly connect and see the
+        // default, un-restored arrangement, not even for one frame, since
+        // the socket a client would need to connect to doesn't exist yet.
+        state.restore_monitor_layout();
 
         let listener = ListeningSocket::bind_auto("wayland", 0..32).map_err(err)?;
         if let Some(name) = listener.socket_name() {
@@ -248,7 +278,7 @@ impl UdevPlatform {
             log::warn!("XWayland unavailable ({e}); X11-only clients will not run");
         }
 
-        Ok(Self { event_loop, display: dh, state, listener, clients: Vec::new(), pending, ipc })
+        Ok(Self { event_loop, display: dh, state, listener, clients: Vec::new(), pending, ipc, last_ipc_poll: Instant::now(), last_render: Instant::now() })
     }
 
     fn accept_clients(&mut self) -> PlatformResult<()> {
@@ -268,13 +298,97 @@ impl Platform for UdevPlatform {
 
     fn poll_events(&mut self) -> PlatformResult<Vec<CoreEvent>> {
         self.accept_clients()?;
+        let dispatch_start = Instant::now();
         self.event_loop.dispatch(Some(Duration::from_millis(16)), &mut self.state).map_err(err)?;
+        // `dispatch`'s `Duration::from_millis(16)` argument is a *maximum*
+        // wait, not a guarantee - calloop returns the moment any
+        // registered source looks ready, however long or short that takes.
+        // A source stuck permanently "ready" (an fd calloop never removes
+        // even though every read on it comes back EOF/HUP - confirmed live
+        // via `strace`, traced to the libseat session notifier's internal
+        // ping channel, and reproducible on a bare tty1 login within the
+        // first second of every single srdwm start, independent of which
+        // libseat backend - seatd or the logind fallback - is active)
+        // makes `dispatch` return in microseconds forever, turning this
+        // loop into an unthrottled spin that burns 70-90% of a core doing
+        // nothing: `accept_clients`/`tick_repeat`/`dispatch_clients` all
+        // still run their own (cheap) work on every single one of those
+        // spurious wakeups, thousands of times a second, instead of the
+        // ~60 times a second the 16ms figure was meant to cap it at.
+        //
+        // This doesn't fix *why* that source never goes away - that's
+        // upstream, in calloop/libseat's own channel-notification internals
+        // - but it puts a floor under the symptom regardless of which
+        // source eventually turns out to cause it.
+        //
+        // Sleeping the full remainder of a 16ms cycle on *every* fast
+        // return (an earlier version of this did exactly that) blocks this
+        // thread against everything, not just the next spurious wakeup --
+        // a genuine DRM page-flip completion or a client committing its
+        // next video frame that becomes ready *during* the sleep sits
+        // unprocessed until the sleep ends, instead of being picked up
+        // immediately. Reported live as choppy/laggy video playback: up to
+        // 16ms of pure, avoidable latency added to every frame's worth of
+        // real work that happened to land in that window.
+        //
+        // A per-iteration streak counter was tried first, throttling only
+        // once several fast returns in a row looked like true idle
+        // spinning rather than one-off real work - but `dispatch`'s
+        // return time can't actually distinguish the two here: the dead
+        // pipe is *always* ready, so every call returns in microseconds
+        // whether or not it also picked up something real, and a streak
+        // built on that timing never resets during genuine activity
+        // either. Telling real work apart from the spurious wakeup would
+        // need a signal from *inside* dispatch (e.g. the render path
+        // flagging "a frame actually went out this tick"), which is real
+        // plumbing, not a one-line fix.
+        //
+        // Short of that: cap the sleep itself far below 16ms instead of
+        // trying to skip it selectively. `MIN_CYCLE` (~3ms) still turns
+        // the true spin (unbounded, thousands of empty iterations/sec)
+        // into a bounded few hundred/sec - a real, if smaller, win over
+        // no floor at all - while capping how long any genuinely-ready
+        // event can ever sit blocked to something well under one frame at
+        // 60Hz, rather than up to a full frame's worth of latency.
+        const MIN_CYCLE: Duration = Duration::from_millis(3);
+        let elapsed = dispatch_start.elapsed();
+        if elapsed < MIN_CYCLE {
+            std::thread::sleep(MIN_CYCLE - elapsed);
+        }
         // Held bindings that repeat - see `CompState::tick_repeat`.
         self.state.tick_repeat();
         self.display.dispatch_clients(&mut self.state).map_err(err)?;
         self.display.flush_clients().map_err(err)?;
         self.state.apply_registrar_events();
-        if let Some(ipc) = self.ipc.as_mut() {
+        self.state.poll_global_menu_properties();
+        // Throttled to ~60Hz, not run on every single `poll_events` cycle --
+        // `IpcServer::poll` unconditionally rebuilds and diffs a full
+        // `client_snapshot`/`workspace_snapshot` on every call (cloning each
+        // window's title, app_id, global-menu data, ...) even when nothing
+        // has changed and nobody is subscribed, purely so a real change is
+        // never missed. Cheap at a sane call rate; not cheap at the rate
+        // this loop actually runs at - see `MIN_CYCLE`'s own doc comment
+        // just above: the dead libseat pipe that makes `dispatch` return in
+        // microseconds forever means this whole function's "rest of the
+        // cycle" work already runs at whatever `dispatch` gets bounced to
+        // (a few hundred times a second, floor-capped by `MIN_CYCLE`, not
+        // the ~60 times a second one `Duration::from_millis(16)` above was
+        // meant to imply), and that snapshot/diff cost was riding along at
+        // that same needlessly high rate - measured live as a continuous,
+        // unwavering ~20% of a core even at complete idle, unaffected by
+        // toggling shadows/rounded_corners/animations (all purely per-
+        // render-frame costs, not per-cycle ones, so none of them could
+        // have explained a cost that never budged with the screen doing
+        // nothing). A real `srd dispatch`/`srd set` command still lands
+        // within one throttled window (well under a human's own reaction
+        // time), not delayed by anything close to what would read as
+        // input lag.
+        const IPC_POLL_INTERVAL: Duration = Duration::from_millis(16);
+        let ipc_due = self.last_ipc_poll.elapsed() >= IPC_POLL_INTERVAL;
+        if ipc_due {
+            self.last_ipc_poll = Instant::now();
+        }
+        if let Some(ipc) = self.ipc.as_mut().filter(|_| ipc_due) {
             if ipc.poll(&self.state.wm) {
                 self.pending.borrow_mut().push(CoreEvent::WorkspaceChanged);
                 // `ipc.rs`'s `handle_request` (`"focus"`, `"toggle
@@ -295,9 +409,16 @@ impl Platform for UdevPlatform {
                 // unconditionally on any IPC mutation, not just ones that
                 // are definitely focus changes - raising an already-topmost
                 // element is a no-op reinsertion.
+                //
+                // `raise_in_space`, not the full `focus_window` - that one
+                // also re-runs `WindowManager::focus_window`'s workspace-
+                // follow side effect on the already-focused window, which
+                // silently reverted any `activate_workspace` IPC dispatch
+                // within this same cycle (see `raise_in_space`'s own doc
+                // comment for the full story).
                 let focused = self.state.wm.borrow().focused_id();
                 if let Some(id) = focused {
-                    crate::input::focus_window(&mut self.state, id);
+                    crate::input::raise_in_space(&mut self.state, id);
                 }
             }
         }
@@ -344,6 +465,10 @@ impl Platform for UdevPlatform {
                     log::warn!("udev: set_output_position: no head at index {id}");
                     continue;
                 };
+                // `(x, y)` is whatever `srd dispatch set output position`
+                // sent, unconverted - that command's own contract is to
+                // match `srd monitors`' `full_x`/`full_y` (physical),
+                // which is exactly what `apply_output_position` wants.
                 crate::output_management::apply_output_position(&mut self.state, &output, (x, y).into());
                 any_applied = true;
             }
@@ -361,57 +486,144 @@ impl Platform for UdevPlatform {
                 self.pending.borrow_mut().push(CoreEvent::MonitorAdded(srdwm_core::Monitor::new(0, "", srdwm_core::Rect::new(0, 0, 0, 0))));
             }
         }
-        self.state.render_udev_frame();
+        // Applies any `srd set_output_enabled` IPC requests queued since
+        // the last poll - `disable_connector_by_name`/`enable_connector_
+        // by_name` already push their own `MonitorRemoved`/`MonitorAdded`
+        // event, so nothing further is needed here beyond calling them.
+        let enable_requests = self.state.wm.borrow_mut().drain_output_enable_requests();
+        for (name, enabled) in enable_requests {
+            if enabled {
+                self.state.enable_connector_by_name(&name);
+            } else {
+                self.state.disable_connector_by_name(&name);
+            }
+        }
+        // Throttled the same way and for the same underlying reason as the
+        // `ipc.poll()` call above - this is the *other*, larger half of
+        // this cycle's needless work at the dead-pipe-driven spin rate.
+        // `render_udev_frame` isn't only called from here: a real DRM
+        // page-flip completion (`session.rs`), a VT-switch resume, and an
+        // output hotplug each call it directly, immediately, completely
+        // unthrottled by this - those are genuine, comparatively rare
+        // events that should redraw the instant they happen. This one
+        // specific call site is different: it's the unconditional catch-
+        // all that used to run at the end of *every* cycle regardless of
+        // whether `dispatch` actually picked up anything real, which at
+        // this loop's dead-pipe-driven rate meant re-walking every visible
+        // window, rebuilding the whole `custom_elements` list, and running
+        // Pixman's own damage tracking against it a few hundred times a
+        // second, forever - `has_damage` already meant an idle desktop's
+        // *page flip* was skipped, but computing "no, still nothing to
+        // flip" this often is itself most of the cost this whole function
+        // was found burning at idle. `RENDER_INTERVAL` (~8ms, ~120Hz) is
+        // comfortably above any real display's refresh rate - a head can
+        // never actually present faster than its own vblank allows
+        // regardless (`flip_pending` already gates that) - so this cannot
+        // cap real, on-screen frame rate on any hardware this backend
+        // targets; it only stops the redundant "check again" calls in
+        // between.
+        const RENDER_INTERVAL: Duration = Duration::from_millis(8);
+        if self.last_render.elapsed() >= RENDER_INTERVAL {
+            self.last_render = Instant::now();
+            self.state.render_udev_frame();
+        }
         Ok(self.pending.borrow_mut().drain(..).collect())
     }
 
-    /// One `srdwm_core::Monitor` per head, positioned in the global space.
-    /// This is what makes core's layout engine multi-monitor-aware in
-    /// practice: `arrange_workspace` groups windows by `monitor` and lays
-    /// each group out inside that monitor's rectangle.
+    /// One `srdwm_core::Monitor` per head, positioned in the global space
+    /// - or several, when `srd.monitor.split` has requested that head be
+    /// divided into logical sub-monitors ("monitors inside monitors"; see
+    /// `srdwm_core::monitor::MonitorSplit`'s own doc comment). This is
+    /// what makes core's layout engine multi-monitor-aware in practice:
+    /// `arrange_workspace` groups windows by `monitor` and lays each group
+    /// out inside that monitor's rectangle - a split just means more,
+    /// smaller rectangles feeding the same grouping, no other core-side
+    /// change needed.
     fn monitors(&mut self) -> PlatformResult<Vec<srdwm_core::Monitor>> {
         let Some(udev) = self.state.udev.as_ref() else { return Ok(Vec::new()) };
-        Ok(udev
-            .heads
-            .iter()
-            .enumerate()
-            .map(|(i, head)| {
-                // Shrunk by whatever a layer-shell surface (bar, dock) has
-                // reserved via `set_exclusive_zone` - reporting the full
-                // head size here otherwise means core's placement/tiling
-                // treats that strip as ordinary free space, so a new
-                // window's titlebar lands right where the bar renders on
-                // top of it, unreachable to drag. `non_exclusive_zone()` is
-                // output-local, so it's translated into this head's
-                // position in the shared global space the same way
-                // `head.location` already is.
-                let zone = layer_map_for_output(&head.output).non_exclusive_zone();
-                let rect = srdwm_core::Rect::new(
-                    head.location.x + zone.loc.x,
-                    head.location.y + zone.loc.y,
-                    zone.size.w as u32,
-                    zone.size.h as u32,
-                );
-                let mut m = srdwm_core::Monitor::new(i as u32, head.output.name(), rect);
-                // `Monitor::new` defaults `full_geometry` to whatever
-                // `geometry` was constructed with - correct for a monitor
-                // with no layer-shell client at all, wrong the moment one
-                // exists, since `rect` above is already zone-shrunk. Without
-                // this, `full_geometry` was silently identical to `geometry`
-                // for every real monitor this backend ever reported, which
-                // made `toggle_fullscreen`'s whole "ignore the reserved
-                // zone" design a no-op in practice: fullscreen still
-                // stopped at the bar/dock exactly like maximize does.
-                // Reported live as "fullscreen isn't actually going
-                // fullscreen" - confirmed by triggering it and reading
-                // the resulting geometry back over IPC, not just from
-                // reading this code.
-                m.full_geometry = srdwm_core::Rect::new(head.location.x, head.location.y, head.size.0 as u32, head.size.1 as u32);
-                m.maximize_geometry = crate::input::maximize_geometry_for(&head.output, m.full_geometry);
-                m.primary = i == 0;
-                m
-            })
-            .collect())
+        let wm = self.state.wm.clone();
+        let wm = wm.borrow();
+        let mut out = Vec::new();
+        let mut next_id: u32 = 0;
+        for head in udev.heads.iter() {
+            // Shrunk by whatever a layer-shell surface (bar, dock) has
+            // reserved via `set_exclusive_zone` - reporting the full
+            // head size here otherwise means core's placement/tiling
+            // treats that strip as ordinary free space, so a new
+            // window's titlebar lands right where the bar renders on
+            // top of it, unreachable to drag. `non_exclusive_zone()` is
+            // output-local, so it's translated into this head's
+            // position in the shared global space the same way
+            // `head.location` already is.
+            //
+            // `non_exclusive_zone()` is in *logical* (scale-divided)
+            // units - a bar reports its own reserved strip the way every
+            // layer-shell client does, in logical points - while `head.
+            // location`/`head.size` are raw physical pixels straight from
+            // the DRM mode, never touched by `srd.monitor.scale`. Left
+            // unconverted, `usable` silently mixed the two units on any
+            // output with a scale other than exactly `1.0`: at scale
+            // `0.712`, a 1920-physical-pixel-wide head's own `zone.size.w`
+            // came back as ~2697 (logical), reported as this monitor's
+            // *usable* width - larger than its own *full* width, and
+            // large enough to overlap whichever real monitor sat next to
+            // it in the shared global space. Reported live as "Firefox
+            // maximized on one monitor also shows partially on the
+            // other" and general visual glitching on the scaled output --
+            // both are this: placement math trusting an oversized rect
+            // that reached into a neighboring monitor's real screen.
+            // Scaling `zone` back into physical pixels here keeps `usable`
+            // in the same unit as `full`/`maximize`/`head.location`
+            // everywhere else in this compositor.
+            let zone = layer_map_for_output(&head.output).non_exclusive_zone();
+            let scale = head.output.current_scale().fractional_scale();
+            let zone_physical = |v: i32| (v as f64 * scale).round() as i32;
+            let usable = srdwm_core::Rect::new(
+                head.location.x + zone_physical(zone.loc.x),
+                head.location.y + zone_physical(zone.loc.y),
+                zone_physical(zone.size.w).max(0) as u32,
+                zone_physical(zone.size.h).max(0) as u32,
+            );
+            // The head's true full rect, ignoring any exclusive zone --
+            // deliberately *not* defaulted from `usable` the way `Monitor::
+            // new` alone would (see the fullscreen note below).
+            let full = srdwm_core::Rect::new(head.location.x, head.location.y, head.size.0 as u32, head.size.1 as u32);
+            let maximize = crate::input::maximize_geometry_for(&head.output, full);
+            let name = head.output.name();
+            let split = wm.monitor_split(&name);
+            let parts = split.map(|s| s.parts).unwrap_or(1).max(1);
+            let rows = split.map(|s| s.rows).unwrap_or(false);
+            for part in 0..parts {
+                let sub_name = if parts <= 1 { name.clone() } else { format!("{name}-{}", part + 1) };
+                let mut m = srdwm_core::Monitor::new(next_id, sub_name, srdwm_core::monitor::split_rect(usable, part, parts, rows));
+                // `Monitor::new` defaults `full_geometry`/`maximize_
+                // geometry` to whatever `geometry` was constructed with --
+                // correct for a monitor with no layer-shell client and no
+                // split at all, wrong the moment either exists, since the
+                // rect above may already be zone-shrunk and/or a sub-
+                // region. Without this, `full_geometry` was silently
+                // identical to `geometry` for every real monitor this
+                // backend ever reported, which made `toggle_fullscreen`'s
+                // whole "ignore the reserved zone" design a no-op in
+                // practice: fullscreen still stopped at the bar/dock
+                // exactly like maximize does. Reported live as "fullscreen
+                // isn't actually going fullscreen" - confirmed by
+                // triggering it and reading the resulting geometry back
+                // over IPC, not just from reading this code. Each split
+                // part gets its *own* full/maximize rect too - without
+                // this, fullscreening a window in either half of a split
+                // head would cover the *entire* physical panel, silently
+                // erasing the split it was placed to respect.
+                m.full_geometry = srdwm_core::monitor::split_rect(full, part, parts, rows);
+                m.maximize_geometry = srdwm_core::monitor::split_rect(maximize, part, parts, rows);
+                m.primary = next_id == 0;
+                m.split = parts > 1;
+                m.scale = scale;
+                out.push(m);
+                next_id += 1;
+            }
+        }
+        Ok(out)
     }
 
     fn apply_geometry(&mut self, window: srdwm_core::WindowId, _geometry: srdwm_core::Rect) -> PlatformResult<()> {

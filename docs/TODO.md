@@ -1,0 +1,1596 @@
+# TODO / planned features - master checklist
+
+The single consolidated list of pending work. Before this file, "what's
+left" was scattered across four places that each grew their own list
+independently (`MISSING.md`, `PANEL_SUPPORT_TODO.md`,
+`IMPLEMENTATION_STATUS.md`'s tail, `SESSION_HANDOFF.md`), and
+`PANEL_SUPPORT_TODO.md` in particular had gone almost entirely stale -
+90%+ of its items were actually done and just never checked off. This
+file doesn't replace any of them (each still holds the real narrative:
+root cause, what was tried, what was ruled out) - it's the one place to
+look to see everything pending at a glance, with a pointer to the doc
+that has the full story. Keep this list current as items close or open;
+update the source doc's own entry too, don't let this drift into a
+second stale copy the way `PANEL_SUPPORT_TODO.md` did.
+
+## Real bug, root-caused and fixed: `DecorationSignature` was missing three of `render_titlebar`'s own inputs, so a live change to any of them would never invalidate the cache (2026-08-24)
+
+Found by a full-pipeline audit requested directly ("please do a deep dive into our codebase") after several rounds of live-reported rendering issues. `redraw_decoration_buffer`'s call to `decoration::render_titlebar` (`state/lifecycle.rs`) passes `theme.button_glyph_always`/`theme.button_order`/`theme.traffic_light_buttons` as three of its arguments, but `DecorationSignature` (`state/mod.rs`) - whose own doc comment states its goal outright, "one signature covering every input this function reads" - never included any of the three. `title_centered`/`buttons_left` were already in the struct specifically for this reason (their own doc comments say so explicitly: "there's no `srd set` for this yet, but nothing here assumes there never will be"), making the omission of the other three look like a straightforward miss rather than a deliberate exclusion.
+
+Currently latent, not reachable today: nothing in `srd set`'s current command list can change any of the three live, so this was a landmine for whenever live theme reload or a new `srd set` grows to cover them, not a bug with a live repro today. Fixed anyway, matching the existing fields' own precedent, rather than left for a future session to rediscover the same gap. Test suite run pending; built.
+
+## Real bug, root-caused, first fix attempt reverted as unsafe - still open: a decorated/undecorated window's border, shadow, and resize hit-test all lag a stale, previous-frame size for the whole duration of an interactive resize (2026-08-24)
+
+Reported live: "notice how in firefox window the borders are misaligned, especially when i resize the window." Root cause in `state/geometry.rs`'s `effective_frame_of` - the function every border/shadow/occlusion/resize-hit-test call site uses to correct a window's drawn rect against what the client *actually* committed, rather than what this compositor merely requested (built earlier this session to fix a real, different bug: a terminal's own cell-quantized size leaving a gap between its content and the border). That correction is applied *unconditionally*, including while the window is being actively, interactively resized - but during a live drag, `geom` (the compositor's own live target) updates on every pointer-motion event, while the client's last real commit is however far behind that a full relayout pass takes. For a heavy client (Firefox, concretely - a plain terminal reflows near-instantly and never showed this visibly) that lag is real and continuous, so the border/shadow keeps drawing at a stale size for the *entire* drag, worst at exactly the edge/corner being dragged, while the content underneath (never routed through this function at all) renders whatever the client has actually gotten around to committing.
+
+**First fix attempt (skip the correction entirely while `WindowManager::resizing_window() == Some(id)`) was reverted in the same session it landed, before ever being confirmed live.** A full-pipeline audit (prompted by the user directly asking for one after this fix still didn't resolve their report) traced the actual consequence: the titlebar bitmap and the top/bottom border strip's own rounded-corner bitmap (both built by `redraw_decoration_buffer`, itself only called on a real client *commit*, not on every resize step) are sampled in `udev/render.rs`/`winit/render.rs` via a `src` crop rectangle sized from this same function's return value. Making this function return the *live* drag target while the underlying bitmap was still sized for the *last commit* means that crop can exceed the bitmap's real stored dimensions - `MemoryRenderBufferRenderElement::from_buffer` (smithay) does not validate `src` against the texture's real size, so an oversized crop is an out-of-bounds texture sample (stretched/repeated/garbage pixels, not a clean error), not just a stale-lag cosmetic issue. Almost shipped a worse bug in place of the one being fixed; caught by tracing the actual downstream consumers before installing, not by testing.
+
+`effective_frame_of` is back to its original, unconditional behavior (safe, internally consistent, but still one-or-more-frames-stale during a fast resize). The audit's own recommendation, not yet done: fix this at the *source* - have `redraw_decoration_buffer` rebuild on every `update_resize` step (not just on commit) so the bitmap itself never falls behind what the live frame asks for - rather than patching the render-time read again. Real, bounded scope (titlebar re-rasterization involves font glyph rendering per character, so calling this on every pointer-motion tick during a fast drag needs its own cost check, possibly a throttle), not attempted this session given the demonstrated risk of a hasty fix in this exact area.
+
+Same-audit related finding, lower priority: the shadow bitmap has the identical commit-vs-live-position gap (`shadow_rect(frame)`'s position is live, the shadow bitmap's own size is commit-gated) - but shadow is pushed with `src: None`, which smithay's own `from_buffer` resolves to the buffer's *real* native size rather than a crop, so this one is NOT at risk of out-of-bounds sampling, only the same soft cosmetic detachment the border/titlebar bug had before the corruption risk was found. Same eventual fix (rebuild on every resize step) would close this too.
+
+## Real bug, reported by a peer session (aegis), not yet root-caused: `srd clients`'s own `focused` field goes stale after a `zwlr_foreign_toplevel_handle_v1.activate`-driven focus change (2026-08-24)
+
+Found building aegis's dock primitive against the real protocol (confirmed otherwise working correctly: initial-existing-window replay and activate/close all behave right). Repro, on nested `srdwm --wayland` with two alacritty windows: calling `activate` on the non-focused one correctly flips that window's own `activated` state in the `zwlr_foreign_toplevel_handle_v1` state event sent back (both windows' flags update, in the right direction) - but `srd clients`, queried immediately after and again a few seconds later (ruled out as a race), keeps reporting the *other* (previously-focused) window as `focused: true`. Two different "what's focused" views disagreeing: whatever `send_state`/`focused_id()` uses for the protocol feedback (correct) and whatever `srd clients` reads (stale, specifically after an activate-driven change - not checked yet whether a mouse/keyboard-driven focus change has the same gap).
+
+Not yet root-caused on this side: `foreign_toplevel.rs`'s `Activate` handler calls the same `focus_window(state, id)` every other focus path uses (mouse click, keybinding), and `crates/platform/src/ipc.rs`'s `"clients"` request handler calls `client_snapshot(wm)` fresh on every query (no caching) which reads `wm.focused_id()` directly - both look correct in isolation from a first read, so the actual disagreement is somewhere less obvious (worth checking whether `WindowManager::focus_window` itself has a guard that no-ops for this case, or whether the winit/nested backend specifically has its own focus-sync gap the udev backend doesn't - the peer's repro was on nested `srdwm --wayland` specifically). Not blocking aegis (protocol-level behavior is correct, which is what actually matters for a dock), but a real gap for any other tooling reading `srd clients` to know what's focused.
+
+## Real bug, root-caused and fixed: a straight vertical border line poked out of every decorated window's own rounded corners, on both the udev and winit backends (2026-08-24)
+
+Reported live, insistently, over several rounds: "the vertical border lines are protruding out" / "it's drawing onto windows." Every earlier check this session (raw pixel sampling, visual crops, multiple apps, multiple radii up to a deliberately oversized `30` live test) had been looking at the top/bottom border strip's own curve in isolation and finding it genuinely correct - which was true, but beside the point: the actual defect was a *second*, separate element bleeding through the *first* one's own correctly-cut transparent region.
+
+Root cause: the left/right border strips (`decoration::border_strips`'s `strips[2]`/`strips[3]`) are plain flat rectangles with no rounded-corner awareness of their own, and started at the window's nominal `geometry.y` unconditionally. But the top/bottom strip's own curve (`border_top_visible_rows`/`border_bottom_visible_rows`) extends *into* that exact region - by `corner_radius - border_width` rows - whenever the radius exceeds the border's own thickness, which is the common case (12+ vs 4 at this theme's defaults, worse at a manually-bumped `30`). The top/bottom strip is pushed first (topmost, per this codebase's own "earlier-pushed = topmost" convention) specifically so its curve's transparent cutout shows through to whatever's behind - but the side strips sit *underneath* it in the exact same region, still filled solid, with nothing about the top/bottom strip's own transparency doing anything to hide a *different* element sitting behind it. Confirmed via raw pixel sampling at the fixed x of the line: identical, fully-opaque border colour to the curve itself (`(187, 154, 247)` both places), starting right at the window's nominal top edge and running in a straight line in parallel with the real curve rather than being replaced by it.
+
+A pre-existing comment at both call sites (`udev/render.rs` and `winit/render.rs`) asserted the opposite - "sit entirely outside geometry... no titlebar-style overlap... push order doesn't matter for these" - which was the actual reason this was never caught by reasoning about the code, only by an insistent live report and finally looking at raw pixels around the seam specifically rather than just "does the curve itself look right." Both comments corrected in place.
+
+Fixed on both backends: the side strips are now cropped by the same `extra = corner_radius.max(border_width) - border_width` amount at both their own top and bottom before fragment-splitting/rendering, so they only ever draw in the flat-edge middle region the top/bottom strip's own curve has finished resolving by. Full test suite green (190 core / 105 wayland / 10 x11, unchanged); built and installed, needs a restart to confirm live.
+
+## Architecture change: udev/Pixman rounded corners now mask the whole composited window, not one guessed-at subsurface (2026-08-23)
+
+Direct follow-on to the corner/border investigation above and the Firefox-titlebar regression it caused: asked outright why this codebase wasn't doing what other real compositors (niri, cosmic-comp) do. Answer, and the actual fix: those compositors round corners with a GPU fragment shader applied to the *whole already-composited window texture* - it never needs to know which subsurface holds "the real content", because by the time the shader runs there's only one flattened texture left. This backend's old approach (`rounded_corners_pixman::resolve_content_surface`) instead tried to *identify* one subsurface as the real content and mask that client buffer directly, skipping everything else in the tree - cheaper, but structurally wrong the moment a client (Firefox) paints real, visible chrome on a *different* surface than the one being masked.
+
+Rebuilt to match the shader-based approach's own shape instead: `rounded_corners_pixman::masked_content_buffer` now renders the window's entire surface tree (root plus every subsurface - exactly what the unmasked fallback already draws) into a private off-screen Pixman buffer (`PixmanRenderer`'s own `Offscreen`/`Bind<Image>` impls, the same `create_buffer`/`bind`/fresh-`OutputDamageTracker`/`copy_framebuffer`/`map_texture` pipeline `udev/capture.rs`'s workspace-thumbnail capture already uses), reads that back as plain bytes, and punches the four rounded corners into *that* composited result. Whatever the ordinary unmasked path can already draw, this can now mask - no more subsurface-count/format/transform restrictions (`Argb8888`/`Xrgb8888`-only, dmabuf needing its own read path, `Transform::Normal`-only), since none of that per-client-buffer machinery exists anymore. Deleted entirely: `resolve_content_surface`, the old `masked_content_buffer`'s shm/dmabuf split, `mask_and_repack`, `mask_dmabuf_content`, `force_opaque` - the whole "which surface is real content" question this session spent several rounds chasing bugs in.
+
+Cost: a full extra off-screen render pass per real content change (more expensive per rebuild than the old raw-memory-copy approach), still gated by the same `CompState::content_epoch` cache, so an idle window costs nothing extra per frame. `elements::rounded_content_buffer`'s cache key grew to include the render `loc`/`size` alongside `epoch`/`radius`, since those now also have to match for a cached mask to still be valid (a resize invalidates it, same as everything else keyed off geometry in this codebase). Full test suite green (190 core / 105 wayland - one fewer than before, `force_opaque`'s own now-deleted test); built and installed, needs a restart to confirm live. Should fix rounded corners uniformly for every window this backend draws, not just the specific Firefox/tmux cases already screenshotted during the investigation.
+
+## Real bug, reported by a peer session (aegis), root-caused and fixed: the X11 backend never read `_NET_WM_STRUT`/`_NET_WM_STRUT_PARTIAL`, so a dock/bar never shrank the usable monitor area (2026-08-23)
+
+Found and verified live by the `aegis-75` session building its own X11-backend bar (override-redirect window + EWMH struts, mirroring its Wayland layer-shell client): on an isolated `Xvfb :10` + `srdwm --x11`, a client mapped an override-redirect `800x32+0+0` window with `_NET_WM_WINDOW_TYPE_DOCK` and `_NET_WM_STRUT_PARTIAL = 0,0,32,0,0,0,0,0,0,799,0,0` (top=32, spanning x=0..799, confirmed correct via `xprop`) - `srd monitors` reported the same `x:0,y:0,width:800,height:600` usable rect before and after mapping, never shrinking to `y:32,height:568` the way the Wayland backend's layer-shell exclusive-zone handling already does. `grep -rl STRUT crates/x11/src/` found nothing at all -- the feature had simply never been built for this backend.
+
+Fixed with a new `crates/x11/src/platform/struts.rs`: `_NET_WM_STRUT_PARTIAL` is read (falling back to the older, span-free `_NET_WM_STRUT` for a client that only sets that), tracked per-window in a new `X11Platform::struts` map, kept live via `PropertyNotify`, and folded into `monitors()`'s own usable-rect computation the same way the Wayland backends already fold in a layer-shell surface's exclusive zone. Struts are watched via `MapNotify`, not `MapRequest` - a real panel/dock is typically override-redirect specifically to bypass window management, so it never reaches `manage_new_window` at all; `MapNotify` (already arriving, since `SUBSTRUCTURE_NOTIFY` was already selected on root) is the only event that fires for it regardless.
+
+Two real bugs found and fixed only by actually running this, not just reading it (matching this session's own established rule for exactly this class of mistake):
+- The shrink math's first version computed `top`/`bottom` in one combined tuple `let (top, bottom) = (top.min(...), bottom.max(...).max(top))` - the `top` on the right-hand side of the *second* tuple element reads the **pre-clamp** binding (a `let` only shadows once the whole statement finishes), so a strut taller than the monitor clamped `top` correctly but then clamped `bottom` against the wrong, oversized `top`, producing `height: 400` instead of the correct `0` - caught by a test asserting exactly that, not by inspection. Fixed by splitting into four sequential statements, each reading only already-clamped bindings.
+- Live end-to-end verification (see below) initially still showed no shrink even after the math was right and confirmed reading the strut correctly (logged live: `Strut { top: 32, top_end_x: 799, .. }`) - root cause: `_NET_WM_STRUT`-driven `monitors()` re-queries only run on `Event::MonitorAdded`/`MonitorRemoved` (`crates/srdwm/src/main.rs`'s own hotplug handler); nothing about mapping a strut window pushed either event, so the `WindowManager`-cached monitor list `srd monitors` actually reads never refreshed. Fixed by having `track_strut_window`/`update_strut_property`/`forget_strut_window` return whether the reservation actually changed, and firing the same zero-payload `Event::MonitorAdded` sentinel the Wayland backends' own layer-shell exclusive-zone-change handler already uses to force exactly this re-query - confirmed live: `srd monitors` now goes from `y:0,height:600` to `y:32,height:568` the instant a real override-redirect dock (a small custom Xlib client, `_NET_WM_WINDOW_TYPE_DOCK` + `_NET_WM_STRUT_PARTIAL`) maps on an isolated `Xvfb`+`srdwm --x11`, and back to `y:0,height:600` the instant it's killed.
+
+10 x11-crate tests (up from 5), full workspace suite green (190 core / 105 wayland / 10 x11); built and installed.
+
+## New feature: dialog windows show only a Close button, never traffic-light colours (2026-08-23)
+
+Requested live: a dialog shouldn't offer minimize/maximize at all (there is
+nothing to maximize or minimize - it has no independent taskbar presence),
+and shouldn't draw the coloured macOS-style traffic-light dots either,
+since those specifically signal "this is a real, independently
+manageable window" in a way a dialog isn't. `Window` gained an
+`is_dialog: bool` field, detected live via `xdg_toplevel.parent().
+is_some()` (a toplevel with a parent is a dialog by xdg-shell's own
+convention - a genuine "does another window own this" signal, not a
+heuristic on size/title) and set in `redraw_decoration_buffer` right
+before the titlebar buffer is rebuilt. `ResizeEdge::hit_test` and
+`render_titlebar` both take a new trailing `is_dialog` parameter: when
+set, the button cluster is forced to a single `Close` entry
+(`[TitlebarButton::Close; 3]` with `button_count`/`wanted_buttons`
+clamped to `1`) and `traffic_lights` is forced off regardless of the
+configured theme, so a dialog's one button always renders as a plain
+glyph, never a coloured dot. Both the core (`crates/core/src/window.rs`)
+and the render side (`crates/wayland/src/decoration.rs`, later split -
+see below) changed together; 3 new tests lock in that a dialog only ever
+recognizes the Close button, even with a `button_order` override that
+doesn't start with it. Built, tested, installed - not yet confirmed live
+(needs a real parented dialog, e.g. a GTK "Save As" prompt, to open and
+screenshot against).
+
+## New: `srd workspaces`/`srd monitors` now cross-reference which monitor shows which workspace (2026-08-23)
+
+Requested by an AGS peer session for their per-monitor workspace-pill work: `WorkspaceInfo` gained a `monitor: Option<MonitorId>` field (the monitor currently showing that workspace, `None` if it isn't visible anywhere), and `MonitorInfo` gained `active_workspace: usize` (the workspace id currently showing on that monitor) - the same fact from either direction, so a caller can look it up from whichever side (a workspace pill, or a per-monitor picker) it already has in hand. Both derive from the already-existing `WindowManager::workspace_for_monitor`, no new state. In shared mode (`workspace.per_monitor` off, the default) every monitor reports the same `active_workspace` (`current_workspace`), and at most one workspace ever carries a `monitor` value; per-monitor mode can have more than one of each simultaneously. A disabled-but-listed monitor (`MonitorInfo::enabled == false`) reports `active_workspace: 0` - an id that can never be real (workspace ids are 1-based), the same "obviously not a real value" sentinel `id: u32::MAX` already uses for that same entry, since a disabled output shows nothing.
+
+Coupling `WorkspaceInfo` to monitor state means a monitor being added/removed/enabled/disabled now also changes the workspace snapshot (the `monitor` field flips), so `IpcServer::poll` emits a `"workspaces"` event alongside the `"monitors"` one on exactly those changes - correct (a subscriber's workspace-to-monitor mapping did change), but it shifted one existing test's assumption that only a `"monitors"` event would follow a monitor change; fixed by draining the now-expected `"workspaces"` event first rather than weakening the assertion. New dedicated test (`workspaces_and_monitors_agree_on_which_monitor_shows_which_workspace`) locks in both fields' values together. Full workspace test suite green (29 platform-crate tests, up from 28); built and installed, needs a restart.
+
+## Real bug, root-caused and fixed: a decorated window's own top corners showed a square notch inside the border's own curve, because the titlebar band rendered on top of the border strip instead of under it (2026-08-23)
+
+Asked directly "how have you not noticed corners have these weird corner squares" - a zoomed screenshot of `tmux` (an SSD window, srdwm's own titlebar, no client content or masking involved at all) showed exactly that: a clean, correctly-sized purple border curve, with the dark titlebar band's own square corner poking through inside it rather than the two reading as one continuous curve. This is the same symptom an earlier, still-open TODO.md entry above ("curves for only ~border_width rows") already flagged from a different peer's own measurement - now with a clean repro and, this time, a root cause.
+
+By design (`render_border_top`/`border_top_visible_rows`'s own doc comments), the top border strip's buffer is deliberately taller than its nominal `border_width` whenever `corner_radius > border_width` (12 vs 4 by default) - the extra `corner_radius - border_width` rows extend the border element's own draw position *down into the titlebar band's own top rows*, so the one shared circle has room to finish rather than being cut off after only `border_width` rows. For that overlap to read as a single curve, the border element's own colour has to actually paint over whatever the titlebar drew at those same pixels - which only happens if the border pushes to `custom_elements` *before* the titlebar (this codebase's own established convention: earlier-pushed renders on top, confirmed by an identical comment already on the shadow-vs-border ordering nearby). It didn't: the titlebar was pushed first, so the titlebar's own (differently-centred, per `round_top_corners`' `center_row` shift) corner mask ended up on top instead, showing its own smaller curve-then-square shape rather than the border's.
+
+Fixed by splitting the single `if w.border_width > 0 { ... }` block in `udev/render.rs` in two: the top strip's own push now happens *before* the titlebar push (recomputing `strips` there instead of sharing one instance across both - a cheap, pure call, not worth restructuring the control flow to avoid); the bottom/side strips stay after, since they sit outside `geometry` with no such overlap (per their own doc comments, they either rely on content-masking already being transparent there, or never overlap the titlebar/content at all). Full workspace suite green - the existing `border_top_and_titlebar_corners_meet_without_a_seam` unit test still passed throughout, since it only exercises the *bitmap-generation* functions in isolation and has no way to see a compositing/z-order bug at all, which is exactly why this went unnoticed by the test suite despite being wrong on every real decorated window's top corners the whole time. Built and installed, needs a restart.
+
+## Real bug, root-caused and fixed: Chrome's window corners rendered completely square, because its content subsurface isn't at `(0, 0)` the way Firefox's is (2026-08-23)
+
+Asked directly "borders/corners still not perfectly rounded in all windows" - checked live rather than assuming the earlier dmabuf fix (below, 2026-08-21) covered every case: Firefox and srdwm's own titlebar round cleanly, Chrome's all four corners are flatly square. Debug logging for this exact path already existed and was, unexpectedly, already on by default in this session's own launcher (`~/.scripts/sys/session_manager.sh` sets `RUST_LOG=srdwm=debug,srdwm_wayland=debug,warn` unconditionally) - so the live, already-growing session log (`~/.local/state/wm-session-latest.log`) had the answer without needing a restart at all: `resolve_content_surface: child at Point { x: 10, y: 43 }, not (0,0) - giving up unmasked`, repeated for every one of Chrome's own content-mask attempts.
+
+Chrome's real content lives in a single child subsurface, the same GTK4/WebRender pattern Firefox uses - just inset at `(10, 43)` (its own CSD shadow-margin/toolbar offset) rather than sitting flush at the root's origin the way Firefox's does. `resolve_content_surface`'s own `child_location != (0, 0)` guard rejected this outright, unconditionally, even though the offset itself has no bearing on whether *masking* that child's buffer is valid - it only matters for *where the result gets drawn on screen*, a concern the caller already had a mechanism for (`content_offset`) that this code path just wasn't using.
+
+Fixed by removing the `(0, 0)`-only restriction and instead returning the child's own real offset alongside the resolved surface, threaded all the way through `masked_content_buffer` → `elements::rounded_content_buffer` → the `udev/render.rs` call site, which now adds it to the window's already-computed `pos` before placing the masked buffer (`rounded_content_buffers`' cache tuple gained a fourth `(i32, i32)` field to carry it). Firefox's own behaviour is unchanged by construction - its child sits at `(0, 0)`, so the added offset is always `(0, 0)` there too; this is strictly additive, not a rewrite of the working case. Full workspace suite green; built and installed, needs a restart.
+
+## Real bug, root-caused and fixed: `zwp_virtual_keyboard_manager_v1` was never implemented, so every synthetic-keystroke tool (`wtype`, `ydotool type`) silently did nothing (2026-08-23)
+
+Asked directly whether Chrome/Firefox's global menu was "fully supported" - checked the AGS side first (`widget/Bar/components/GlobalMenu/index.tsx`'s own extensive doc comments) rather than assuming: Firefox and Chrome structurally cannot export a *real, live* menu at all - Wayland has no general per-app menu-export protocol, GTK's own legacy mechanism (`appmenu-gtk-module`, X11-property-only) only reaches XWayland GTK3 apps that still build a traditional `GtkMenuBar`, and neither Firefox (no traditional GTK menu bar to begin with) nor Chrome (not a GTK app in the relevant sense) qualifies, confirmed already tested end-to-end by a prior AGS session pass. Not a bug anywhere in this stack - an upstream protocol gap no compositor or panel can route around.
+
+What AGS shows those two instead is a static, hand-written placeholder menu (`StaticMenuButton`), and *that* had a real, fixable bug: every keyboard-shortcut item on it is delivered via `wtype`, which needs `zwp_virtual_keyboard_manager_v1` - confirmed absent from this codebase entirely (no reference anywhere in `crates/wayland/src`). `wtype ""` failed outright (`Compositor does not support the virtual keyboard protocol`), and AGS's own call is fire-and-forget, so the failure was completely invisible - exactly matching an earlier live report, "most options in global menu don't work."
+
+Fixed using smithay 0.7.0's own turnkey `wayland::virtual_keyboard` module (a full protocol implementation, not hand-rolled) - routes a synthetic key straight through the same keyboard-focus/keymap pipeline a real physical key press already goes through, correctly reaching whatever's actually focused and reachable by every other compositor's own equivalent of this same tool. New `CompState::_virtual_keyboard_state` field (not `Option`-gated - injecting a key event has nothing GPU/DRM-specific about it, same reasoning `_appmenu_state` already established), constructed identically on both backends, `delegate_virtual_keyboard_manager!` added alongside the existing `delegate_input_method_manager!`/`delegate_text_input_manager!`. Full workspace suite green; built and installed, needs a restart.
+
+Separately, worth knowing but *not* the same bug: a different, real, already-open issue (`com.canonical.AppMenu.Registrar` owned by AGS instead of srdwm, see the entry below dated 2026-08-21) affects classic Qt/`appmenu-qt5` apps' menu registration, not Chrome/Firefox - those two never go through that registrar at all.
+
+## Real bug, root-caused (the visibility half) and partially fixed: XWayland silently never became ready in a real session, taking `com.canonical.AppMenu.Registrar` down with it (2026-08-21)
+
+A peer session (`dotfiles-04`) reported the classic-Qt appmenu registrar still unowned by srdwm despite their own D-Bus flag fix landing correctly on their side. Checked the obvious place first (is `AppmenuRegistrarState::new()` even running) by grepping the live session's own log for anything mentioning XWayland at all - found *nothing*, across a 300K+-line log: no "XWayland ready," no "XWayland unavailable," no `XwaylandEvent::Error`, nothing. `ps`/`pgrep` confirmed no `Xwayland` process running either. Since `appmenu_registrar` is only ever constructed inside the `XWaylandEvent::Ready` handler (`xwayland.rs`), XWayland never starting at all fully explains the registrar symptom - it isn't a D-Bus flag problem, the code that would even attempt to claim the name never runs.
+
+Narrowed further: a manual, standalone run of the real `Xwayland` binary, and of the `-shm` wrapper `ensure_shm_wrapper_on_path` installs on `PATH` for this exact purpose, both succeeded outside srdwm's own process - ruling out "the binary/wrapper is broken" as the cause. The remaining, most likely explanation: `XWayland::spawn`'s call in `xwayland.rs` passed `Stdio::null()` for both the child's stdout *and* stderr - whatever Xwayland itself would have printed about why it failed (confirmed live, manually, that a real run does print real diagnostic warnings) was being discarded before anyone could ever see it. `/tmp/.X0-lock` existing with srdwm's own pid inside it is *not* itself a bug - confirmed against smithay 0.7.0's own source (`xwayland/x11_sockets.rs`): the lock deliberately records the *compositor's* pid for as long as it holds display `:0`, by design, not the eventual X server's.
+
+Fixed the visibility gap, not (yet, confirmed) the underlying cause: `xwayland.rs::spawn` now redirects Xwayland's stdout/stderr to `$XDG_STATE_HOME/srd/xwayland.log` (appended, not truncated, so a restart doesn't erase the previous run's failure) instead of discarding them. Full test suite green; built and installed, needs a restart - and the *next* time this reproduces, that log file should finally say why, closing this out for real rather than leaving it as an educated guess.
+
+## Real bug, root-caused and fixed: rounded corners curved for only ~`border_width` rows, not the full configured radius (2026-08-23)
+
+Continuation of the investigation below: root-caused via the corner-mask diagnostic logging already in place (`RUST_LOG=debug`, no restart needed) against a real, currently-open Firefox window. The `corner-mask state` log line showed, on every single frame: `decorated=false content_will_be_masked=false border_curve_is_safe=false` - and the `rounded_corners_pixman` debug line directly underneath it explained why: `resolve_content_surface: child Size { w: 1551, h: 790 } smaller than root Size { w: 1571, h: 844 } - giving up unmasked`.
+
+Root cause: `resolve_content_surface` (`crates/wayland/src/rounded_corners_pixman.rs`) rejected a resolved content subsurface whenever it was smaller than its root surface on either axis, on the reasoning (from the function's own pre-existing doc comment) that a too-small child was probably some small decorative overlay rather than the real content. That guard predates this session and was never the target of either of this session's two earlier corner fixes (Firefox's dmabuf buffer type, Chrome's non-`(0, 0)` child offset) - but it silently rejects exactly the same shadow-margin-plus-toolbar inset pattern already confirmed and handled for Chrome (`(10, 43)`): a CSD client's root buffer padded for an invisible drop-shadow margin, with the real, *smaller* content subsurface sitting inset inside it. Firefox hit this specific shape live, permanently, on every frame - not the intermittent screen-edge cosmetic gap the investigation below first assumed, but the direct explanation for `border_curve_is_safe` being unconditionally `false`: `w.decorated || content_will_be_masked` with an undecorated CSD window whose masking can never succeed is `false || false`, which is exactly what routes both `border_top_visible_rows`/`border_bottom_visible_rows` down to their `border_width`-only branch instead of the full `corner_radius` one.
+
+Fixed by removing the size check entirely: the two structural checks already ahead of it (exactly one child subsurface, that child itself childless) are what actually establish "this is the content subsurface", not its size relative to the root - and `child_location` (already returned and already applied by every caller) already carries whatever inset a smaller child has, so nothing about a smaller child was ever unsafe to mask, just wrongly assumed to be. Full test suite green (190 core / 106 wayland tests, unchanged); built and installed, needs a restart to confirm live.
+
+## New: unfocused windows now get a fainter drop shadow, matching real desktop convention (2026-08-21)
+
+Asked directly to continue on borders/corners/shadows/effects and check similar projects' own docs, not just this codebase. `shadow_bitmap` (`crates/wayland/src/decoration.rs`) drew the exact same shadow - same `SHADOW_MAX_ALPHA`, no focus awareness at all - for a focused and an unfocused window alike. Checked two real compositors' own documented behaviour rather than assuming a convention: Hyprland's `decoration:shadow` config exposes `color` and `color_inactive` as two separate, independently configurable values (common real configs set `color_inactive` fully transparent - no shadow at all once a window loses focus); niri's own `layout.shadow.inactive-color` does the same, with niri's own docs stating outright that "by default, a more transparent color is used" for an inactive window's shadow. Two independent, actively-developed compositors agreeing on the same convention is a real pattern, not one project's stylistic choice.
+
+Fixed to match: `shadow_bitmap` takes a `max_alpha: u8` parameter instead of always reading the `SHADOW_MAX_ALPHA` constant directly, and `redraw_decoration_buffer` dims it for an unfocused window the exact same way `effective_border_color` already dims an unfocused window's border colour - reusing the existing, already-user-configurable `theme.border_inactive_dim` factor rather than adding a second, separately-configurable knob for what's really the same underlying question ("how much does losing focus fade this window's own chrome"). New test (`a_lower_max_alpha_produces_a_strictly_fainter_shadow_throughout`) locks in that a dimmed shadow is never darker than the focused one at any pixel. Full test suite green (103 wayland-crate tests, up from 102); built and installed, needs a restart.
+
+## Real bug, root-caused and fixed: rounded corners never actually applied to Firefox's content, because its buffer is dmabuf, not shm (2026-08-21)
+
+The user sent real screenshots of all four corners of a tmux window and a Firefox window: tmux's all rounded cleanly, Firefox's bottom-left and bottom-right were flatly square, no curve at all. Added targeted `debug`-level logging (off by default) at every early-return in the content-masking path and asked for a restart to get real data rather than guess further - confirmed on the very first read: `with_buffer_contents failed (NotManaged)`, repeated for every masking attempt on that window.
+
+Root cause: `masked_content_buffer` (`crates/wayland/src/rounded_corners_pixman.rs`) already correctly resolves Firefox's real content to its child subsurface (a fix from earlier in this session), but then reads that surface's buffer via `smithay::wayland::shm::with_buffer_contents` - an shm-only accessor. Firefox's WebRender content surface renders through GL even on this Pixman-only (CPU, no shader stage) backend - almost certainly software/llvmpipe GL rather than a real GPU, but still exported as a genuine dmabuf the same as any hardware-accelerated client's would be - so the shm-only read rejects it outright, every time, and the corner silently falls back to unrounded rather than the wedge-shaped artifact the fallback exists to avoid.
+
+Fixed by adding a dmabuf read path (`mask_dmabuf_content`), reached only once the shm read has confirmed the buffer genuinely isn't shm. Uses `get_dmabuf`/`Dmabuf::map_plane(DmabufMappingMode::READ)` - the read-mode mirror of the exact `map_plane(..WRITE)` pattern `screencopy.rs`'s `write_dmabuf` already proved works for writing a capture *into* a client's dmabuf, for the opposite direction. Scoped the same way that write path is: single-plane, `Linear`-modifier dmabufs only (what this compositor's own `dmabuf_formats()` ever advertises to a client in the first place, so nothing else should reach a real client's negotiated buffer here anyway). The actual masking math (repack to tight stride, force-opaque for X-format sources, punch the corner holes) was pulled out into a shared `mask_and_repack` helper so the shm and dmabuf paths don't duplicate it.
+
+Diagnostic logging kept at `debug` level (not removed) - same reasoning as the trace-level pointer-telemetry compromise earlier this session: it's the only way to tell exactly which check rejected a future client's content without another live debugging round, and `debug` costs nothing when `RUST_LOG` doesn't ask for it. Full test suite green; built and installed, needs a restart.
+
+## Real bug, root-caused and fixed: every new window opened on the primary monitor, regardless of which monitor the user was actually on (2026-08-21)
+
+Reported live, plainly: "why are all windows only opening in the first monitor." Root cause, `WindowManager::add_window` (`crates/core/src/manager/windows.rs`): the target monitor for a brand new window was resolved via `self.primary_monitor()` unconditionally - not "usually", not "as a fallback", the only path that ever ran, regardless of where the user's focus, workspace, or attention actually was.
+
+Fixed to resolve the target monitor from the *currently focused* window's own monitor first, falling back to primary only when nothing is focused yet (a fresh session's very first window, or every window having just closed) - matches the convention every mainstream desktop already follows (a new window opens where you're working), and needs no new state: `self.focused` already existed for exactly this question. New test (`a_new_window_lands_on_the_focused_windows_monitor_not_always_primary`) locks this in; the existing regression test for a *different* known gap (`a_window_whose_monitor_field_is_stale_is_still_rescued`, about a window placed by a rule keeping a stale `monitor` field) still passes unchanged, since its own scenario - nothing focused yet - is exactly this fix's fallback case. Full test suite green (183 core-crate tests, up from 182); built and installed, needs a restart.
+
+## Investigated, not a bug found: a reported delay before the pointer can reach a second monitor right after startup
+
+Reported alongside the monitor-layout-persistence work above: "it takes a while for me to drag mouse left to monitor since monitor layout prefs aren't loaded [at the] same time." Checked the actual mechanism this would have to go through: `UdevState::bounds()` (pointer-clamp bounding box) is computed fresh from `self.heads` on every single pointer-motion event, not cached anywhere - and `restore_monitor_layout` (see the persistence entry above) already runs before the Wayland socket even binds, so `head.location` should already reflect the *restored* arrangement before any pointer motion could possibly be processed at all. Confirmed via a real session's own log and its persisted `monitor-layout.json`: the heads' logical positions in the log already matched the remembered arrangement, correctly reversed from the plain left-to-right default. Nothing in this path shows an obvious source of a startup delay.
+
+Not closed out, though - this report may predate the layout-persistence fix (same message, adjacent topic, unclear which restart the user was describing), or the real cause may be something this code-only investigation can't see (DRM mode-setting/first-frame timing on the second output specifically, distinct from its *logical* position being correct from frame one - a monitor could be positioned correctly but still show no picture for a moment while its own CRTC comes up, which would look identical to "can't reach it" without actually being a pointer-clamping bug at all). Flagged rather than closed; needs a fresh, timed reproduction attributed to a specific restart to actually pin down.
+
+## New feature: srdwm persists and restores its own monitor layout, instead of relying on a panel (2026-08-21)
+
+Raised directly by the user: monitor knowledge is srdwm's logic and should be settled before any panel spawns, and since this compositor is meant to work with any panel or none, restore logic belongs here too, not assumed to exist somewhere else. Before this, whatever arranged outputs on a restart was whichever panel happened to be running - one peer session (AGS) measured 13.7s between its own startup and its remembered layout actually landing, and that number excludes however long the compositor itself is up and displaying before that panel even launches. Worse than slow: if the panel doesn't run, or loses its own store, the layout was never restored at all.
+
+New `crates/wayland/src/monitor_layout.rs`: a small `{connector_name: {x, y, enabled}}` JSON file at `$XDG_STATE_HOME/srd/monitor-layout.json` (`$SRDWM_STATE_PATH` override, `~/.local/state/srd` fallback - mirrors `srdwm/src/main.rs`'s own `config_dir()` shape). Written atomically (tmp file + rename, same pattern as `udev/capture.rs`'s `write_ppm`) on every live position/enabled change - hooked into `apply_output_position` (covers both `srd dispatch set output position` and a real `wlr-output-management-v1` client's apply request) and `disable_connector_by_name`/`enable_connector_by_name`. Read back and applied in a new `CompState::restore_monitor_layout`, called from `UdevPlatform::connect` **before the Wayland socket is even bound** - not just "early", but literally before any client could possibly connect, so no panel or client ever sees a pre-restore arrangement, not even for one frame. Disables are applied before position restores specifically, since `disable_connector_by_name` ends with its own default-layout `relayout_outputs()` call that would otherwise stomp an already-restored position for a different head.
+
+A connector with no remembered entry (first boot, or a monitor plugged in for the first time) is left exactly where the default left-to-right layout puts it - this only ever narrows toward a remembered position, never invents one for a monitor it's never seen before. Two new tests (pure JSON round-trip, corrupt-file-degrades-not-panics); the actual file I/O and env-var-driven path resolution are deliberately untested, same reasoning `config_dir()` already has no coverage for (parallel test execution can't safely share a mutated process-global env var). Full workspace suite green; built and installed, needs a restart.
+
+The AGS peer session's own `restoreRememberedLayout()` is expected to be retired once this is confirmed live - two things arranging the same outputs was exactly the shape of bug that produced the `border_width` mess earlier this session (also AGS pushing something srdwm should own), and there's no reason to keep that risk around once srdwm's own version exists and works.
+
+## Real bug, root-caused and fixed: `effective_frame_of` mixed logical and physical units, drawing an undecorated window's border detached from its real content (2026-08-21)
+
+The user pushed back, correctly, on an earlier "I checked, no gap" claim in this same session - a real screenshot sent directly showed Firefox's purple border sitting visibly to the east and south of the actual window content, unmistakable at a glance, not something needing pixel-scanning to argue about. My first measurement had sampled the wrong row and missed it; this is the real bug once found properly.
+
+Root cause: `effective_frame_of` (`crates/wayland/src/state/geometry.rs`) reads `dwindow.geometry()` - a client's own `xdg_surface::set_window_geometry`, specified to always carry *logical* points - and uses it directly as this compositor's own *physical* convention, with no conversion. `sync_geometry` (the function that originally *asks* a client to become a given size) already gets this right, converting physical to logical on the way out; `effective_frame_of` (which reads back what the client actually *committed*, per its own doc comment, for border/shadow/occlusion/resize-margin-hit-test purposes) never got the matching conversion on the way back in. Invisible at `scale == 1.0` (logical and physical are numerically identical there), which is every monitor this session had until the auto-scale feature gave one a real non-1.0 value.
+
+Fixed the same way `sync_geometry` does: multiply the client's committed logical size by the window's own monitor scale before building the returned physical `Rect`. Full test suite green; built and installed, needs a restart.
+
+## Real bug, root-caused and fixed: two monitors' *logical* rectangles overlapped whenever one had a non-1.0 scale, even though their *physical* placement was correct (2026-08-21)
+
+Found and precisely measured by a peer session reading straight from GTK (`Gdk.Display.get_monitors()`), independent of anything in this compositor's own logs: `HDMI-A-1` (1920 physical, scale ~0.843, so ~2276 *logical*) reported at logical `(0,0)`, and `eDP-1` (1920 physical, scale 1.0) reported at logical `(1920,0)` - inside `HDMI-A-1`'s own logical extent (`0..2276`), a ~356px logical overlap between two monitors that don't overlap physically at all. Any client asking "which monitor is this point on" in that band gets an ambiguous or wrong answer - among the concrete symptoms this produced on the AGS side: hit-testing resolving to the wrong output, and per-output `grim` captures bleeding pixels from the neighbouring output.
+
+Root cause, in two places that both had the same shape: `bring_up_head` (`crates/wayland/src/udev/drm.rs`) computed a head's own logical x-position as `x_offset / this_head's_own_scale` - correct only for the *first* head in a layout, or when every head shares one scale. For any later head, the *previous* heads' own (possibly different) scales are what actually determine how much logical space they occupy, not this head's own scale - so this consistently mis-placed every head after the first whenever scales differed across monitors. `relayout_outputs` (`crates/wayland/src/udev/outputs.rs`, the hotplug re-layout path) had it worse: it passed the raw *physical* accumulated offset straight into `change_current_state` with no scale conversion at all, unconditionally.
+
+Fixed both to track two separate running offsets - `x_offset` (physical, this compositor's own internal placement convention, unchanged, still what `UdevHead.location`/`Space`/`Monitor` rects use) and a new `logical_x` accumulated by adding each processed head's own *logical* width (`physical_width / that_head's_own_resolved_scale`) as it goes, used only for what's actually advertised to Wayland clients via `change_current_state`. `bring_up_head`'s signature gained a `logical_x: i32` parameter (computed by each caller, not derived internally from `x_offset` alone anymore); both hotplug call sites in `outputs.rs` pass `0` for it since `relayout_outputs` immediately re-derives and applies the real value for every head afterward, same as they already did for the physical offset. Full test suite green; built and installed, needs a restart. Not independently re-verified against GTK/AGS yet - that needs the peer session's own next check once this restart happens.
+
+## Real bug, root-caused, live-measured: a monitor auto-scaled below 1.0 breaks for any client that doesn't speak `wp-fractional-scale-v1` (2026-08-21)
+
+The second monitor came back this session (previously untestable), and the border/window gap the user kept reporting on it turned out to be real and measurable, not fixed by this session's earlier `sync_geometry` scale-conversion work. Reproduced directly: a tiled window on `HDMI-A-1` (auto-scaled to ~0.843 by this session's own PPI-based feature) reported geometry `x=186, width=1442` (physical, this compositor's own convention) - but a precise pixel scan of a real screenshot found the *titlebar* ending around x=1681 (roughly matching the reported edge) while the terminal's actual *content* kept going to x=1930 - content overflowing about 250px past where the frame/border actually is. Exactly the "border far from the edge of the window, see-through gap" the user described, and reproducible on demand by placing any window on that monitor.
+
+Root cause: `sync_geometry` (`crates/wayland/src/state/geometry.rs`) correctly computes a *logical* size to send via `xdg_toplevel::configure` (`physical / scale`) - for `scale=0.843` and `physical=1442`, that's a requested logical size of ~1710. A client that supports `wp-fractional-scale-v1` would render that many logical points at a 0.843 buffer scale, landing back at 1442 real pixels, matching what this compositor's own border/hit-testing expects. A client that *doesn't* - falling back to the legacy integer `wl_output.scale`, which cannot represent a value below 1 at all (protocol-level `uint`, and no real compositor rounds it to anything but the nearest sane integer, effectively `1` here) - renders its buffer at scale 1, meaning its buffer ends up sized directly by the *logical* number, ~1710 pixels, not 1442. The measured overflow (~250px) is in exactly the range that gap implies, once real animation/measurement slop is accounted for.
+
+This is a real architectural tension in the auto-scale-below-1.0 feature this session added earlier (deliberately built and tuned per direct request, to shrink oversized UI on physically-large, lower-density monitors), not a bug isolated to one code path: **any client on such a monitor that doesn't implement fractional-scale, and there's no guarantee every client does, will show this same content/frame mismatch.** `impl FractionalScaleHandler for CompState {}` is the smithay-default no-op handler - not customized, so this isn't a case of the fractional-scale side being half-wired either; the gap is squarely "not every client speaks the protocol this depends on," which srdwm has no way to fix client-side.
+
+Not fixed generically this session - the immediate, concrete mitigation the user asked for and already applied: `srd.monitor.scale("HDMI-A-1", 1.0)` added to `~/.config/srd/init.lua`, overriding the automatic value back to 1.0 for this specific monitor, which sidesteps the whole problem (no scale conversion needed at all when scale is 1.0). Config-only, needs a restart. Worth deciding, not decided here: whether `auto_scale_for` (`crates/core/src/monitor.rs`) should ever be allowed to compute a value below `1.0` at all, given this compatibility gap, or whether it should clamp its floor to `1.0` and only ever scale *up* for genuine HiDPI panels - matching what mainstream desktops (GNOME, KDE) actually ship, which generally treat fractional scaling as a HiDPI (>1.0) feature specifically for this reason, not a way to shrink a large low-density panel. Real trade-off either way: the auto-scale-DOWN feature only ever produces sub-1.0 values (it has no up-scale branch at all), so clamping at 1.0 doesn't refine the feature, it disables it outright - reverting the original "text/UI too big on the physically-larger monitor" complaint this was built to fix. Not something to decide unilaterally; needs the user's own call between the two.
+
+Second-order finding from a peer session verifying the above: `grim`'s own multi-output capture is *itself* affected by the same physical/logical confusion, independent of anything srdwm's compositor code does - capturing two 1920x1080-logical outputs (one at scale 1.0, one at ~0.843) produced a single stitched image sized `3840x1281`, not `3840x2160`(both at scale) or `3840x1080` cleanly, meaning the capture tool's own per-output stitching mixes physical and logical sizing across outputs of different scale. `srd clients`/`srd monitors` report physical throughout (this compositor's own established convention); a screenshot taken across a sub-1.0-scaled output can't be trusted to line up with those numbers pixel-for-pixel without correcting for whatever `grim` itself did - a testing-infrastructure gap on top of the client-rendering one, not fixable from srdwm's side either. One more argument for clamping the floor at 1.0, alongside the client-compatibility one above.
+
+## Real bug, root-caused, not yet fixed: `com.canonical.AppMenu.Registrar` is owned by AGS, not srdwm, despite srdwm's own code deliberately trying to claim it (2026-08-21)
+
+Flagged by a peer session (`dotfiles-04`): `busctl --user list` shows the classic Qt/`appmenu-qt5` global-menu registrar name owned by AGS's own `gjs` process, not srdwm - confirmed live (`OwnerUID` traced to the AGS pid). `AppmenuRegistrarState::new()` (`crates/platform/src/appmenu_registrar.rs`) is genuinely constructed at startup (`xwayland.rs`'s `XWaylandEvent::Ready` handler, alongside `EwmhState::connect`) and its own D-Bus name request sets `replace_existing_names(true)` - and srdwm's log has no warning from the `Err` branch that would fire if the connection/name request failed outright, meaning the `zbus` call chain reports success from srdwm's own side despite not actually owning the name afterward.
+
+Working theory, not yet confirmed against zbus's own source (not available locally to check directly): D-Bus name replacement is opt-in on *both* sides - a second requester's `replace_existing_names`/`DBUS_NAME_FLAG_REPLACE_EXISTING` only actually takes the name away from whoever currently holds it if that first owner *also* registered with `DBUS_NAME_FLAG_ALLOW_REPLACEMENT` set. If AGS's own name request didn't set that flag, srdwm's later replace-attempt would simply not succeed in taking over - and if `zbus`'s builder API doesn't surface "request queued behind an existing, non-replaceable owner" as an `Err`, that would explain both halves of what's observed: no warning logged, and the name still not actually owned.
+
+This plausibly shares a root cause with a separate ordering concern the user raised directly ("monitors etc is srdwm logic, should happen before ags spawns"): srdwm's registrar is only constructed once XWayland reports ready, which happens well after the compositor's core socket is already accepting client connections - if AGS connects and claims the D-Bus name before srdwm's XWayland/registrar startup completes, whichever of AGS's or srdwm's name requests happens to run first wins the name outright, independent of either side's own `replace_existing_names` intent. Not fixed this session - needs confirming the zbus replacement semantics first, and probably belongs together with the broader startup-ordering question (see the next entry) rather than as an isolated D-Bus fix.
+
+## Real bug, root-caused and fixed: centered titlebar text wasn't centered on the window, only on the space left after the buttons (2026-08-21)
+
+Reported live: "the ... font/placement of title text is wrong, not real center" - and measurable, not just a impression. `render_titlebar`'s centering formula (`crates/wayland/src/decoration.rs`) computed the midpoint of `text_start..text_limit`, which is the titlebar width *minus* the button reservation (90px for the usual 3-button, 30px-tall case) - not the midpoint of the titlebar itself. For a 300px-wide titlebar with buttons on the left, that put centered text at x=195, a full 45px right of the window's true center (x=150), a difference obvious at a glance, not a rounding-error-sized nitpick.
+
+Real macOS (the convention this titlebar otherwise follows - traffic-light colours, left-side default) does the opposite: it centers the title on the full window width and lets the traffic-light cluster sit wherever it lands, rather than adjusting the centered point to compensate for it. Fixed to match: the ideal centered position is now computed against the full `width`, then clamped into `text_start..text_limit` only to stop a long title from actually drawing under the buttons - so a short title centers on the true window center, and only a title long enough to reach the button zone gets pushed off that ideal point, same as before.
+
+New test: `centered_title_ignores_the_button_reservation_and_centers_on_the_whole_width`, using a titlebar wide enough to reserve button space and asserting the rendered midpoint lands within a few px of `width / 2`, not the old buggy sub-region's own center. Existing `centered_title_starts_further_right_than_left_aligned` (a no-button fixture, unaffected by this change either way) still passes unchanged. Full workspace suite green (100 wayland-crate tests, up from 99); built and installed, needs a restart.
+
+Separately reported in the same message: "windows like tmux[,] most options in global menu don't work/not real global menu... a lot of windows share this behavior." Checked `srd clients` directly - `global_menu: null` for a plain terminal (no app menu to export, correctly) - so whatever's showing an interactive-looking-but-non-functional menu for those windows is a panel-side (AGS) choice to render a placeholder rather than nothing when the data is null, not something srdwm is misreporting. Flagged to the AGS peer session (`dotfiles-04`) rather than chased here.
+
+## Cleanup: removed the temporary `POS-DIAG`/`CURSOR-DIAG` logging from `input.rs` (2026-08-21)
+
+Both mysteries this pre-existing diagnostic logging (predating this session) existed to chase are now resolved - the `resolved=None` resize-margin question (see the entry above) and, per a peer session's own live measurement, a cursor-icon "no visible effect" report that turned out to be a real UX gap already fixed (`CursorIcon::Pointer` for titlebar buttons, distinguishable from the baseline `Default`), not a logic bug. Left in place, this logging was pure cost: a peer session measured it at 35% of an 8898-line daily session log (2650 `CURSOR-DIAG force:` lines alone), burying real warnings. Removed every `log::warn!("POS-DIAG...")`/`log::warn!("CURSOR-DIAG...")` call and the "Temporary... Remove once resolved" comments around them from `crates/wayland/src/input.rs`, keeping the genuine design-rationale comments that were mixed in with them.
+
+Partial walk-back, same day: the same peer session pointed out that `POS-DIAG motion` was the *only* pointer-position telemetry this compositor exposed to anything outside itself - with it gone entirely, there is no way to answer "where is the pointer right now" at an arbitrary point, only corner-clamping (4 fixed points) or hover feedback (binary, only over a reactive widget). Restored a single, minimal line (`pointer motion pos=... hit=...`, unconditional - not just while over decoration, unlike the original) at `trace` level rather than `warn`: off by default (`RUST_LOG` reaches it the same as any other target here, see `main.rs`'s directive-syntax comment), so it costs nothing in normal use, but the debuggability isn't gone. Everything else removed above stays removed - only this one line came back, and at a level that can't repeat the 35%-of-the-log problem.
+
+One more thing this closes out: a peer session flagged `over_content=false` appearing in every logged `CURSOR-DIAG force:` line as a possible bug (pointer reported as not-over-content when it should have been). It wasn't one - by construction, the one branch where `over_content` is actually `true` (`update_cursor_shape`'s `None if over_content` arm) returns before ever reaching that log statement, most of the time completely silently (no log line at all) when there was nothing to reset. Every line that *did* log `over_content=false` was, definitionally, on a different code path that never had a chance to be `true` in the first place. A diagnostic-structure artifact, not a hit-testing bug - moot now that the logging is gone entirely.
+
+## Root-caused: ydotool's `--absolute` is unusable on this machine; relative motion works, but only correctly paced
+
+Every early synthetic `ydotool` resize/drag test this session silently misfired. Root cause for the absolute-positioning half: `ydotoold`'s virtual input device advertises `EV_REL` only (`/proc/bus/input/devices`: `B: REL=147`, no `B: ABS=` line at all) - `ydotool mousemove --absolute` still accepts absolute coordinates client-side, but with no `EV_ABS` capability on the actual kernel device there is nothing for those coordinates to attach to. `ydotoold --help` lists `-T`/`--touch-on` ("Enable touchscreen (EV_ABS)") as the fix - tried it (via a `~/.config/systemd/user/ydotool.service.d/override.conf` drop-in), and it does not work on this system's installed build (`ydotool 1.0.4-2`, Arch): accepted by argument parsing, no `EV_ABS` bit on the resulting device either way, and passing it bare made the daemon exit immediately with status 2. Reverted the override; not fixable by flag alone on this build. Use relative `mousemove` instead, always.
+
+Relative motion's own reliability comes down to **libinput pointer acceleration applied to synthetic `REL` events** - confirmed by two independent sessions converging on the same mechanism from different data: this session saw an unpaced burst of small steps land way off target (a requested (830,400) landed near (1602,684)); a peer session (`dotfiles-04`) separately measured error growing *with distance*, the actual signature of an acceleration curve, and found that neither pacing nor small step size fixes it on its own - large fast steps overshoot, single-pixel steps undershoot so hard the pointer barely moves. An earlier version of this entry claimed paced ~5px steps land within ~1px "repeatably"; that did not reproduce in the peer's own re-measurement and should not be trusted as a general rule - it happened to work once, for one real resize-drag test (window width 800->705 in `srd clients`, confirmed via ground truth, not by reading a log line), not proven as a formula. The one reliable primitive either session found: a large overshoot (+-3000 or more) reliably corner-clamps the pointer to a screen edge, useful for establishing a known reference point before walking toward an interior target. Treat any precision synthetic-pointer test as needing empirical verification against `srd clients`/`srd monitors` afterward, not as something that can be blindly calibrated in advance.
+
+With that methodology, a real end-to-end resize was finally exercised successfully: walked onto a live window's right resize margin (confirmed via the `POS-DIAG motion ... hit=Resize(Right)` log line), pressed, dragged 100px left in paced 5px steps, released - `srd clients` showed the window's width change from 800 to 705. Resize/drag genuinely works. See the next entry for what this also settled about the previously-open `resolved=None` mystery.
+
+## Real bug, root-caused and fixed: global menu missed any window whose D-Bus registration finished after its one focus-triggered read (2026-08-20)
+
+Reported live as "global menu doesn't show up for some windows" - intermittent, not tied to any one app. Root cause: `EwmhState::read_global_menu` (`crates/wayland/src/xwayland.rs`) only ever ran from `update_net_active_window`, itself only called on a focus *change*. Most toolkits set `_GTK_UNIQUE_BUS_NAME`/the menu-path atom once, shortly after mapping - for an already-focused window (the common case: a freshly launched app almost always opens focused), that registration can finish *after* the one focus-triggered read already ran, leaving `Window.global_menu` stuck at `None` until the user clicked away and back. smithay's own `XwmHandler::property_notify` can't see this either - its `WmWindowProperty` enum (`smithay::xwayland::xwm::surface`) is a closed set (`Title`/`Class`/`Protocols`/`Hints`/`NormalHints`/`TransientFor`/`WindowType`/`MotifHints`/`StartupId`/`Pid`) with no catch-all for an atom it doesn't recognize - confirmed by reading smithay 0.7.0's own `xwm/mod.rs`: `Event::PropertyNotify` is filtered down to that enum via `X11Surface::update_property` before ever reaching our handler, and the global-menu atoms all map to `None` there, so the event is dropped inside smithay, never surfaced to this codebase at all.
+
+Fixed by watching for it directly: `EwmhState` already holds its own independent X11 connection (for writing `_NET_ACTIVE_WINDOW`/`_NET_CLIENT_LIST`), previously write-only. Added `watch_property_changes` (selects `PropertyChangeMask` on a window right after its setup finishes) and `poll_property_events` (drains `PropertyNotify` non-blockingly, matched against the same eight global-menu atoms `read_global_menu` already reads). `CompState::poll_global_menu_properties` applies the result, called once per event-loop tick from `udev/platform.rs`'s main loop, same cadence as the existing `apply_registrar_events` (classic Qt `appmenu-qt5` registrar polling) it now sits next to. Not wired into the nested/winit backend - XWayland itself isn't started there at all (see `xwayland.rs`'s own module doc comment), so there is nothing for this to watch on that backend.
+
+Full workspace test suite green (1264+ tests across all crates, no regressions); built and installed, needs a restart.
+
+## Real bug, root-caused and fixed: any GTK4/libadwaita app not manually listed in `rules.lua` got a second, redundant titlebar (2026-08-20)
+
+`rules.lua` already had `decorated = false` entries for Firefox and Nemo, each with its own doc comment explaining why: both draw their own header bar (`GtkHeaderBar`/an embedded CSD row) unconditionally, regardless of what `xdg-decoration` actually negotiates - confirmed live for both via screenshot, two stacked title rows. That reasoning generalizes to every GNOME app, not just those two, but the fix so far was one hand-written rule per app as each was discovered live - anything not yet added still got srdwm's own server-side titlebar drawn on top of its own CSD row.
+
+Added a real, general fallback instead of only growing the list further: `srdwm_core::window::likely_draws_own_titlebar` treats any `org.gnome.*` app id as CSD-only by default - the GNOME HIG mandates every one of GNOME's own apps embed a header bar, with no exceptions, so the namespace alone is enough to know in advance rather than waiting to catch each one live. Deliberately narrow: left at `org.gnome.*` rather than also guessing at third-party `io.github.*`/other reverse-DNS libadwaita apps, which don't share GNOME's HIG mandate and would misclassify plenty of ordinary SSD apps that happen to use a similar id scheme - those still go through `rules.lua` as before. Wired into both `WindowManager::add_window` (X11 windows, whose `app_id` is already known at creation) and `reapply_rules_if_pending` (native Wayland windows, whose `app_id` usually lands after creation via `set_app_id`) - a rule's own explicit `decorated` action still wins over the heuristic in both places, unchanged.
+
+Full test suite green; built and installed, needs a restart.
+
+## Not a bug, a config mismatch: titlebar button side/alignment differs between srdwm's own windows and Firefox's CSD
+
+Looked real in a live screenshot - srdwm's own titlebar had macOS-style traffic lights on the *left* (red-close, yellow-minimize, green-maximize), title text centered; Firefox's CSD had them on the *right* (yellow-minimize, green-maximize, red-close), left-aligned. First guessed this was a stale pre-restart process, since source defaults (`ThemeConfig::default`: `buttons_left: false`, `title_centered: false`) already match this system's GTK convention (`gsettings get org.gnome.desktop.wm.preferences button-layout` -> `appmenu:minimize,maximize,close`, theme `WhiteSur-Dark`). That guess was wrong - re-checked after a real restart, same result, because the actual cause is `~/.config/srd/themes.lua`'s active preset: `catppuccin_mocha` (a straight port of the old Hyprland/Catppuccin config, applied at the bottom of that file) explicitly sets `title_bar.button_side = "left"` and `text_align = "center"`, overriding the source defaults deliberately. `themes.lua`'s other three presets (`nord`, `nord_light`, `gtk_match`) don't touch `button_side` at all, so any of them would already match Firefox/WhiteSur's convention without any code change - this is a one-line edit in a config file the user owns, not something to silently change on their behalf, since a left-side macOS-style titlebar independent of what GTK apps do may be the intended look. Surfaced to the user rather than assumed either way.
+
+## Real bug, root-caused and fixed: maximize ignored every bar/dock except a top one (2026-08-20)
+
+Reported live, twice, from two different angles that turned out to be
+the same bug: "AGS's dock isn't reappearing" and "parts of the current
+window are hidden, can't see its borders." dotfiles-04 (AGS peer
+session) found it precisely with a real measurement rather than
+guessing: `srd monitors` correctly reports a work area excluding *both*
+a 34px top bar and a 53px bottom dock, but a maximized Firefox window
+came back 1046px tall (screen height minus only the 34px top bar) --
+its own bottom edge and border ending up underneath the dock's surface,
+indistinguishable from the dock not rendering at all.
+
+Root cause: `maximize_geometry_for` (`crates/wayland/src/input.rs`) only
+ever subtracted a **top**-anchored bar's exclusive zone from the
+maximize target - a deliberate earlier design choice (own doc comment:
+"a dock anchored to any other edge is deliberately left alone"), reasoned
+through as "maximize should be able to go past a dock, fullscreen already
+covers wanting the screen entirely." In practice this doesn't match how
+any mainstream desktop actually treats a bottom dock - Windows, macOS
+and GNOME/KDE alike keep a maximized window clear of one - and reads as
+a bug, not a feature, the moment a real dock exists to be covered by it.
+
+Fixed: `maximize_geometry_for` now shrinks for a reservation on *any*
+edge (top, bottom, left, or right), not top only. Fullscreen is
+unaffected - it was never routed through this function and still isn't,
+so it remains the one deliberate "ignore every bar/dock, cover the whole
+screen" option. Full workspace test suite green (no existing test
+coverage for this function - needs real smithay layer-map state with no
+harness available, same limitation as this session's other real-
+renderer-only fixes); built and installed, needs a restart.
+
+## Resolved: resize/drag itself works fine; `resolved=None` on a resize-margin press is expected, not a bug
+
+Previously logged here as an open, unexplained mystery: a button press
+during a resize grab logging `POS-DIAG button-resolve pressed=true
+button=0x110 resolved=None client=None`, read at the time as "the resize
+grab had nothing to attach to and nothing happened." With `ydotool`
+usable again and a proper small-step, correctly-paced synthetic drag
+actually landing where intended (see the `ydotool` entry below), this was
+re-tested directly: pressed down at a confirmed `hit=Resize(Right)` point
+on a real window, dragged 100px, released - the window's width changed
+from 800 to 705 in `srd clients`, a genuine resize, while the *press*
+event still logged `resolved=None client=None` exactly as before.
+
+That's the resolution: `resolved=None` on a press over a resize margin is
+correct, not a failure. A resize margin is compositor-drawn decoration
+space (the border strip), not client surface space - there is no client
+`wl_surface` at that exact point for surface-resolution to find, by
+definition, regardless of whether the resize grab itself is about to
+work. The actual resize path is driven by the hit-test result
+(`hit=Resize(...)`) computed separately, before this logging point, not
+by whether surface-resolution succeeds. The earlier hypothesis (extreme-
+edge off-by-one) was chasing a symptom that was never actually broken.
+`POS-DIAG`/`CURSOR-DIAG` logging can be removed the next time this file
+is touched - kept for this entry's own record, not because anything is
+still open.
+
+## Real bug, root-caused and fixed: `srd capture workspace` wrote near-black or pure-black frames (2026-08-20)
+
+Long-standing report from dotfiles-04 (the AGS peer session), finally
+picked up: a workspace-switcher thumbnail captured via `srd capture
+workspace` came back at ~0.025 mean luminance for the current workspace
+(a real screenshot of the same instant: ~0.51) and *exactly* 0 mean and
+0 variance - literally every pixel pure black - for an inactive
+workspace with no windows on it.
+
+Root cause was exactly what it looked like: `capture_workspace`
+(`crates/wayland/src/udev/capture.rs`) only ever rendered window content,
+by design - its own module doc comment listed "no borders, shadows,
+titlebars, cursor or layer-shell surfaces" as deliberate simplifications,
+reasonable for the small window-switcher-tile decorations in that list
+but not for layer-shell, which is also where the *wallpaper* lives. A
+workspace capture with no windows and no wallpaper is indistinguishable
+from broken, because on a typical desktop the wallpaper is most of the
+frame.
+
+Fixed by rendering the background/bottom layer-shell surfaces too,
+matching `render_udev_frame`'s own real ordering convention (windows on
+top, wallpaper pushed last/bottommost). Required changing `capture_
+workspace`'s element list from the narrow `Vec<WaylandSurfaceRenderElement
+<PixmanRenderer>>` it only needed for window content to the same `Vec<
+crate::elements::OverlayElement<PixmanRenderer>>` the real render path
+already uses, since layer-shell elements aren't representable in the
+narrower type.
+
+Full workspace test suite green; built and installed, needs a restart.
+No new unit tests - same as this session's other real-renderer-only
+fixes, this needs live smithay/DRM state with no test harness available;
+worth a live `srd capture workspace <id> <path>` + `magick ... -format
+"%[fx:mean]" info:` check post-restart to confirm the luminance is back
+in line with a real screenshot, the same measurement dotfiles-04 already
+used to find this in the first place.
+
+## Real bug, root-caused and fixed: VT switch back left the screen black, unrecoverable (2026-08-20)
+
+Reported live: after switching away from srdwm's VT and back, the screen
+stayed black, and no further VT switch in either direction could recover
+it - eventually needing a hard restart. Confirmed **not** a srdwm crash
+(`coredumpctl` shows no srdwm entries ever, the process stays alive
+throughout) - a stuck/wrong DRM state, not a segfault.
+
+Root cause: `register_session_notifier`'s `ActivateSession` handler (VT
+switch back) reasserted every head with `card.set_crtc(head.crtc,
+Some(fb), (0, 0), &[], None)` - an **empty connector list and no mode**.
+That is DRM/KMS's own shape for *disabling* a CRTC, not restoring one;
+`bring_up_head`'s own original call (still correct) passes the real
+connector and mode. The resume path never had access to either - neither
+was stored anywhere per-head - so it was passing "nothing" and calling
+that a reassert.
+
+Fixed: `UdevHead` gained a `mode: DrmMode` field (set once in
+`bring_up_head` from `probe.mode`, alongside the `connector` field that
+already existed but wasn't being reused here either); the resume handler
+now calls `card.set_crtc(head.crtc, Some(fb), (0, 0), &[head.connector],
+Some(head.mode))` - the actual reassert the comment above it already
+claimed to be doing. Full workspace test suite green (no test coverage
+possible for this specific path - real DRM state, no harness); built and
+installed, needs a restart. **Not independently live-verified this
+session** - deliberately did not test a real VT switch to confirm the
+fix, given the user's own report that a failed attempt requires a hard
+restart; ask before testing this specific path live.
+
+## Real bug, root-caused and fixed: window geometry/border misaligned after a cross-monitor move (2026-08-20)
+
+Reported live: dragging a window from one monitor to the other (this
+machine's two outputs have different scales - `eDP-1` at `1.0`, `HDMI-
+A-1` at `~0.84`) leaves its border/decoration visibly detached from its
+real content, and resizing afterward doesn't work.
+
+Two live reproduction attempts (an IPC `dispatch move window <id> right`
+call, which turned out to be a directional tile-swap, not a drag; a
+synthetic `ydotool` titlebar-drag, which never registered as a real drag
+at all) both failed before a root cause was found by reading, not
+reproducing:
+
+`sync_geometry` (`crates/wayland/src/state/geometry.rs`) was sending
+`xdg_toplevel.configure`'s `size` directly from `geom.width`/`geom.
+height` - this compositor's own internal *physical*-pixel tracking (see
+`Platform::monitors()`'s own doc comment on that choice) - with zero
+conversion to the *logical* points `xdg_toplevel.configure` is specified
+to carry. Before this session's own auto-scale feature, every output was
+`1.0`, so physical and logical were numerically identical and the missing
+conversion was invisible.
+
+The reason this specifically shows up on a *move*, not just a resize: an
+ordinary drag never changes `geom.width`/`geom.height` at all, so at
+*first* glance there is nothing to convert - but the window's *logical*
+size (physical divided by scale) genuinely does change the moment it
+crosses onto a differently-scaled monitor, even though physical geometry
+didn't move. Before this fix, `sync_geometry`'s `size_changed` check
+compared physical values, saw no change, and sent no configure at all --
+the client kept rendering its old logical size against the new monitor's
+different scale, while this compositor's own border kept drawing at the
+physical rect it always had. Two things that used to agree (client
+content size, this compositor's own border) stopped agreeing the moment
+scale entered the picture, which is exactly "border far from the window."
+
+Fixed: `sync_geometry` now resolves the window's current monitor's
+`scale` and converts to logical points before anything downstream reads
+`size` - including the throttle/backlog bookkeeping
+(`last_synced_size`/`pending_size_configure`), which needed to move to
+logical too, since what they're compared against (`w.geometry()`, a
+client's own `xdg_surface::set_window_geometry`) is logical by the same
+specification `xdg_toplevel.configure` uses. This has the desired,
+niri/Windows/macOS-convention side effect: a window crossing to a
+different-scale monitor now genuinely gets a fresh configure asking it to
+resize, keeping its true on-screen (physical) footprint consistent across
+the DPI change, rather than silently drifting.
+
+Full workspace test suite green; built and installed, needs a restart.
+**Not independently live-verified this session** - both synthetic
+reproduction attempts failed before the fix, so there is no before/after
+comparison confirming this actually resolves the reported symptom; ask
+the user to check after their next restart rather than treating this as
+confirmed.
+
+## Prior-art research: titlebars, global menus, monitor/scale logic (2026-08-20)
+
+Two comparison passes against real source and real docs - niri, Mutter,
+KWin/Plasma, Hyprland, Awesome, Openbox, GlazeWM, plus macOS's own HIG for
+titlebars, and the same set (minus GlazeWM) for monitor/scale/placement
+logic. Full titlebar/global-menu report published as an artifact
+("Titlebars & Global Menus"); the monitor/sizing pass and open-questions
+follow-up were session-only. Concrete outcomes below; everything else
+(what each project does, sourced per-claim) lives in the artifact and the
+agent transcripts, not duplicated here.
+
+- **Corner-rounding scope validated, not found lacking.** KWin shipped
+  real, current (Plasma 6.5, July 2025) server-side rounded corners using
+  signed distance fields - and its own merge request explicitly states
+  "sub-surface corners are not rounded," with KDE's own developers noting
+  real support would need a *new Wayland protocol* letting a client
+  request its own subsurface rounding, not a compositor-side heuristic.
+  This directly validates srdwm's own narrow-scope limitation (this
+  session's own single-full-covering-child fix, `rounded_corners_pixman.rs
+  ::resolve_content_surface`) as already at the field's current state of
+  the art for a CPU-masking approach, not a gap to close further.
+- **niri's alternative (a per-element GLSL shader clip keyed to window
+  geometry, handling arbitrary subsurface trees with no special-casing)
+  is real and battle-tested**, not experimental - confirmed via niri's
+  own design-principles docs and a live GitHub discussion, with one known
+  minor artifact (niri#3476, a thin blending seam) as its only real flaw.
+  **Not portable to srdwm's real hardware backend**: `PixmanRenderer`
+  (udev/DRM, srdwm's actual production renderer) has no shader stage at
+  all, already established earlier this session - this technique could
+  only ever reach srdwm's separate GLES/winit backend, which is dev-only.
+  Deliberately not pursued this session for this reason, not for lack of
+  merit.
+- **Button-order convergence acted on** - see the button-order feature
+  entry below.
+- **The coordinate-unit bug class this session fixed has a more durable
+  architectural answer than the patch that shipped.** niri never hand-
+  tracks physical output geometry in its own struct at all - every
+  placement computation reads position/size through smithay's own typed
+  `Space<Output>`/`Size<i32, Physical>::to_logical(scale)`, one canonical
+  space, one conversion point. srdwm's own fix this session converted
+  correctly at each of several call sites individually
+  (`Platform::monitors()`, the disabled-output snapshot,
+  `maximize_geometry_for`, `apply_output_position`) rather than removing
+  the redundant hand-tracked physical copy (`UdevHead::location`/`size`)
+  that made each of those call sites necessary to fix separately in the
+  first place. **Not attempted this session** - a real, larger
+  refactor, flagged here for whoever picks up monitor/output code next,
+  not undertaken speculatively on top of an already-large session.
+- **`auto_scale_for`'s below-`1.0` scaling has no precedent** in either
+  real implementation checked (Mutter's original heuristic, niri's own
+  direct port of it) - both cap at scale ≥ 1. Confirmed as a deliberate
+  divergence from convention, made on direct user request earlier this
+  session, not an alignment with how anyone else does it. Worth knowing,
+  not necessarily worth reverting.
+- **Monitor-arrangement persistence across a restart has no solved
+  precedent either** - Hyprland's own community has built third-party
+  tools (`hyprland-monitor-fix`, `HyprDynamicMonitors`) specifically
+  because `hyprctl`-applied changes don't survive a restart there either.
+  srdwm's own already-known gap here isn't unusual for a bare compositor
+  - this class of feature is conventionally a desktop environment's
+  settings daemon's job (GNOME's `monitors.xml`, KDE's `kscreen`), not
+  the compositor's.
+- **KWin's button-layout config is real and more complete than assumed**:
+  `~/.config/kwinrc`'s `[org.kde.kdecoration2]` group's `ButtonsOnLeft`/
+  `ButtonsOnRight`, a 10-letter vocabulary (menu, on-all-desktops, keep-
+  above/below, shade, help, minimize, maximize, close, app-menu) - more
+  than srdwm needs (3 buttons only) but the same underlying idea directly
+  acted on below.
+- **GNOME/Adwaita's own button-layout convention was mischaracterized in
+  the first pass** - `AdwHeaderBar`'s `decoration-layout` property (a
+  real, colon-separated-by-side, comma-separated-by-button string,
+  falling back to the system `gtk-decoration-layout` GSetting) is exactly
+  as configurable as KWin's, not a fixed HIG mandate as first assumed
+  from Mutter's C source alone. The GNOME HIG's own header-bar page has
+  no window-control button conventions at all - confirmed by fetching it
+  directly.
+- **Plasma Global Menu's current maintenance state stayed genuinely
+  inconclusive** even after a real search pass - it ships and is
+  preinstalled in current Plasma 6, but has at least one real, reported
+  breaking regression in the last ~18 months (KDE Discuss). Treated as
+  unresolved either direction, not papered over with a confident guess.
+
+## New feature: `theme.decorations.title_bar.button_order` (2026-08-20)
+
+Direct response to the one finding above with a clear, safely-scoped
+path to action: KWin's `ButtonsOnLeft`/`ButtonsOnRight`, GNOME/Adwaita's
+`decoration-layout`, and Openbox's `titlelayout` all independently
+converged on the same idea - an ordered list of button names, not just a
+side toggle. srdwm's own existing `theme.decorations.title_bar.
+button_side` (a boolean-shaped left/right toggle) had deliberately chosen
+"one config value, not a bespoke per-button scheme" in an earlier
+session, before this comparison existed to inform that choice.
+
+Additive, not a reversal: `button_side` still exists and still means
+what it always did. New `button_order` (a comma-separated
+`"close,minimize,maximize"`-style string, `srdwm_core::window::
+parse_button_order`) optionally overrides the *relative order* of the
+three buttons on whichever side `button_side` already selects. Unset
+(the default) reproduces the exact same two built-in orders as before,
+byte-for-byte - confirmed by every pre-existing button/hit-test test in
+`crates/core/src/window.rs` passing completely unmodified.
+
+`ResizeEdge::hit_test` and `decoration::render_titlebar` both moved from
+two hardcoded three-way matches (one per side) to a shared, ordered
+`[TitlebarButton; 3]` walked by index - the two functions have to stay
+in exact agreement (a button that renders on one side/position but hit-
+tests on a different one is worse than no configurability at all, the
+same trap `buttons_left` itself already had to avoid), so both read the
+same resolved order the same way. 8 new unit tests (`parse_button_order`
+parsing/validation, plus two new hit-test-agreement tests); full 298-test
+workspace suite green; built and installed, needs a restart.
+
+## New feature: subsurface-aware rounded corners on undecorated windows (2026-08-20)
+
+What the user actually asked for, after a real correction to this
+session's own earlier investigation: I'd spent hours chasing Firefox's
+titlebar/button rendering as a srdwm bug before finally checking `~/
+.config/srd/rules.lua` and finding `srd.rule({ class = "firefox" }, {
+decorated = false })`, added deliberately in an earlier session (dated
+2026-08-19, comment explains why: Firefox draws its own titlebar row
+regardless of what srdwm offers, so forcing server-side decoration just
+stacked a second one on top). Firefox's titlebar/buttons are its own GTK
+chrome, not srdwm's - not fixable from this side without reverting that
+rule and reintroducing the double-titlebar bug it exists to prevent.
+
+The one part that genuinely was srdwm's own responsibility: content-
+masking (`general.rounded_corners`) rounding an *undecorated* window's
+own corners. `rounded_corners_pixman.rs::masked_content_buffer`
+deliberately bailed (`return None`, falling back to unrounded rendering)
+the moment a window's surface had any children at all - a real, narrow-
+scope limitation the module's own doc comment already documented, not
+something to guess around: Firefox (and most GTK4/WebRender apps) paints
+its actual content into a *child* subsurface, leaving the root surface
+holding only a blank/background buffer, so masking the root's own buffer
+produced a rounded rectangle of nothing.
+
+Fixed by widening the scope by exactly one level, not by attempting
+general subsurface compositing: new `resolve_content_surface` walks to a
+window's single child subsurface and masks *that* buffer instead, but
+only when the structure matches the one pattern this is safe for --
+exactly one child, positioned at `(0, 0)` relative to its parent, no
+children of its own, and large enough to cover the root's own buffer.
+Anything else (multiple children, an offset child, nested subsurfaces)
+still falls back to unrounded rendering exactly as before - real multi-
+subsurface compositing stays out of scope.
+
+Found and fixed a second, real bug while making sure this actually works
+rather than just compiles: the corner-mask cache invalidates on `CompState
+::content_epoch`, which only ever bumped on a commit to a window's own
+*root* surface (`crates/wayland/src/protocols.rs::commit`) - exactly the
+surface that, for Firefox's structure, almost never repaints, since the
+real content commits land on the child. Left as-is, the masked buffer
+would have rendered once, whatever was on screen at the moment the cache
+first populated, and then frozen - scrolling, page loads, video, would
+never show. Fixed by walking up a committing surface's parent chain (via
+`smithay::wayland::compositor::get_parent`, bounded to 8 hops) to find
+its tracked-window ancestor when the commit lands on a subsurface, and
+bumping that window's `content_epoch` too.
+
+Requires `general.rounded_corners = true` (already on in this machine's
+config) to have any visible effect at all - the feature this extends is
+opt-in by design on this backend, see `WindowManager::rounded_corners_
+enabled`'s own doc comment for the real per-commit CPU cost that's about.
+
+Full workspace test suite green; built and installed, needs a restart.
+No new unit tests - `resolve_content_surface`/the epoch-invalidation fix
+both need real smithay surface state (a live subsurface tree, real
+commits) that this codebase has no test harness for; verified by reading
+the actual call sites this session already established (`rounded_content_
+buffer`'s cache, `render_udev_frame`'s mutually-exclusive masked/unmasked
+branch), not by a live Firefox screenshot - worth doing that
+confirmation once this is actually running.
+
+## Real bug, root-caused and fixed: scaled outputs reported a work area larger than the output itself (2026-08-20)
+
+Found from two directions at once: this session's own live testing
+("Firefox maximized on one monitor also shows partially on the other",
+general visual glitching on the scaled monitor) and, independently,
+dotfiles-09 measuring `srd monitors` directly and finding a non-primary
+output's work area (`width`/`height`) *larger* than its own output size
+(`full_width`/`full_height`) - geometrically impossible for a rect
+that's supposed to be the full rect *shrunk* by a bar's reservation.
+
+Root cause: `layer_map_for_output(...).non_exclusive_zone()` - what a
+bar/dock's reservation is read from - returns a rect in *logical*
+(scale-divided) units, the same as every other layer-shell geometry a
+client reports. `UdevHead::location`/`size`, and everything downstream of
+them (`Platform::monitors()`'s `full`/`maximize` rects, the disabled-
+monitor snapshot in `crates/wayland/src/udev/outputs.rs`, and the top-bar
+shrink in `crate::input::maximize_geometry_for`) are raw *physical*
+pixels straight from the DRM mode, never divided by scale. Adding a
+logical rect to a physical one without converting first silently produced
+nonsense the moment a monitor's scale was anything other than exactly
+`1.0` - which every output was, unconditionally, before this session's
+own auto-scale feature existed. At scale `~0.85`, a 1920-physical-pixel-
+wide head's own logical zone width came back around `2276`: reported as
+this monitor's *usable* width, larger than its own *full* width, and
+large enough to overlap whichever real monitor sat next to it in the
+shared global coordinate space - which is why a window sized/positioned
+against it could visually spill onto the neighboring output at all.
+
+dotfiles-09's own initial theory (primary vs. non-primary) was a
+reasonable read of their one data point, but not the real distinguishing
+factor: their "correct" output (eDP-1) happened to be both primary *and*
+the one auto-scale left at `1.0` (high enough real PPI), masking the bug
+there specifically; their "broken" one (HDMI-A-1) happened to be both
+non-primary *and* the one that actually got scaled down. The fix is keyed
+on scale, not primary status, and applies per-head regardless of which
+one is primary.
+
+Fixed in three places, all with the same "scale the logical value into
+physical pixels before touching a physical rect with it" shape:
+- `crates/wayland/src/udev/platform.rs::monitors()` - the live `usable`
+  rect every `srd monitors` query and every real placement/tiling
+  decision reads.
+- `crates/wayland/src/udev/outputs.rs`'s disabled-output snapshot - same
+  computation, duplicated for the same reason `Platform::monitors()`'s own
+  doc comment already explains.
+- `crate::input::maximize_geometry_for` - a top-anchored bar's exclusive
+  zone shrinks a *physical* maximize-target rect by a *logical* amount
+  from the layer-shell surface's own cached state.
+Not touched: `crates/wayland/src/winit/nested_platform.rs`'s matching
+code has the same shape but is provably inert - that backend is dev-only
+and never gets a non-`1.0` scale from anywhere, so logical and physical
+already coincide there.
+
+Full workspace test suite green; built and installed, needs a restart to
+take effect. This should also fix a related report from dotfiles-09's own
+side: a layer-shell dock not appearing on the second monitor at all --
+its anchoring had nothing sane to resolve against once that monitor's own
+reported work area stopped making geometric sense.
+
+**Follow-up, same session: the same unit mismatch existed one layer up,
+in `srd dispatch set output position`.** dotfiles-09 asked directly,
+before guessing: their arrangement panel chains outputs by the physical
+size `srd monitors` now correctly reports, then writes positions back
+through `set output position` - correct only if that command's own space
+matches. It didn't: `apply_output_position`
+(`crates/wayland/src/output_management.rs`) passed whatever position it
+was given straight to `output.change_current_state`, whose position
+parameter is a real Wayland-protocol value - `wl_output`/`xdg_output`
+always report position to clients in *logical* points, not a choice this
+compositor makes. `srd`'s own IPC contract is physical (matching `full_x`/
+`full_y`), so passing that straight through told every real Wayland
+client the wrong logical position for any output scaled away from `1.0`
+- exactly the "384px dead gap" dotfiles-09 predicted before testing it,
+present since this session's own auto-scale feature landed, at startup
+(`crates/wayland/src/udev/drm.rs::bring_up_head`) as well as on a live
+`set output position` call.
+
+Fixed by converting only at the smithay/protocol boundary, in both
+places: `bring_up_head`'s own initial `change_current_state` call, and
+`apply_output_position` (now documented as taking physical input, with
+the one real `wlr-output-management-v1` client call site in `crates/
+wayland/src/output_management.rs::handle_apply_or_test` converting its
+own genuinely-logical request to physical before calling it). Everything
+this compositor tracks internally (`UdevHead::location`, `entry.location`,
+`srd monitors`' own `x/y/full_x/full_y`) stays physical throughout,
+matching `Platform::monitors()`'s own fix above - only the values hand
+ed to smithay's protocol-facing API get converted, and only right there.
+
+Also added, requested directly alongside the question: `scale` on
+`srdwm_core::monitor::Monitor` and on `MonitorInfo`/the `monitors` event,
+plus an explicit doc comment on `MonitorInfo` itself answering dotfiles-
+09's other question (yes, `x/y/width/height` and `full_*` are the same
+space as each other, and that space is physical) so the next client
+doesn't have to re-derive either answer.
+
+Full test suite green; built and installed, needs a restart.
+
+## Real bug, confirmed, not yet root-caused: Firefox's titlebar corners do not round (2026-08-20)
+
+Found during a live testing pass (screenshots, pixel-level crops) requested
+directly by the user, comparing Firefox against a plain SSD-decorated
+terminal window.
+
+Confirmed facts, in order:
+
+- Firefox's SSD titlebar shows a completely square top-left corner. Tested
+  at both the normal radius (11) and a deliberately large test radius (40,
+  set live via `srd set corner_radius 40` then reverted) - square either
+  way, ruling out "radius too small to see" as an explanation.
+- A tmux terminal window, decorated by the exact same code path
+  (`redraw_decoration_buffer` in `crates/wayland/src/state/lifecycle.rs`
+  is the only call site of `decoration::render_titlebar` in the whole
+  crate), shows a clean, correctly rounded corner at the same radius.
+- Ruled out: stale/cached decoration texture - toggling Firefox's
+  maximize state off and on again (forcing a real geometry change and a
+  fresh `redraw_decoration_buffer` call) did not change the result.
+- Ruled out: `border_curve_is_safe` gating (`crates/wayland/src/udev/
+  render.rs`, `let border_curve_is_safe = w.decorated || content_will_be_
+  masked;`) - Firefox is server-side decorated (confirmed: it renders
+  srdwm's own titlebar band and buttons at all, not its own GTK CSD row),
+  so this evaluates `true` regardless of content-masking, meaning the
+  border strip should draw its full curve either way.
+- Not yet checked: whether the square edge belongs to the titlebar
+  bitmap itself (`render_titlebar`'s own `round_top_corners` call not
+  actually clipping for this window's specific dimensions/`border_width`)
+  or to something else painted on top of an otherwise-correct rounded
+  titlebar in the same region.
+
+Also confirmed, while investigating the above, **not** to be bugs:
+
+- Firefox's titlebar buttons render minimize-maximize-close left to right
+  (yellow-green-red) when right-aligned (`theme.buttons_left = false`,
+  the default) - this is intentional, the Windows/GTK convention
+  documented directly in `crates/core/src/window.rs::hit_test` ("not a
+  mirror of the right-aligned order... which is the Windows/GTK
+  convention... for a reason"). A left-aligned window (`buttons_left =
+  true`) correctly shows the macOS close-minimize-maximize order instead.
+  Click targets match the visual position in both cases.
+- The thin purple/violet line above every titlebar is the configured
+  Catppuccin Mauve `border.active_color` (`cba6f7`) in `~/.config/srd/
+  themes.lua`, not a rendering defect.
+- Firefox's titlebar buttons appearing grey (unfocused color) despite
+  being the actual focused window, seen once before a restart this
+  session - not reproducible after the restart (`srd clients` confirmed
+  `focused: true`, buttons rendered in full color). Most likely a stale-
+  process artifact from a long-running pre-restart binary, not a bug in
+  current code; flag again if it recurs on a fresh process.
+
+## Connector names were wrong (reported by dotfiles-09, real bug, fixed 2026-08-20)
+
+`srd monitors` reported `HDMIA-1` and `EmbeddedDisplayPort-1`. Neither
+name exists anywhere else. The kernel, `ddcutil`, `/sys/class/drm`, and
+any config written for another compositor all say `HDMI-A-1` and `eDP-1`.
+
+Root cause: `probe_connected` (`crates/wayland/src/udev/drm.rs`) built the
+name with `format!("{:?}-{}", info.interface(), info.interface_id())`.
+`{:?}` prints the Rust enum variant name (`HDMIA`, `EmbeddedDisplayPort`),
+not the kernel's connector type string. `drm-rs`'s `Interface::as_str()`
+already returns the correct string, taken directly from the kernel's own
+`drm_connector_enum_list` - the fix replaces `{:?}` with `.as_str()`.
+
+This name is load-bearing, not cosmetic: it is the identifier `srd.
+monitor.split`, `srd.monitor.scale`, `set output position`, and `set
+output enabled` all key on. dotfiles-09 had added a workaround in the AGS
+panel (resolve srd's wrong name against `/sys/class/drm` for display,
+still dispatch with srd's own spelling) - safe to remove now.
+
+## `MonitorInfo.split` field added (requested by dotfiles-09, 2026-08-20)
+
+`srd monitors` and the `monitors` event now mark each split part (from
+`srd.monitor.split`) with `"split": true`. An ordinary output reports
+`"split": false`. `srdwm_core::monitor::Monitor` gained a `split: bool`
+field, set by `crates/wayland/src/udev/platform.rs::monitors()`; `srdwm_
+platform::ipc::monitor_snapshot` copies it into the wire format. 1 new
+IPC test. Requested directly: a display-arrangement UI needs to tell a
+split part apart from a genuinely independent output, so it does not
+offer to move, resize, or extend a physical arrangement onto one.
+
+## Multi-monitor/phone features - plan written, step 1 closed (2026-08-20)
+
+Full plan at `a local scratch directory`, covering the
+three features relayed via the AGS peer session: splitting one physical
+output into multiple logical monitors + per-monitor default layout,
+phone-monitor/VM-viewer workspace (simple window form now, real virtual
+output later), and phone-mode UI (automatic-by-shape + manual toggle).
+Recommended order: (1) per-monitor default layout, (2) core-side logical
+sub-monitor splitting, (3) simple VM-viewer window, (4) phone-mode layout
++ toggle, (5) real coexisting virtual output - deliberately last, deferred
+until a concrete VM/simulator integration target is known.
+
+- [x] **Step 1: `monitor.primary_layout`/`monitor.secondary_layout` wired
+      up for real.** Same dead-config shape as `general.default_layout`'s
+      own siblings - validated/defaulted since the config engine's
+      beginning, never read anywhere. **Deviated from the written plan**:
+      the plan's own Phase-2 validation pass (a Plan agent) found these
+      are flat global keys with no per-connector-name table anywhere in
+      the Lua engine, and recommended extending `srd.rule` with a
+      `monitor` matcher instead of inventing one - but on implementing,
+      wiring the two already-named keys directly turned out to need zero
+      new Lua API surface at all and matches exactly what those keys
+      already promised, so that's what shipped (`WindowManager::primary_
+      layout`/`secondary_layout`, applied by `apply_monitor_layouts` in
+      `crates/core/src/manager/monitors.rs`, called from `set_monitors`).
+      Only takes effect in `workspace.per_monitor` mode (still off by
+      default, still not recommended to turn on yet - AGS's own `active`-
+      flag handling isn't ready, see the per-monitor-workspaces entry
+      below) - in shared mode there is only one workspace, so a primary/
+      secondary split has nothing distinct to apply to and is skipped.
+      Applied on every `set_monitors` call (startup + hotplug), not on
+      every workspace switch, so it doesn't fight a workspace's own
+      manually-set layout every time a monitor switches back to it; a
+      non-primary monitor still showing the same fallback workspace as
+      the primary is skipped too, so `secondary_layout` can't clobber what
+      `primary_layout` just set on that shared workspace before any
+      monitor has actually split off. 3 new unit tests in `crates/core/
+      src/manager/tests.rs`.
+- [x] **Step 2: core-side logical sub-monitor splitting.** `srd.monitor.
+      split(name, parts[, "rows"])` - `WindowManager::monitor_splits`,
+      applied by `crates/wayland/src/udev/platform.rs::monitors()`
+      dividing one real head into N `Monitor` entries via the new pure
+      `srdwm_core::monitor::split_rect` (6 unit tests). Each sub-region
+      gets its own `full_geometry`/`maximize_geometry`, not just
+      `geometry` - the Plan agent's validation pass caught that the
+      naive version would have fullscreened a window across the *entire*
+      physical panel, erasing the split (see the plan file for detail).
+      No new `wl_output` per sub-region in this version, by design --
+      flagged as an accepted limitation in `MonitorSplit`'s own doc
+      comment, not silently under-delivered.
+- [x] **Unplanned, requested mid-session: automatic per-monitor scale.**
+      Before this change, srdwm set every real output to a fixed scale of
+      `1.0`. There was no way to change this. A user reported the problem
+      live: on a physically larger monitor, text and UI looked too big for
+      the amount of space available.
+
+      A first version added a manual `srd.monitor.scale(name, factor)`
+      config call, keyed by connector name. The user asked for less
+      hardcoding: no fixed connector name, and behavior based on the
+      monitor's real properties (their example: different behavior for a
+      27" screen versus a 24" one). The final version replaces the fixed-
+      name approach with an automatic one:
+
+      `srdwm_core::monitor::auto_scale_for` (`crates/core/src/monitor.rs`)
+      reads a monitor's real physical size and resolution from EDID,
+      computes its actual pixel density (PPI), and scales it down when
+      that density falls below a reference value (109 PPI, roughly a 24"
+      1080p or 27" 1440p monitor). It never scales a monitor above `1.0`
+      on its own. 5 unit tests cover the laptop panel (no change), a large
+      1080p monitor (scales down), a small 4K panel (stays at `1.0`, not
+      scaled up), an extreme case (clamps at the `0.5` floor), and a
+      monitor with no EDID physical size (returns `1.0`, since there is
+      nothing real to compute from).
+
+      `srd.monitor.scale(name, factor)` still exists, as an explicit
+      override for one connector. An explicit value always wins over the
+      automatic one. `~/.config/srd/init.lua` documents this with a
+      commented-out example rather than a live call, since the automatic
+      value already covers the reported case.
+
+      `WindowManager::monitor_scales` stores only explicit overrides.
+      `bring_up_head` (`crates/wayland/src/udev/drm.rs`) applies the
+      override if one exists for that connector, or the automatic value
+      otherwise, at startup, hotplug, and re-enable alike. **A scale
+      change needs a restart, or an unplug/replug of that connector, to
+      take effect** - it applies only when a head comes up, not on a
+      plain config reload against an already-running output.
+- [ ] Steps 3-5 (VM-viewer window, phone-mode layout/toggle, real virtual
+      output): not started.
+- [ ] **Persistent monitor state across restarts** - "remember states/
+      preference when reconnecting even after startup", asked alongside
+      the three planned features but tracked separately since it's
+      infrastructure (a state file + load/save), not one of the
+      architectural features the plan above covers. Not started, not yet
+      scoped.
+
+## Closed this session (2026-08-19, a later same-day session than the one that opened most items below)
+
+- **`activate_workspace` IPC command silently did nothing.** Root-caused:
+  `udev/platform.rs`/`winit/platform.rs` unconditionally re-ran the full
+  `focus_window()` (with its own workspace-follow side effect) after *any*
+  IPC mutation, silently reverting the very switch that mutation had just
+  made. Fixed by splitting out `raise_in_space` (z-order only, no
+  workspace-follow) for that re-sync path - see `crate::input::
+  raise_in_space`'s own doc comment. Confirmed fixed independently by two
+  separate live sessions (this one and the AGS-side peer session, via the
+  `WS-IPC-DIAG` log line - kept in place, still useful).
+- **Corner-seam fix, verified live.** Pixel-sampled a real `grim`
+  screenshot; the titlebar/border-top seam is a continuous curve, no
+  stepped notch.
+- **Firefox click-accuracy bug - found a *real*, different bug than the
+  one "fixed" before.** The prior `content_offset` fix in `input.rs`'s
+  `refresh_pointer_focus` double-applied an offset `sync_geometry`'s own
+  `map_element` call had already baked into `Space`'s tracked `loc` -
+  confirmed against `sync_geometry`'s own doc comment (which spells out
+  the correct formula, `win_relative = pos - loc`) and smithay 0.7.0's
+  real source (`Window::surface_under` hands a toplevel's point through
+  with a hardcoded `(0,0)` offset). Reverted the double-application.
+  **Not yet click-tested live** - `ydotool`'s absolute positioning isn't
+  reliable in this environment (confirmed twice: commanded position and
+  actual landing position disagreed by a non-constant factor), so this is
+  verified by source/contract, not by a live click. If you can get a real
+  physical click tested against it, do.
+- **Corner-radius-vs-border-strip gap - new bug, found and fixed.** Not
+  the same as the seam above: the left/right border strips are flat,
+  curve-blind rectangles (`border_side_render_element`), and when
+  `corner_radius > border_width` (true even at this project's own theme
+  defaults, 6 over 4), the top/bottom strips' own curve didn't have enough
+  buffer height to fully resolve before handing off to those flat strips -
+  leaving a real wedge of bare background between the straight border and
+  the window's own curve. Confirmed via direct pixel sampling of a live
+  screenshot (not eyeballed). Fixed by growing `render_border_top`/
+  `render_border_bottom` to `max(thickness, radius)` tall and letting them
+  draw over the flat strips (they're pushed first in the render list,
+  which is topmost). Also fixed `render_border_bottom`'s own pre-existing
+  `radius + thickness` bug (drew against an oversized, wrong circle -
+  same wrong shape the top-strip seam fix had already rejected for an
+  equivalent reason).
+- **Shadow didn't follow a window's rounded corner.** `shadow_bitmap` used
+  plain Chebyshev (square-ring) distance everywhere, by design (documented
+  as a deliberate cheapness trade-off) - but that means a rounded
+  window's shadow still had a hard square corner, visibly a different
+  shape sitting right next to the window's own curve. Fixed with a real
+  rounded-rectangle distance field in the corner quadrants only (flat
+  edges are unaffected, byte-identical to before); `radius = 0` is also
+  byte-identical to before.
+- **Firefox's own corners weren't rounding.** Not a bug - `general.
+  rounded_corners` (content-corner rounding for undecorated/CSD windows)
+  defaults to *off* specifically on the udev/Pixman backend (real,
+  documented, untested-on-real-hardware CPU cost for constantly
+  repainting content). Turned on in this user's `init.lua`; watch CPU
+  under heavy content (video, scrollback) since this is the first live
+  data point for that cost on real hardware.
+- **Firefox's titlebar looked nothing like every other window's.**
+  Researched rather than guessed: checked how niri negotiates
+  xdg-decoration (`~/reference-wms/niri/src/handlers/xdg_shell.rs`) -
+  offers ServerSide by default, *honors* whatever a client explicitly
+  requests, exactly like srdwm's own `XdgDecorationHandler` already does.
+  GNOME/Mutter is the outlier (never offers server-side, relies on every
+  GTK app sharing one CSD theme) and isn't applicable to a desktop mixing
+  GTK/Electron/terminal apps with no shared toolkit. Root cause was
+  Firefox's own `browser.tabs.inTitlebar` pref defaulting to CSD here -
+  set to `0` in its profile's `user.js` (takes effect on Firefox's next
+  restart, not yet confirmed live), and removed the now-unnecessary
+  `decorated = false` rule for it in `rules.lua`.
+- **Traffic-light titlebar buttons.** srdwm's own SSD titlebar drew plain
+  outline glyphs (X/square/dash) before - nothing like a real traffic
+  light, and nothing like Firefox's own CSD buttons (real macOS-style
+  dots via the WhiteSur GTK theme). Rewrote as filled, anti-aliased dots
+  (red/yellow/green when focused, flat grey when not, matching what
+  WhiteSur already does and what Firefox's own unfocused dots already
+  looked like).
+- **Switching workspace didn't move keyboard focus.** `switch_workspace`
+  only ever touched `current_workspace`, never `self.focused` - switching
+  to a workspace with an open window left that window unfocused while
+  whatever was focused *before* the switch (now invisible) kept receiving
+  real keystrokes. Fixed: switching now focuses the topmost window on the
+  destination workspace if the currently-focused one isn't there, or
+  clears focus if the workspace is empty. Guarded so it doesn't fight
+  `focus_window`'s own workspace-follow call into this same function.
+- **Workspace ids are 1-based, matching Hyprland's own convention and the
+  display name** (`workspace.names`, `apply_workspace_count`) - checked
+  AGS's own niri and Hyprland integrations before choosing this: neither
+  needs translation math the way srdwm's old 0-based scheme forced onto
+  `lib/srdwm.ts`. Rolling this out needs `crates/config`'s shipped
+  default, this user's `~/.config/srd/keybindings.lua`/`rules.lua`, and
+  AGS's `lib/srdwm.ts`/`service/wsPreview.ts` to all agree with core at
+  the same time - they can't update atomically with one srdwm restart, so
+  whichever side is running the *other* scheme during that window visibly
+  misbehaves (this was hit live: AGS's Overview picked up a phantom 7th
+  workspace slot during a brief skew). `~/.config/srd/rules.lua` also had
+  two stale 0-based workspace assignments (Firefox pinned to workspace 0,
+  which no longer exists at all; Discord/Spotify off by one) - fixed, and
+  the already-open windows they'd misplaced were moved to the right
+  workspace live.
+- **Dead config key: `general.border_width`.** Validated and defaulted
+  but never actually read anywhere - the real, working key is `theme.
+  decorations.border.width` (already correctly documented as such in
+  `docs/DEFAULTS.md`, which is how this was found). Removed the dead
+  key entirely from `crates/config`, the shipped default `init.lua`, and
+  this user's own `init.lua`.
+- **Poll-loop CPU throttle, re-measured.** ~15.4% of one core at idle
+  (instantaneous `/proc/<pid>/stat` delta, not the time-averaged `ps`
+  figure), down from the ~21-30% baseline documented for the pre-throttle
+  build. Real improvement, though not measured under identical idle
+  conditions (a running desktop, not a controlled bench), so treat as
+  directional rather than exact.
+- **Hover-state highlighting for titlebar buttons.** `CompState::
+  hovered_titlebar_button` now tracks which button (if any) is hovered,
+  set from `handle_pointer_position`'s own `hit_test` result and fed into
+  `DecorationSignature` so a hover change is a real cache-invalidating
+  event, not silently absorbed. `render_titlebar` brightens whichever
+  button is hovered (`decoration::brighten`, blends toward white) - close
+  gets "red on hover" for free from this same mechanism, since it's
+  already red at rest (focused); no special-cased hover colour was
+  needed. Not yet confirmed live (built and installed, no restart since).
+
+## Closed this session (2026-08-20)
+
+- **Titlebar cursor didn't change shape over the buttons.** `update_cursor_shape`
+  had no case for a titlebar-button hit at all - fell through to whatever the
+  surface underneath happened to want. Added a `CursorIcon::Pointer` case
+  specifically for Close/Minimize/Maximize hits.
+- **Titlebar text alignment/colour, config-driven.** `theme.decorations.
+  title_bar.text_align` (`"left"` default, `"center"` available) and the
+  existing focused/unfocused foreground colours (now grey by default in this
+  user's own theme preset) - wired through `ThemeConfig::title_centered`.
+- **Titlebar button side, config-driven.** `theme.decorations.title_bar.
+  button_side` (`"right"` default matches Windows/GTK ordering
+  minimize/maximize/close; `"left"` switches to macOS ordering close/
+  minimize/maximize) - threaded through both the renderer
+  (`button_box`/`BUTTON_MARGIN_LEFT`, bigger dots when left) and
+  `ResizeEdge::hit_test` (which corner gets resize-vs-button priority flips
+  to match), so the clickable zones and the drawn positions can't drift
+  apart.
+- **Animated glyph-reveal on titlebar-button hover, config-driven.**
+  `theme.decorations.title_bar.button_glyph`: `"hover"` (default - classic
+  macOS, glyph fades in from the button dot's own colour over 200ms
+  ease-out-cubic, chosen after comparing against real extracted libadwaita
+  CSS which does the opposite) or `"always"` (modern GNOME/Adwaita
+  convention, glyph always visible, left available and documented rather
+  than deleted per usual "comment out the alternative" convention here).
+  Ticked every frame via `tick_hover_glyph_animation` (only while a hover
+  animation is actually in flight and the config isn't already `"always"`,
+  so this costs nothing at rest).
+- **Multi-monitor drag couldn't cross onto a second screen at all.**
+  Root-caused: `update_drag` clamped to the *starting* monitor's bounds,
+  looked up once at drag-start and never revisited as the drag moved - so
+  a window could never be dragged past its own starting monitor's edge no
+  matter how far or fast the pointer moved, even with a second monitor
+  fully up and working at the compositor/DRM level. Reported live with a
+  real second monitor connected. Fixed with a new `all_monitors_bounds()`
+  (the union of every registered monitor's `full_geometry`) - see that
+  function's own doc comment in `crates/core/src/manager/monitors.rs`.
+- **Same drag also left `w.monitor` stale after crossing screens.**
+  `end_drag`'s snap-zone check used whatever `w.monitor` was set to at
+  drag-*start*, so a window actually now sitting on monitor 2 still had
+  its snap zones checked against monitor 1. Fixed by recomputing
+  `w.monitor` from the window's real post-drag geometry before the snap
+  check, in `crates/core/src/manager/dragresize.rs::end_drag` - the same
+  class of staleness `set_monitors`' own doc comment already documented
+  for the hotplug-rehoming case.
+- Full workspace test suite (284 tests across every crate) still green
+  with both of the above in place; installed via `cargo install --path
+  crates/srdwm --force` (no restart of the live process - not asked for).
+
+## Closed this session (2026-08-20, continued) - corner-mask alpha bug
+
+- **Undecorated-window content-mask corner fix, real bug found and fixed.**
+  Reported live as a solid grey wedge poking past the rounded-corner curve
+  on a real, running Firefox window (`decorated = false`), confirmed via a
+  zoomed `grim` crop, not eyeballed. Root cause, confirmed by reading
+  `crates/wayland/src/rounded_corners_pixman.rs::masked_content_buffer`:
+  the function accepts both `Argb8888` and `Xrgb8888` source buffers, but
+  always hands the result to `MemoryRenderBuffer` labelled `Argb8888`
+  (real, renderer-respected alpha) regardless of which the source actually
+  was. `Xrgb8888`'s fourth byte is the wire format's *unused* channel - no
+  producer is required to zero or otherwise canonicalize it - so whatever
+  a client (Firefox, live) happened to leave there became real, visible
+  transparency the instant the whole buffer got relabelled `Argb8888`,
+  anywhere in the window, not just the corner boxes the mask function
+  intentionally touches. Fixed with a new `force_opaque` step (byte 3 of
+  every pixel forced to `0xff`) run over `Xrgb8888` sources before the
+  corner mask itself runs. New unit test
+  (`force_opaque_overwrites_garbage_alpha_without_touching_colour`); full
+  285-test workspace suite green; built and installed.
+
+## macOS titlebar/corner/shadow proportions - partially applied, partially reverted per direct feedback
+
+Sourced from independent developer references, not guessed - Apple
+doesn't publish exact pixel specs and the real macOS screenshots this
+needed couldn't be fetched as savable binaries. Full notes and the live
+comparison screenshot saved to `a local scratch directory
+notes.md` and `a local scratch directory`.
+
+- [x] Corner radius: `theme.decorations.border.radius` default (and this
+      user's own theme presets) changed `6 → 11` (0.2 → 0.36 ratio,
+      matching real macOS's ~10pt/28pt), across `ThemeConfig::
+      default_corner_radius`, `crates/srdwm/src/main.rs`'s shipped
+      fallback, and `~/.config/srd/themes.lua`'s three presets.
+- [x] Left-side (`buttons_left`) button size: `BUTTON_MARGIN_LEFT` `0.18 →
+      0.25`, landing the macOS-authentic left-aligned layout on a true 0.5
+      diameter ratio. Right-aligned `BUTTON_MARGIN` deliberately left
+      untouched at `0.32` - it was never meant to mimic macOS, and
+      changing it would have undone the user's own earlier explicit
+      "bigger on the left" request.
+- [ ] **Reverted**: group hover-reveal (all three traffic-light buttons
+      brightening/revealing together, matching real macOS's own cluster
+      behaviour) was implemented, then explicitly reverted per direct
+      user feedback - "hover effect should apply to one at a time" is
+      this project's own convention here, despite real macOS itself doing
+      it differently. Back to per-button hover
+      (`hovering_the_close_button_brightens_only_that_dot`).
+- [ ] **Still open, reported live after the above landed**: title text
+      still not centred, button colours "not correct", decorations "far
+      apart and small". Root cause found separately: `~/.config/srd/
+      themes.lua`'s active preset never actually had `text_align`/
+      `button_side`/`button_glyph` fields at all (this session's earlier
+      claim of having set them was wrong/lost) and `foreground_focused`
+      was still the original purple, not the grey requested much earlier
+      - so the compositor had been running on `text_align="left"`,
+      `button_side="right"` (the small, unrevised margin), and the wrong
+      colour this whole time. Added `text_align="center"`,
+      `button_side="left"`, `button_glyph="hover"`,
+      `foreground_focused="#a6adc8"` to the live preset. **Not yet
+      confirmed live** - needs the pending restart plus real before/after
+      screenshots, not just a config-file read, given the last claim of
+      "done" here turned out to be wrong.
+- [ ] Shadow reads smaller/harder than real macOS's soft, wide shadow
+      (`SHADOW_SIZE=12px`, linear falloff) - qualitative only, no hard
+      reference number was retrievable, not yet touched.
+- Colours (aside from the grey-text miss above) and left-side button
+  ordering (close/minimize/maximize) already match real macOS correctly,
+  confirmed - no action needed there.
+
+**Module-organization survey vs. niri/mutter** (read-only, no code
+changed): srdwm's already-split files (`state/mod.rs` + `lifecycle.rs`/
+`geometry.rs`/`layers.rs`, the whole `udev/` split, `manager/mod.rs` +
+its own already-split files) are all *smaller and more modular* than
+niri's own real-world equivalents (niri's `niri.rs` alone is 6569 lines;
+its `backend/tty.rs` is bigger than srdwm's entire `udev/` directory
+combined) - no action needed on any of that, it's already ahead of the
+reference project it's modeled on. Concrete remaining splits, each
+modeled directly on a niri module boundary that already exists there:
+- [x] `crates/wayland/src/decoration.rs` (2172 lines) → split into
+      `decoration/{border,buttons,color,corners,font,shadow,titlebar}.rs`
+      plus `decoration/tests.rs`, matching niri's own `render_helpers/`
+      (one file per render-element concern); the root file now only holds
+      the module doc comment, the `mod`/`pub use` wiring, and the two
+      standalone popup renderers (`render_context_menu`/
+      `render_snap_flyout`) that don't belong to any single submodule.
+      198 root lines left, down from 2172. Verified zero behavior/coverage
+      loss: 190 core / 106 wayland tests, identical count before and after
+      (2026-08-23).
+- [x] `crates/wayland/src/protocols.rs` (936 lines) → finished the split;
+      one file per `impl ...Handler for CompState` block under
+      `protocols/`, matching niri's `handlers/` - `buffer.rs` groups
+      `ShmHandler`/`BufferHandler`/`DmabufHandler` and `misc.rs` groups
+      the three purely-default-impl stubs (`OutputHandler`/
+      `TabletSeatHandler`/`FractionalScaleHandler`), since none of those
+      five has more than a handful of lines on its own; every other
+      module is exactly one handler (`compositor`, `xdg_shell`,
+      `xdg_decoration`, `xdg_activation`, `input_method`, `seat`,
+      `layer_shell`, `selection`, `idle`). Root file now only holds the
+      module doc comment, `mod` declarations, and the `delegate_*!` macro
+      list - 58 lines, down from 936. No test module existed in the
+      original file, so nothing to redistribute; 190 core / 106 wayland
+      tests, identical count before and after (2026-08-23).
+- [x] `crates/wayland/src/input.rs` (1305 lines) → finished the split, one
+      file per input-event kind under `input/`: `layers.rs` (layer-shell
+      hit-testing, layer-driven maximize geometry), `focus.rs` (focusing/
+      raising/closing a window - needed by every other kind regardless of
+      what triggered the change), `pointer.rs` (motion, button, cursor
+      shape - the largest, at 683 lines, since it's also where drag/resize
+      *forwarding* lives, the pointer-driven titlebar hit-test dispatch
+      that starts/updates/ends a core drag or resize), `keyboard.rs` (key
+      events, keysym/modifier translation, VT switching), `gestures.rs`
+      (workspace scroll, touchpad swipe). Root file now only holds the
+      module doc comment, `mod` declarations, the two truly-cross-cutting
+      helpers every one of those five needs (`notify_idle_activity`,
+      `DRAG_MODIFIER`), and `last_pointer_pos` - 81 lines, down from 1305.
+      No test module existed in the original file, so nothing to
+      redistribute; 190 core / 106 wayland tests, identical count before
+      and after (2026-08-23). This was the last item on the module-split
+      list - `decoration.rs`, `protocols.rs`, and `input.rs` are all done.
+- Low priority: an `effects/` grouping for `blur.rs`/colour-filter code,
+  matching niri's `render_helpers/{xray,background_effect,
+  framebuffer_effect}.rs` - more a naming/grouping nicety than a real gap,
+  since these already exist as their own top-level files.
+
+## Closed this session (2026-08-20, continued further) - the real second-monitor root cause, a matching video-freeze bug, and per-monitor workspaces
+
+- **Second-monitor blank screen: real root cause found and fixed** (the
+  flip-watchdog from earlier the same session was a real, separate
+  robustness fix, but not this bug). Added a temporary diagnostic
+  (`LAYER-ELEMENTS-DIAG`, since removed) that logged real per-output
+  layer-map state after a live restart: both outputs showed identical,
+  fully-populated `layer_count=3 has_buffer=[true,true,true]` the whole
+  time - proving the surfaces were genuinely mapped, configured, and
+  holding real committed pixel data on both monitors equally. That ruled
+  out both AGS and the render/flip pipeline itself (also separately
+  confirmed alive on the affected head by moving the real cursor there and
+  watching it render correctly). Root cause: `output_layer_elements`
+  (`crates/wayland/src/elements.rs`) added a per-head `origin` (the head's
+  own position in the shared global desktop space, e.g. `(1920, 0)` for a
+  second monitor) to `LayerMap::layer_geometry`'s already-local
+  coordinates - confirmed against smithay 0.7.0's own source that layer
+  geometry carries no global offset at all. That silently shifted every
+  wallpaper/bar surface on any monitor whose `origin` wasn't `(0, 0)` --
+  every monitor except the first, left-to-right - clean off the right
+  edge of that head's own local framebuffer. Fixed by dropping the
+  `origin` parameter entirely; `output_layer_elements` never needed it.
+- **A second, same-family bug: video frozen on a monitor the user wasn't
+  actively using, audio still playing.** Reported live. Root cause:
+  `windows_touched_by_damage` (same file) compared a render pass's own
+  *local* damage rectangles directly against `Space::element_geometry`,
+  which is always *global* - the exact same local/global mismatch as the
+  bug above, one level deeper in the render pipeline. A window relying
+  solely on this path for its frame callbacks (any window not focused or
+  under the pointer - those get an unconditional fallback via a separate,
+  always-on pass) never received one on any monitor but the first, so a
+  video player left playing in the background on a second monitor
+  literally never got permission to submit another frame after its first,
+  while its own audio pipeline (PipeWire, entirely separate) kept running
+  underneath. Fixed the same way: `origin` now threaded through to shift
+  the comparison into a consistent space.
+- **Independent per-monitor workspaces, now a real configurable choice.**
+  Previously hardcoded to a single flat workspace shared by every
+  monitor. `workspace.per_monitor` (default `false`, preserving the
+  original design exactly) switches to Hyprland/niri-style independent
+  per-monitor workspace sets when set `true` - each monitor tracks and
+  displays its own current workspace, switchable via `srd dispatch
+  activate_workspace <id>` without affecting any other monitor (the IPC
+  handler now routes to whichever monitor the focused window is on,
+  falling back to the primary monitor). `WindowManager::
+  switch_workspace_on_monitor`/`workspace_for_monitor`/`is_workspace_
+  visible` are the new entry points; `visible_windows`/`workspace_
+  snapshot` (the `srd workspaces`/AGS wire format) both updated to use
+  them, with zero wire-format change needed - `WorkspaceInfo::active` was
+  already a plain per-workspace bool, so more than one workspace *can*
+  report `active: true` at once in per-monitor mode without needing a
+  schema change on this side. `workspace.count` has no hardcoded ceiling
+  in either mode (floor of 1 only) - purely config-driven, shipped
+  default is 10.
+  - **Do not turn `workspace.per_monitor` on yet.** Confirmed by the AGS
+    peer session against real code, not assumed: `lib/srdwm.ts`'s
+    `#syncWorkspaces` collapses every workspace's own `active` flag into
+    one `focusedWorkspace` (last-active-in-list-order wins), and every
+    widget (bar pills, Overview tiles) highlights by identity against
+    that single value - nothing actually reads the per-workspace
+    `active` bool srdwm now sends correctly. Turning the mode on before
+    that lands would render exactly one pill lit (whichever monitor's
+    workspace sorts last) and the other monitor's real current workspace
+    as merely "occupied" - not a crash, but visibly wrong. The AGS-side
+    fix is small (light a pill from the real per-workspace flag, falling
+    back to the identity check for Hyprland/niri, which have no such
+    flag) and is dotfiles-09's own call/scope, already flagged to their
+    user - not something to fix from this side.
+  - Not yet done: scroll/gesture-based relative workspace switching
+    (`switch_workspace_relative` in `crates/wayland/src/input.rs`) still
+    always targets the single shared `current_workspace`/`switch_
+    workspace`, not whichever monitor the pointer is actually over --
+    inert-ish for a monitor already showing its own independently-switched
+    workspace in per-monitor mode. Scoped out of this pass rather than
+    guessed at; needs "which monitor is the pointer over" plumbed through
+    from the backend-specific pointer state.
+- Full 289-test workspace suite (four new tests for the per-monitor
+  feature specifically) green; built and installed.
+
+## Closed this session (2026-08-20, continued yet further) - italic titlebar font, border/shadow wedge, resize lag, AGS monitor-layout panel backend
+
+- **Titlebar font was italic on this machine, for every window.**
+  `find_ttf_preferring_mono` picked whichever font file's name merely
+  *contained* "mono" first in directory-listing order, with nothing
+  excluding a styled (italic/bold/etc.) variant - live result:
+  `/usr/share/fonts/TTF/JetBrainsMonoNerdFontPropo-Italic.ttf`, confirmed
+  via the `wayland titlebar font:` log line, despite several regular-
+  weight JetBrains Mono files also being installed. Rewritten as
+  `font_rank`/`find_best_font`: ranks every candidate (mono+unstyled beats
+  mono+styled beats non-mono) and keeps scanning until it finds an actual
+  rank-0 match instead of stopping at the first mono-named file regardless
+  of style. Six new unit tests were not written for this specific
+  live-picked-file case (filesystem-dependent), but `font_rank` itself is
+  fully covered.
+- **A real border/shadow rendering bug, found while comparing screenshots
+  as asked: a solid, wrong-coloured wedge cut into an undecorated (CSD)
+  window's corners.** Reported live on a real Firefox window, both top-
+  left and bottom-left corners. Root-caused by elimination, not
+  guessed: toggled `general.rounded_corners` off live (`srd set
+  rounded_corners false`) and the wedge stayed, ruling out the content-
+  mask feature; the wedge's own colour matched `border.active_color`
+  exactly, not Firefox's own chrome colour, ruling out Firefox's own
+  rendering. That left `render_border_top`/`render_border_bottom`'s own
+  "extra" rows (added past `border_width` whenever `corner_radius >
+  border_width`, to give a corner's curve room to resolve) as the only
+  remaining source - correctly designed to overpaint a *decorated*
+  window's titlebar band, which safely absorbs them, but an undecorated
+  window has no such band, so the same colour-filled rows land on its
+  real content instead. Almost certainly always existed, just too subtle
+  to notice at the old default radius (6, a 2px extra) until this
+  session's own real-macOS-proportion fix (radius 11, a 7px extra) made
+  it obvious. Fixed with two new pure, tested functions (`decoration::
+  border_top_visible_rows`/`border_bottom_visible_rows`) that both real
+  backends (`udev/render.rs`, `winit/render.rs`) now call instead of each
+  hand-rolling their own position/crop math - crops to just the nominal
+  `border_width` rows for an undecorated window, skipping the
+  compensating shift too since there's nothing left to shift for. Ten new
+  unit tests.
+  - **Follow-up caught by actually looking at the pixels afterward, not
+    just trusting the fix:** cropping unconditionally whenever
+    `!w.decorated` closed the wedge but cost every such window its own
+    visible corner curve too, even on the (rarer) undecorated window
+    whose content-masking genuinely does succeed - reverting it to a
+    flat square corner instead of the intended rounded one, confirmed on
+    the same real Firefox window this was found on (masking bails for it
+    specifically, `masked_content_buffer`'s subsurface early-out). Fixed
+    on the `udev` backend by computing whether this window's content will
+    actually be masked *this frame* (a cheap cache-hit re-use of the same
+    `rounded_content_buffer` call the content-rendering step already
+    makes later in the same loop iteration, not a second real masking
+    pass) and using that - not the bare `decorated` flag - to decide
+    whether the border's extra rows are safe to show in full. The `winit`
+    (nested/dev-only) backend's masking is GPU-shader-based, not the
+    Pixman CPU path with the subsurface limitation, so it doesn't appear
+    to share this failure mode at all - left on its simpler unconditional
+    crop rather than adding matching complexity to a backend that isn't
+    what's actually running live.
+- **Resizing was "very laggy" - root-caused and fixed, not just
+  reported.** `general.rounded_corners` (content corner-masking) copies a
+  window's *entire* pixel buffer on the CPU on every single commit (see
+  `rounded_corners_pixman`'s own module doc comment, which already
+  predicted this exact cost and is why the feature defaults off) - a
+  resize reflows content on every single frame of the drag, so this was
+  the first real-hardware case that ever paid that cost continuously
+  rather than once per idle-window repaint. Fixed by skipping content
+  masking for specifically whichever window is being interactively
+  resized right now (`WindowManager::resizing_window`, new), not by
+  disabling the feature globally or during any other window's masking --
+  cosmetic, and the one moment its absence is least likely to be noticed
+  (attention is on the dragged edge, not the opposite corner).
+- **AGS's monitor-layout panel backend, built to a precise spec from the
+  AGS peer session rather than guessed.** New CLI: `srd dispatch set
+  output position <name|id> <x> <y>` (the existing `set_output_position`
+  IPC command had no CLI surface at all before this - AGS dispatches via
+  `Gio.Subprocess`/the `srd` binary, not the raw socket). Resolves a
+  monitor `name` server-side when no numeric `id` is given, matching what
+  `srd monitors` itself reports, so a caller that already has the name
+  doesn't need an extra round-trip. Explicitly *not* built this pass, on
+  purpose: real output enable/disable (needs actual DRM-level CRTC power
+  state, not a software flag, to mean what Hyprland's `disable`/niri's
+  `off` mean - too large a change to bolt onto an already-large restart
+  untested) and true multi-display content mirroring (corrected an
+  earlier same-session claim that positioning two outputs at identical
+  coordinates already mirrors content - it doesn't: each window has
+  exactly one `monitor` assignment, so nothing actually duplicates).
+  AGS's own panel self-detects via an `srd --help` regex probe at
+  startup, so landing this needed no further coordination once installed.
+- **`srd subscribe` now emits a `monitors` event on hotplug**, the AGS
+  session's own low-priority ask, so its "display connected" strip can
+  drop a 4-second poll of `srd monitors` (was working around
+  `hypr.connect("monitor-added", ...)` being a dead handler id on any
+  non-Hyprland backend). Fourth independently-diffed event alongside
+  `clients`/`workspaces`/`keyboard_layout`, same `MonitorInfo` shape the
+  one-shot `"monitors"` command already returned (pulled both into one
+  shared `monitor_snapshot` function so they can't drift apart). Two new
+  tests.
+- Full 298-test workspace suite green; both `srdwm` and `srd` (the CLI)
+  built and installed.
+- **Follow-up on the border-curve fix above, caught by actually looking at
+  the pixels afterward rather than trusting the fix as shipped:**
+  cropping unconditionally whenever `!w.decorated` closed the wedge but
+  also flattened the curve on the (rarer) undecorated window whose
+  content-masking genuinely does succeed - confirmed on the same real
+  Firefox window. Fixed on the `udev` backend by computing whether this
+  window's content will actually be masked *this frame* (a cheap
+  cache-hit re-use of the same `rounded_content_buffer` call the
+  content-rendering step already makes later in the same loop, not a
+  second real masking pass) and using that, not the bare `decorated`
+  flag, to decide whether the border's extra rows are safe to show in
+  full. `winit`'s masking is GPU-shader-based and doesn't appear to share
+  this failure mode, so left on its simpler unconditional crop.
+- **A real srdwm bug, not just a client-side trap: `set_output_position`
+  to a negative origin made that output's own region unreachable by the
+  pointer.** Flagged by the AGS peer session after their own monitor-
+  layout panel's "extend left"/"extend above" placed a head at negative
+  x/y and the user immediately hit "clicked it now I can't go to other
+  monitor at all". Root cause: `UdevState::bounds()` computed only the
+  max right/bottom edge across every head, never the minimum x/y, so both
+  pointer-motion paths clamped into a `(0, w) x (0, h)` box regardless of
+  where any head actually sat. Fixed: `bounds()` now returns the real
+  `(min_x, min_y, max_x, max_y)` box; the arithmetic itself pulled into a
+  plain, tested free function (`bounds_of`) since `UdevHead` needs a real
+  DRM handle to construct otherwise. Five new unit tests. AGS's own
+  client-side normalization (always placing the arrangement's own
+  top-left at (0,0)) stays in place as good practice, but is no longer
+  load-bearing for correctness.
+- **A decorated window's titlebar had no top-edge resize zone at all,
+  only the two tiny diagonal corners.** Reported live, exactly: "we can't
+  resize tmux's window from top but we can in Firefox" - true, because
+  an *undecorated* window already had its own (narrower)
+  `UNDECORATED_TOP_RESIZE_MARGIN`, but a decorated one's titlebar band
+  claimed every button-free pixel as `Drag` unconditionally. Fixed with a
+  new `DECORATED_TOP_RESIZE_MARGIN` (reuses `RESIZE_MARGIN` outright --
+  unlike the undecorated case, there's no client content here to avoid
+  stealing a click from, since the whole band is srdwm's own drawn UI).
+  Checked *after* the button x-range tests, not before, so a button
+  sitting within the first few rows of the titlebar (true for all of
+  them) still always wins there - addresses the "account for the
+  buttons... not swallowing" half of the same request directly. Four new
+  tests; two pre-existing tests whose own fixed y-coordinates predated
+  this zone existing at all were updated to probe past it, not deleted.
+- **Resize configure throttling, matching niri.** A background research
+  fork compared srdwm's resize handling against niri's and found a real,
+  concrete gap beyond the already-fixed content-masking cost: `sync_
+  geometry` sent a fresh size-changing `xdg_toplevel.configure` on every
+  single pointer-motion tick of an active resize, with no check on
+  whether the client had caught up to the *previous* one - niri
+  explicitly throttles this (`window/mapped.rs`'s `ConfigureIntent::
+  Throttled`, its own comment: "some clients do not batch size requests,
+  leading to bad behavior with very fast input devices... this throttling
+  also helps interactive resize transactions preserve visual
+  consistency"). Implemented the same idea: a new `pending_size_configure`
+  map tracks a sent-but-not-yet-caught-up-to size per window, checked
+  against the client's real last-committed content size
+  (`w.geometry().size`) before sending another; bounded by a 100ms
+  `CONFIGURE_THROTTLE_TIMEOUT` so a client that never catches up for any
+  reason can't wedge resizing shut, the same self-healing shape as this
+  session's own DRM flip-pending watchdog. Deliberately doesn't touch
+  `redraw_decoration_buffer`'s own cadence - srdwm's border/titlebar
+  still tracks the live requested geometry every frame regardless of
+  whether the client's own content is throttled, so the *decoration*
+  stays visually smooth while backpressure applies only to the client-
+  facing protocol negotiation.
+- Full 306-test workspace suite green (no dedicated unit test for the
+  throttle itself - `sync_geometry` needs a live smithay surface/
+  toplevel to exercise, same testability ceiling as the rest of this
+  file); built, installed.
+- **Monitor enable/disable, the real DRM-level work explicitly requested
+  ("i think we should also be able to disconnect/use only one monitor
+  from there/toggle") after being deliberately scoped out of the earlier
+  monitor-layout batch.** New: `srd dispatch set output enabled
+  <name|id> <true|false>`. Reuses this backend's own existing hotplug
+  removal/bring-up code (`reprobe_outputs`'s two halves, now `pub(crate)`
+  as `disable_connector_by_name`/`enable_connector_by_name`) rather than
+  inventing a new mechanism - disabling genuinely destroys the `wl_
+  output` global, unmaps it, frees its DRM buffers, and rehomes its
+  windows, exactly like a real unplug; enabling re-probes and brings it
+  back up exactly like a real hotplug reconnect, since nothing about the
+  underlying hardware actually changed. A new `UdevState::
+  disabled_connectors` (by name) stops an *unrelated* hotplug event from
+  resurrecting a deliberately-disabled output.
+  - Keyed by connector **name**, not `MonitorId`, throughout the queue/
+    IPC layer (unlike `set_output_position`) - disabling removes the
+    output from `monitors()` entirely, so its id has nothing left to mean
+    by the time a caller wants to re-enable it; the name is the only
+    identifier that survives the round trip. `id` is still accepted on
+    the wire and resolved against the live list, but that only ever works
+    for the *disable* direction (the output is still live when you ask to
+    turn it off) - re-enabling requires the name.
+  - **Not done, deliberately out of scope for this pass:** a disabled
+    output isn't listed anywhere (`MonitorInfo`/the `monitors` subscribe
+    event only ever show *connected and enabled* outputs), so a UI has no
+    way to discover "this output exists but is off" to offer re-enabling
+    it - it has to already know the name from before disabling. Adding
+    an `enabled` field to `MonitorInfo` (and deciding whether disabled
+    outputs should even be listed at all) is a real wire-format change
+    worth coordinating with the AGS side rather than adding unilaterally.
+  - Real DRM hardware operation, tested via source review and the exact
+    same code paths a genuine unplug/hotplug already exercises live this
+    session, but not yet exercised through this *specific* new entry
+    point against real hardware - flagged here rather than claimed done
+    without that test.
+- Full 309-test workspace suite green; both binaries built and installed.
+
+## Open question, not yet acted on: does a glitch report predate these fixes or not?
+
+Reported live, still vague: "it currently glitches out" when moving a
+window between workspaces, plus "cursor glitches out when near
+decorations" and "more... in the extra monitor" - worse on the second
+monitor specifically. Given how many second-monitor-specific rendering
+bugs this session already found and fixed (the layer-element coordinate
+bug, the frame-callback coordinate bug, the border-wedge bug), this may
+already be resolved by fixes already installed and just needs a fresh
+restart + re-check, or may be a genuinely separate, still-open issue --
+undetermined either way pending a live look with everything from this
+session's later fixes actually running, or a screenshot/recording if it
+persists.
+
+## Real bugs, currently open
+
+- [ ] **Dock intermittently slow to appear / unresponsive to clicks** -
+      compositor-side leads (layer-shell hit-testing, stuck pointer
+      grabs, frame-callback starvation) all checked and came up clean.
+      dotfiles peer session has a concrete AGS-side lead
+      (`updateInputRegion` possibly computing a stale/zero region
+      mid-animation) - status unknown as of this entry, ask before
+      assuming it's still open.
+- [ ] **`POS-DIAG` repro not yet pinned down** - a right-click during an
+      active edge-resize drag was seen to never reach pointer-event
+      delivery (only its release did), consistent with one of three
+      "swallow the press" branches in `input.rs` firing unexpectedly, but
+      which one wasn't confirmed before the pattern stopped recurring.
+      Diagnostic logging is in place; needs the exact repro (right-click
+      mid-resize-drag) again to pin down.
+- [ ] **Firefox click-accuracy fix, unverified against a real click** -
+      see "Closed this session" above: fixed and justified from source,
+      but no reliable way to synthesize a precise click in this
+      environment to confirm live. Needs an actual physical click test.
+
+## Explicitly requested, not yet started
+- [ ] **Right-click on bare desktop** - no handler exists at all
+      currently; requested, scope/design never discussed.
+- [ ] **Window-management-policy comparison vs. GlazeWM, Awesome,
+      Openbox, RagnarWM** - all four cloned to `~/reference-wms/` and
+      ready; the *rendering* comparison used niri and mutter (the only
+      two of the six that do their own compositing at all) plus, this
+      session, niri's xdg-decoration negotiation specifically. If the ask
+      is really about layout/rules/keybinding conventions rather than
+      rendering, these four are sitting untouched for that.
+- [ ] **Real per-app window-size memory that survives a restart** -
+      what's built (`remembered_sizes` in `crates/core`) is session-
+      lifetime only, in-memory. Persisting it across a compositor restart
+      would need a real config-file-backed store; deliberately not built
+      speculatively, see that field's own doc comment.
+
+## Render pipeline - researched, ranked, not started
+
+From an earlier niri/mutter comparison fork (full detail in
+`SESSION_HANDOFF.md`, if it still exists by the time you read this):
+
+- [ ] Hardware DRM cursor plane (currently always software-composited) -
+      medium-large; needs real `DrmCompositor` plane scaffolding this
+      backend doesn't have yet.
+- [ ] Direct scanout for fullscreen clients (currently always goes
+      through full Pixman composite) - large, the natural next big
+      structural investment given this whole project's video-performance
+      history, but genuine architectural work, not a tweak.
+- [ ] `wp_linux_dmabuf` feedback (format/modifier negotiation tranches) -
+      low priority until direct scanout exists to negotiate for.
+- [ ] Explicit sync / VRR / HDR - real gaps, ranked below the above three;
+      all need the same `DrmCompositor`-style layer the backend doesn't
+      have.
+
+## Protocol gaps (from `PANEL_SUPPORT_TODO.md`, still genuinely open)
+
+Everything else in that doc is done - these five are the actual
+remainder, none blocking for the desktop-shell use case that doc was
+originally scoped around:
+
+- [ ] `zwlr_virtual_pointer_manager_v1` + `zwp_virtual_keyboard_manager_v1`
+      - needed by `ydotool` and any automated UI testing. Directly
+      relevant now: this session's own attempts to synthesize precise
+      clicks for verification were unreliable specifically because
+      `ydotool` has no protocol path that actually works well here; this
+      protocol pair is the real fix for that, not a nice-to-have.
+- [ ] `zwp_pointer_constraints_v1` + `zwp_relative_pointer_manager_v1` -
+      games (pointer lock/relative motion).
+- [ ] `wp_presentation` - accurate frame timing; low value on a fixed-
+      refresh, always-CPU-composited session (see the render-pipeline
+      section above, item 4).
+- [ ] `wp_single_pixel_buffer_v1`, `xdg_foreign_v2`.
+- [ ] `zwlr_screencopy_manager_v1` fix needs a fresh `grim` retest against
+      the real DRM/udev session (was only verified on the nested winit
+      backend at the time).
+
+## Confirmed-fixed, unverified against a real client (nothing to build, just need the test subject)
+
+- [ ] Classic Qt `appmenu-qt5` global menu - code fixed
+      (`appmenu_registrar`), but `appmenu-qt5` isn't packaged for Arch at
+      all (checked official repos and AUR); no live client to verify
+      against without pulling in much larger KDE integration packages,
+      deliberately not installed without asking first.
+- [ ] KDE Plasma Qt global menu (`_KDE_NET_WM_APPMENU_*` atoms) - same
+      "fixed, no test client available" situation.
+
+## Confirmed not fixable / deliberately out of scope (documented, closed, listed here only for completeness)
+
+- Nemo and most modern GTK3/GTK4 apps' global menu - confirmed via direct
+  D-Bus introspection that there's genuinely nothing on the bus to read;
+  universal across every Wayland compositor, not an srdwm gap.
+- Nemo's own titlebar duplication - unlike Firefox, Nemo draws its own
+  CSD headerbar *unconditionally*, ignoring xdg-decoration negotiation
+  entirely (confirmed live via screenshot). The Firefox-style "fix the
+  client's own preference" approach this session used doesn't apply;
+  `decorated = false` for Nemo (telling srdwm not to draw a second one on
+  top) remains the only real fix.
+- `move_terminal`'s full port - architectural mismatch (srdwm has one
+  flat workspace list shared by every monitor; the Hyprland original
+  assumed per-monitor workspace sets).
+- Per-output enable/disable - real DRM mode-setting, hardware-dependent,
+  not attempted.
+- Multi-GPU - only the primary GPU's connectors are driven; a GPU
+  appearing/disappearing is logged and ignored.
+- A native GUI settings app - never existed even as working code in the
+  legacy C++ project, pure design doc there too; not revisited.
+
+## Source docs, for the full story behind any item above
+
+- `SESSION_HANDOFF.md` - a prior session's own work in full technical
+  depth (ephemeral, meant to get replaced by whichever session writes the
+  next one - check whether it still describes current reality before
+  trusting it).
+- `MISSING.md` (`~/.config/srd/`) - gaps found porting from the user's
+  old Hyprland config, organized by how much each is missed.
+- `PANEL_SUPPORT_TODO.md` - desktop-shell/panel protocol support,
+  originally scoped around getting a GTK4 AGS panel running at all (it
+  now does).
+- `IMPLEMENTATION_STATUS.md` - the permanent architecture reference;
+  read this one for what srdwm supports overall, not just what's pending.

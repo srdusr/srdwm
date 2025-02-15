@@ -194,6 +194,41 @@ impl Engine {
         })?)
     }
 
+    /// `srd.monitor.split(name, parts[, direction])` - divides connector
+    /// `name`'s real output into `parts` equal logical monitors for
+    /// placement/tiling purposes ("monitors inside monitors"), no new
+    /// `wl_output` involved - see `srdwm_core::monitor::MonitorSplit`'s
+    /// own doc comment for exactly what that does and doesn't give a
+    /// client. `direction` is `"columns"` (default, side-by-side) or
+    /// `"rows"` (stacked); any other value is treated as `"columns"`
+    /// rather than erroring, same "malformed value falls back to a
+    /// sensible default" stance other config setters already take.
+    /// `parts <= 1` clears an existing split for `name`.
+    pub(super) fn fn_monitor_split(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, (name, parts, direction): (String, u32, Option<String>)| {
+            let rows = matches!(direction.as_deref(), Some("rows"));
+            state.borrow().wm.borrow_mut().set_monitor_split(name, parts, rows);
+            Ok(())
+        })?)
+    }
+
+    /// `srd.monitor.scale(name, factor)` - sets connector `name`'s
+    /// output scale, applied the next time a backend brings that head up
+    /// (startup, hotplug, or re-enable). A physically large monitor with
+    /// the same pixel count as a smaller one (a big low-DPI external
+    /// display next to a small high-DPI laptop panel, say) can run below
+    /// `1.0` to show more logical desktop space rather than just larger
+    /// text at the same resolution. `factor <= 0` clears an existing
+    /// override.
+    pub(super) fn fn_monitor_scale(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, (name, factor): (String, f64)| {
+            state.borrow().wm.borrow_mut().set_monitor_scale(name, factor);
+            Ok(())
+        })?)
+    }
+
     pub(super) fn fn_load(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |lua, module: String| {

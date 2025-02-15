@@ -15,3 +15,6 @@ path = "src/main.rs"
 # to run - see `socket_path()`'s doc comment. Deliberately still no JSON
 # dependency of its own; that stays server-side.
 srdwm-platform.workspace = true
+# Only for restoring default SIGPIPE disposition at startup - see `main`'s
+# own doc comment on why `srd subscribe` needs this.
+libc = "0.2"

@@ -89,9 +89,17 @@ pub(crate) fn register_session_notifier(handle: &LoopHandle<'static, CompState>,
 
                     // Some drivers reset mode-setting state across a VT
                     // switch; reassert every head before rendering again.
+                    //
+                    // The real connector and mode, not an empty connector
+                    // list and no mode - that shape is DRM/KMS's own way
+                    // to *disable* a CRTC, not reassert it, and was
+                    // confirmed live to leave the screen black after
+                    // switching back with no further VT switch, either
+                    // direction, able to recover it. See `UdevHead::mode`'s
+                    // own doc comment.
                     for head in &mut udev.heads {
                         let fb = head.buffers[head.front].fb;
-                        if let Err(e) = card.set_crtc(head.crtc, Some(fb), (0, 0), &[], None) {
+                        if let Err(e) = card.set_crtc(head.crtc, Some(fb), (0, 0), &[head.connector], Some(head.mode)) {
                             log::warn!("udev: failed to reassert crtc on resume: {e}");
                         }
                         // Force a full repaint: contents are undefined after
@@ -139,10 +147,41 @@ fn handle_libinput_event(state: &mut CompState, event: InputEvent<LibinputInputB
             let Some(udev) = state.udev.as_mut() else { return };
             let delta = event.delta();
             // Clamped to the union of every head, so the pointer travels
-            // between monitors instead of stopping at the first one's edge.
-            let (w, h) = udev.bounds();
-            udev.pointer_pos.x = (udev.pointer_pos.x + delta.x).clamp(0.0, (w - 1.0).max(0.0));
-            udev.pointer_pos.y = (udev.pointer_pos.y + delta.y).clamp(0.0, (h - 1.0).max(0.0));
+            // between monitors instead of stopping at the first one's edge
+            // - `min_x`/`min_y`, not a hardcoded `0.0` floor, so a head
+            // placed at a negative origin (a real "extend left"/"extend
+            // above" arrangement) is actually reachable. See `bounds`'s own
+            // doc comment for the live bug this fixes.
+            let (min_x, min_y, max_x, max_y) = udev.bounds();
+            udev.pointer_pos.x = (udev.pointer_pos.x + delta.x).clamp(min_x, (max_x - 1.0).max(min_x));
+            udev.pointer_pos.y = (udev.pointer_pos.y + delta.y).clamp(min_y, (max_y - 1.0).max(min_y));
+            let pos = udev.pointer_pos;
+            handle_pointer_position(state, pos, event.time_msec());
+        }
+        // Absolute-positioning devices (a touchscreen, a drawing tablet,
+        // and - confirmed live via a `WAYLAND_DEBUG=1` trace from a peer
+        // session - ydotool's virtual uinput device, used throughout this
+        // whole debugging effort) had no handler here at all: this match
+        // only ever covered `PointerMotion` (relative deltas), so every
+        // `PointerMotionAbsolute` event fell through to the catch-all
+        // below and was silently dropped. The winit (nested) backend
+        // already handles this exact event via `event.position_transformed`
+        // (see `winit/events.rs`'s matching arm); this is that same
+        // pattern for the bare-metal backend, which never got it. Uses the
+        // same union-of-every-head bounds `PointerMotion` above clamps
+        // into, so a single absolute-positioning device still addresses
+        // the whole multi-monitor span, not just the first head.
+        InputEvent::PointerMotionAbsolute { event } => {
+            let Some(udev) = state.udev.as_mut() else { return };
+            // `position_transformed` maps the device's own normalized
+            // [0,1] position into a `(0, 0)`-anchored size - offset by
+            // `min_x`/`min_y` afterward, same reasoning as `PointerMotion`
+            // above, so this still addresses a negative-origin head.
+            let (min_x, min_y, max_x, max_y) = udev.bounds();
+            let size = Size::from(((max_x - min_x) as i32, (max_y - min_y) as i32));
+            let pos = event.position_transformed(size);
+            udev.pointer_pos.x = (pos.x + min_x).clamp(min_x, (max_x - 1.0).max(min_x));
+            udev.pointer_pos.y = (pos.y + min_y).clamp(min_y, (max_y - 1.0).max(min_y));
             let pos = udev.pointer_pos;
             handle_pointer_position(state, pos, event.time_msec());
         }

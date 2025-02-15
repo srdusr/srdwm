@@ -53,6 +53,9 @@ pub struct IpcServer {
     /// `last_broadcast`'s keyboard-layout equivalent - see
     /// `KeyboardLayoutEvent`'s own doc comment.
     last_broadcast_keyboard_layout: String,
+    /// `last_broadcast`'s monitor equivalent - see `MonitorsEvent`'s own
+    /// doc comment.
+    last_broadcast_monitors: Vec<MonitorInfo>,
 }
 
 impl IpcServer {
@@ -85,6 +88,7 @@ impl IpcServer {
             last_broadcast: Vec::new(),
             last_broadcast_workspaces: Vec::new(),
             last_broadcast_keyboard_layout: String::new(),
+            last_broadcast_monitors: Vec::new(),
         })
     }
 
@@ -198,6 +202,16 @@ impl IpcServer {
                 }
             }
             self.last_broadcast_keyboard_layout = current_layout;
+        }
+        let current_monitors = monitor_snapshot(wm);
+        if current_monitors != self.last_broadcast_monitors {
+            if !self.subscribers.is_empty() {
+                if let Ok(mut out) = serde_json::to_vec(&MonitorsEvent { event: "monitors", monitors: &current_monitors }) {
+                    out.push(b'\n');
+                    self.subscribers.retain_mut(|s| s.write_all(&out).is_ok());
+                }
+            }
+            self.last_broadcast_monitors = current_monitors;
         }
         self.subscribers.extend(new_subscribers);
         dirty
@@ -330,6 +344,23 @@ struct WorkspacesResponse {
     workspaces: Vec<WorkspaceInfo>,
 }
 
+/// `"settings"`'s one-shot reply - the live-settable toggles `"set"`
+/// accepts, so a migrated toggle script (night-light, reading-mode,
+/// hypr-performance-profile) can read current state back instead of
+/// tracking its own on/off marker file, the same gap `hyprctl getoption
+/// -j` used to fill for the Hyprland scripts these replaced.
+/// `rounded_corners` is `null` for "never explicitly set" (see
+/// `WindowManager::rounded_corners_enabled`'s own doc comment) --
+/// `Option<bool>` serializes to exactly that.
+#[derive(Serialize)]
+struct SettingsResponse {
+    shadows: bool,
+    rounded_corners: Option<bool>,
+    animations: bool,
+    night_light: bool,
+    reading_mode: bool,
+}
+
 /// `"keyboard_layout"`'s one-shot reply shape - the active XKB layout's
 /// own name (e.g. `"English (US)"`), whatever `WindowManager::keyboard_
 /// layout` currently holds. Added for an AGS peer session's keyboard-
@@ -359,6 +390,18 @@ struct WorkspaceInfo {
     name: String,
     layout: String,
     active: bool,
+    // The monitor currently showing this workspace, if any - `None` when
+    // it isn't visible anywhere right now. In shared mode (`workspace.
+    // per_monitor` off, the default) every monitor shows the same
+    // workspace, so at most one workspace ever has this set; in per-
+    // monitor mode each monitor can be on a different one, so more than
+    // one entry here can carry a (different) monitor id at once. Requested
+    // by an AGS peer session alongside `MonitorInfo::active_workspace`
+    // below - the same fact, indexed from the other direction, so a
+    // caller can look it up from whichever side (a workspace pill, or a
+    // per-monitor picker) it already has in hand without cross-
+    // referencing the other endpoint itself.
+    monitor: Option<srdwm_core::MonitorId>,
 }
 
 /// One entry per `srdwm_core::Monitor` - both rects a panel/dock actually
@@ -367,25 +410,93 @@ struct WorkspaceInfo {
 /// AGS peer session after two separate live-debugging rounds (maximize-
 /// past-dock, fullscreen-past-dock) each took several back-and-forth turns
 /// that a single read of this would have settled immediately.
-#[derive(Serialize)]
+///
+/// Every geometry field here - `x`/`y`/`width`/`height` and `full_x`/
+/// `full_y`/`full_width`/`full_height` alike - is in the same space:
+/// *physical* pixels, matching the real output mode, not the logical
+/// points a Wayland client itself sees. `srd dispatch set output
+/// position` takes the same physical space, so an arrangement computed
+/// purely from fields on this struct (chaining outputs by `full_width`,
+/// say) can be sent straight back with no conversion. `scale` is the one
+/// exception - multiply a logical value by it to get physical, or divide
+/// physical by it to get logical - needed only when a caller has to
+/// reconcile this compositor's own physical bookkeeping against a real
+/// Wayland client's logical one (window positions/sizes a client reports
+/// about itself, for instance). See `srdwm_core::monitor::Monitor::
+/// scale`'s own doc comment for the live bug this was added to fix: an
+/// AGS peer session's own arrangement math, built purely from this
+/// struct's fields, silently opened a dead gap between two monitors on
+/// any output whose scale wasn't exactly `1.0`, because nothing here told
+/// it a non-`1.0` scale was even in play.
+#[derive(Serialize, Clone, PartialEq)]
 struct MonitorInfo {
     id: u32,
     name: String,
     primary: bool,
-    // The usable area: the output shrunk by any layer-shell exclusive
-    // zone currently reserved on it (a bar/dock's `set_exclusive_zone`).
-    // What `toggle_maximize`/new-window placement/tiling all target.
+    // The usable area (work area): the output shrunk by any layer-shell
+    // exclusive zone currently reserved on it (a bar/dock's `set_
+    // exclusive_zone`). What `toggle_maximize`/new-window placement/
+    // tiling all target - NOT what a display-arrangement UI should
+    // position outputs by. Confirmed live: an AGS peer session's monitor-
+    // layout panel originally read x/y/width/height here for positioning
+    // outputs relative to each other and got every layout offset by
+    // whatever the bar's own reserved zone happened to be (34px, on this
+    // machine) - the bare, unprefixed names here read as "the output"
+    // rather than "the output's usable sub-rect", which is exactly the
+    // trap. Position outputs using `full_x`/`full_y`/`full_width`/
+    // `full_height` below instead.
     x: i32,
     y: i32,
     width: u32,
     height: u32,
     // The output's true full rect, ignoring any exclusive zone - what
-    // `toggle_fullscreen` targets. Equal to x/y/width/height above when
-    // nothing on this monitor currently reserves any space at all.
+    // `toggle_fullscreen` targets, and what a display-arrangement/output-
+    // positioning UI should read (`set_output_position` moves this rect,
+    // not the work-area one above). Equal to x/y/width/height above when
+    // nothing on this monitor currently reserves any space at all, which
+    // is exactly why the mistake above is easy to make and easy to miss
+    // in testing - it only shows up once something (a bar, a dock) is
+    // actually reserving space.
     full_x: i32,
     full_y: i32,
     full_width: u32,
     full_height: u32,
+    // `true` for every genuinely live output. `false` marks an
+    // administratively-disabled-but-still-connected one (`srd dispatch
+    // set output enabled <name> false`) - requested directly by the AGS
+    // peer session so their monitor-layout panel has a name/row to
+    // re-enable by, rather than the output vanishing from this list
+    // entirely the moment the control that turns it off is used. A
+    // genuinely *unplugged* output, disabled or not, still just
+    // disappears from this list as before - `enabled: false` means "off,
+    // but still here to turn back on", not "not connected".
+    enabled: bool,
+    // `true` when this entry is one part of a real output divided by
+    // `srd.monitor.split` - not a second `wl_output`, not a second
+    // physical connector. See `srdwm_core::monitor::Monitor::split`'s own
+    // doc comment: a display-arrangement UI should not offer to move or
+    // extend a physical arrangement onto one of these, since there is no
+    // independent output behind it, only a placement-only division of a
+    // real one.
+    split: bool,
+    // This output's real scale factor - `1.0` for an unscaled one. See
+    // this struct's own doc comment for what it converts between and why.
+    scale: f64,
+    // The workspace id currently showing on this monitor - `Window
+    // Manager::workspace_for_monitor`, keyed by monitor id, not name (a
+    // display-arrangement UI already has this monitor's own id in hand
+    // from this same entry). Every monitor has exactly one value here even
+    // in shared mode (`workspace.per_monitor` off): they all report the
+    // same id, `current_workspace`, rather than this field going missing
+    // just because it isn't independently meaningful yet - a caller
+    // shouldn't need to know which mode is active just to read this.
+    // `0` (an id that can never be real - workspace ids are 1-based) for
+    // a disabled-but-listed output below: it shows nothing, so there is no
+    // real answer, and `0` reads unambiguously as "none" rather than
+    // silently reusing `current_workspace`, which that output isn't
+    // actually displaying. See `WorkspaceInfo::monitor` for the same fact
+    // indexed from the other direction.
+    active_workspace: usize,
 }
 
 /// Pushed to every subscriber (and used as `subscribe`'s own initial
@@ -424,6 +535,21 @@ struct KeyboardLayoutEvent<'a> {
     layout: &'a str,
 }
 
+/// A fourth independently-diffed `subscribe` event - a monitor connecting
+/// or disconnecting touches neither a window, a workspace, nor the
+/// keyboard layout, so it needs the same dedicated change-diff those three
+/// already get. Requested by an AGS peer session so a display-arrangement
+/// panel's "output connected" indicator can drop its own 4-second poll of
+/// `"monitors"` (worked, but `hypr.connect("monitor-added", ...)` - the
+/// signal this shell normally listens for - is a dead handler id on any
+/// backend but Hyprland, since `lib/compositor.ts` swallows unknown signal
+/// names by design rather than erroring).
+#[derive(Serialize)]
+struct MonitorsEvent<'a> {
+    event: &'static str,
+    monitors: &'a [MonitorInfo],
+}
+
 /// The same per-window snapshot both `"clients"` and `"subscribe"`/the
 /// change-diff in `IpcServer::poll` build - pulled out so the two can
 /// never silently drift into reporting different fields.
@@ -458,8 +584,28 @@ fn client_snapshot(wm: &std::rc::Rc<std::cell::RefCell<WindowManager>>) -> Vec<C
 /// reporting different fields for the same state.
 fn workspace_snapshot(wm: &std::rc::Rc<std::cell::RefCell<WindowManager>>) -> Vec<WorkspaceInfo> {
     let wm = wm.borrow();
-    let current = wm.current_workspace();
-    wm.workspaces().iter().map(|w| WorkspaceInfo { id: w.id, name: w.name.clone(), layout: w.layout.clone(), active: w.id == current }).collect()
+    // `is_workspace_visible`, not a single `id == current` comparison: in
+    // `workspace.per_monitor` mode more than one workspace can be showing
+    // at once (one per monitor), each needing its own `active: true` here
+    // - `WorkspaceInfo::active` is already a plain per-workspace bool, not
+    // "the one active id", so this needed no wire-format change at all,
+    // just computing the flag correctly for both modes. Shared mode
+    // (`per_monitor_workspaces` off, the default) behaves exactly as
+    // before: `is_workspace_visible` reduces straight back to the same
+    // `id == current` check.
+    let monitors = wm.monitors();
+    wm.workspaces()
+        .iter()
+        .map(|w| {
+            // First monitor (if any) currently showing this workspace --
+            // see `WorkspaceInfo::monitor`'s own doc comment for why "first"
+            // rather than "the" is the honest framing (shared mode never has
+            // more than one; per-monitor mode could, in principle, if a
+            // caller pointed two monitors at the same workspace id).
+            let monitor = monitors.iter().find(|m| wm.workspace_for_monitor(m.id) == w.id).map(|m| m.id);
+            WorkspaceInfo { id: w.id, name: w.name.clone(), layout: w.layout.clone(), active: wm.is_workspace_visible(w.id), monitor }
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -467,6 +613,86 @@ struct OkResponse {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'static str>,
+}
+
+/// Shared by the one-shot `"monitors"` reply and `IpcServer::poll`'s own
+/// subscribe-broadcast diff below, so a hotplug event and a plain query
+/// can never quietly drift into reporting different fields for the same
+/// monitor - the same reasoning `client_snapshot`/`workspace_snapshot`
+/// already established for their own data.
+/// Resolves a dispatch's target monitor from whichever of `id`/`name` it
+/// actually sent - shared by `set_output_position` and `set_output_
+/// enabled`, both of which accept either. `id` wins if both are somehow
+/// given (matching the generic `id` field every other dispatch already
+/// reads); `name` is resolved against the live monitor list, matching
+/// what `srd monitors`/`wlr-output-management-v1` both key on
+/// (`eDP-1`, not an arbitrary index) - a display-
+/// arrangement UI reasonably lists outputs by that name rather than
+/// making a caller look its own id up first just to turn around and send
+/// it straight back.
+fn resolve_monitor_id(wm: &std::rc::Rc<std::cell::RefCell<WindowManager>>, id: Option<WindowId>, name: Option<&str>) -> Option<srdwm_core::MonitorId> {
+    match id {
+        Some(id) => Some(id as srdwm_core::MonitorId),
+        None => name.and_then(|name| wm.borrow().monitors().iter().find(|m| m.name == name).map(|m| m.id)),
+    }
+}
+
+fn monitor_snapshot(wm: &std::rc::Rc<std::cell::RefCell<WindowManager>>) -> Vec<MonitorInfo> {
+    let wm = wm.borrow();
+    let live = wm.monitors().iter().map(|m| MonitorInfo {
+        id: m.id,
+        name: m.name.clone(),
+        primary: m.primary,
+        x: m.geometry.x,
+        y: m.geometry.y,
+        width: m.geometry.width,
+        height: m.geometry.height,
+        full_x: m.full_geometry.x,
+        full_y: m.full_geometry.y,
+        full_width: m.full_geometry.width,
+        full_height: m.full_geometry.height,
+        enabled: true,
+        split: m.split,
+        scale: m.scale,
+        active_workspace: wm.workspace_for_monitor(m.id),
+    });
+    // Disabled-but-still-connected outputs, appended rather than merged in
+    // by name - see `MonitorInfo::enabled`'s own doc comment for why
+    // these are listed at all. `id: u32::MAX`: a disabled output has no
+    // real backend id any more (see `WindowManager::request_output_
+    // enabled`'s own doc comment on why re-enabling has to go by name),
+    // so this is a deliberate, obviously-not-a-real-index sentinel rather
+    // than reusing `0`/whatever the id happened to be before disabling,
+    // which could collide with (or be mistaken for) a real live monitor's
+    // own id.
+    let disabled = wm.disabled_monitors().map(|(name, m)| MonitorInfo {
+        id: u32::MAX,
+        name: name.to_string(),
+        primary: m.primary,
+        x: m.geometry.x,
+        y: m.geometry.y,
+        width: m.geometry.width,
+        height: m.geometry.height,
+        full_x: m.full_geometry.x,
+        full_y: m.full_geometry.y,
+        full_width: m.full_geometry.width,
+        full_height: m.full_geometry.height,
+        enabled: false,
+        split: false,
+        // Not tracked for a disabled output - `DisabledMonitor` keeps a
+        // last-known geometry snapshot but not a scale, and re-deriving
+        // one from stale connector state isn't worth the plumbing for an
+        // output that's off. `1.0` here means "unknown", not "confirmed
+        // unscaled" - a caller re-arranging outputs shouldn't trust it
+        // until this one is live again and `srd monitors` reports its
+        // real value.
+        scale: 1.0,
+        // See `MonitorInfo::active_workspace`'s own doc comment - `0` for
+        // "shows nothing, not tracked" the same way `id: u32::MAX` above
+        // is a deliberate not-a-real-value sentinel for this same entry.
+        active_workspace: 0,
+    });
+    live.chain(disabled).collect()
 }
 
 fn ok() -> Vec<u8> {
@@ -506,34 +732,25 @@ fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<WindowManager
     match cmd {
         "clients" => (serde_json::to_vec(&ClientsResponse { clients: client_snapshot(wm) }).unwrap_or_default(), false),
         "workspaces" => (serde_json::to_vec(&WorkspacesResponse { workspaces: workspace_snapshot(wm) }).unwrap_or_default(), false),
-        "monitors" => {
-            let monitors: Vec<MonitorInfo> = wm
-                .borrow()
-                .monitors()
-                .iter()
-                .map(|m| MonitorInfo {
-                    id: m.id,
-                    name: m.name.clone(),
-                    primary: m.primary,
-                    x: m.geometry.x,
-                    y: m.geometry.y,
-                    width: m.geometry.width,
-                    height: m.geometry.height,
-                    full_x: m.full_geometry.x,
-                    full_y: m.full_geometry.y,
-                    full_width: m.full_geometry.width,
-                    full_height: m.full_geometry.height,
-                })
-                .collect();
-            (serde_json::to_vec(&MonitorsResponse { monitors }).unwrap_or_default(), false)
+        "settings" => {
+            let wm = wm.borrow();
+            let settings = SettingsResponse {
+                shadows: wm.shadows_enabled,
+                rounded_corners: wm.rounded_corners_enabled,
+                animations: wm.animations_enabled,
+                night_light: wm.color_filter == srdwm_core::ColorFilter::NightLight,
+                reading_mode: wm.color_filter == srdwm_core::ColorFilter::ReadingMode,
+            };
+            (serde_json::to_vec(&settings).unwrap_or_default(), false)
         }
+        "monitors" => (serde_json::to_vec(&MonitorsResponse { monitors: monitor_snapshot(wm) }).unwrap_or_default(), false),
         // The connection is handed off to `IpcServer::subscribers` by the
         // caller (`poll`, which is the only place that can see the raw
         // `cmd` string this deep call already consumed) right after this
         // reply is written - this arm only has to produce that reply, in
         // the same `ClientsEvent` shape every later push uses.
         "subscribe" => {
-            // Three JSON objects, not one: `poll` writes this response plus
+            // Four JSON objects, not one: `poll` writes this response plus
             // one trailing `\n` verbatim, so an embedded `\n` between each
             // here is all it takes to hand a fresh subscriber every initial
             // snapshot as its own line - exactly the shape every later
@@ -542,11 +759,14 @@ fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<WindowManager
             let clients = client_snapshot(wm);
             let workspaces = workspace_snapshot(wm);
             let layout = wm.borrow().keyboard_layout.clone();
+            let monitors = monitor_snapshot(wm);
             let mut out = serde_json::to_vec(&ClientsEvent { event: "clients", clients: &clients }).unwrap_or_default();
             out.push(b'\n');
             out.extend(serde_json::to_vec(&WorkspacesEvent { event: "workspaces", workspaces: &workspaces }).unwrap_or_default());
             out.push(b'\n');
             out.extend(serde_json::to_vec(&KeyboardLayoutEvent { event: "keyboard_layout", layout: &layout }).unwrap_or_default());
+            out.push(b'\n');
+            out.extend(serde_json::to_vec(&MonitorsEvent { event: "monitors", monitors: &monitors }).unwrap_or_default());
             (out, false)
         }
         "keyboard_layout" => {
@@ -668,7 +888,29 @@ fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<WindowManager
         // already reads serves both, same as every other dispatch arm.
         "activate_workspace" => {
             let Some(id) = id else { return (err("missing id"), false) };
-            wm.borrow_mut().switch_workspace(id as srdwm_core::WorkspaceId);
+            let before = wm.borrow().current_workspace();
+            // `switch_workspace_on_monitor` falls straight through to the
+            // ordinary shared-mode `switch_workspace` when `workspace.
+            // per_monitor` is off, so this is the one call site that works
+            // correctly either way - no branching on the config flag
+            // needed here. The monitor it applies to in per-monitor mode:
+            // the focused window's own monitor, falling back to the
+            // primary monitor if nothing is focused (an empty desktop) --
+            // the same "whichever output a keybinding should apply to"
+            // choice real per-output-aware WMs (Hyprland, niri) make.
+            {
+                let mut wm = wm.borrow_mut();
+                let monitor = wm
+                    .focused_id()
+                    .and_then(|f| wm.window(f))
+                    .map(|w| w.monitor)
+                    .or_else(|| wm.primary_monitor().map(|m| m.id))
+                    .unwrap_or(0);
+                wm.switch_workspace_on_monitor(id as srdwm_core::WorkspaceId, monitor);
+            }
+            let after = wm.borrow().current_workspace();
+            let known: Vec<_> = wm.borrow().workspaces().iter().map(|w| w.id).collect();
+            log::warn!("WS-IPC-DIAG requested_id={id} before={before} after={after} known_ids={known:?}");
             (ok(), true)
         }
         // `{"cmd":"set_output_position","id":<monitor id>,"x":<i32>,"y":<i32>}`
@@ -701,11 +943,52 @@ fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<WindowManager
         // this genuinely will change what's on screen once the backend
         // catches up, just not synchronously within this call.
         "set_output_position" => {
-            let Some(id) = id else { return (err("missing id"), false) };
+            // Accepts a monitor `name` as well as the plain `id` every
+            // other dispatch already reads - `srd monitors`/`wlr-output-
+            // management-v1` both key on name first (`eDP-1`,
+            // not an arbitrary index), and a display-arrangement UI
+            // reasonably lists outputs by that name rather than making a
+            // caller look its own id up first just to turn around and send
+            // it straight back. `id` still wins if both are somehow given.
+            let Some(monitor_id) = resolve_monitor_id(wm, id, req.get("name").and_then(|v| v.as_str())) else {
+                return (err("missing id or a name matching a connected monitor"), false);
+            };
             let (Some(x), Some(y)) = (req.get("x").and_then(|v| v.as_i64()), req.get("y").and_then(|v| v.as_i64())) else {
                 return (err("missing x/y"), false);
             };
-            wm.borrow_mut().request_output_position(id as srdwm_core::MonitorId, x as i32, y as i32);
+            wm.borrow_mut().request_output_position(monitor_id, x as i32, y as i32);
+            (ok(), true)
+        }
+        // `{"cmd":"set_output_enabled","id"|"name":...,"enabled":<bool>}`
+        // - "primary only"/a per-display toggle, the two AGS monitor-
+        // layout panel rows gated pending this. Disabling and re-enabling
+        // reuse this backend's own existing hotplug-removal/bring-up code
+        // paths rather than a new mechanism (see the udev platform's own
+        // drain site) - the same real, already-tested steps a genuine
+        // unplug/replug already goes through, just triggered
+        // administratively instead of by a real DRM event.
+        //
+        // Resolved to a *name* here, unlike `set_output_position` (which
+        // stays on `resolve_monitor_id`/plain `MonitorId`) - see
+        // `WindowManager::request_output_enabled`'s own doc comment for
+        // why: disabling removes the output from `monitors()` entirely, so
+        // its id has nothing left to mean by the time a caller wants to
+        // *re-enable* it. `id` is still accepted, resolved against the
+        // live list the same way `resolve_monitor_id` does, but that only
+        // ever works for the disable direction (the output is still live
+        // when you ask to turn it off) - re-enabling a currently-disabled
+        // output needs its `name` given directly, since no live entry
+        // exists to resolve an `id` against at that point.
+        "set_output_enabled" => {
+            let name = match req.get("name").and_then(|v| v.as_str()) {
+                Some(name) => Some(name.to_string()),
+                None => id.and_then(|id| wm.borrow().monitors().iter().find(|m| m.id == id as srdwm_core::MonitorId).map(|m| m.name.clone())),
+            };
+            let Some(name) = name else { return (err("missing name, or an id matching a currently-connected monitor"), false) };
+            let Some(enabled) = req.get("enabled").and_then(|v| v.as_bool()) else {
+                return (err("missing enabled"), false);
+            };
+            wm.borrow_mut().request_output_enabled(name, enabled);
             (ok(), true)
         }
         // `{"cmd":"capture_workspace","id":<workspace id>,"path":<string>,
@@ -879,7 +1162,35 @@ fn handle_set(req: &serde_json::Value, wm: &std::rc::Rc<std::cell::RefCell<Windo
             wm.borrow_mut().rounded_corners_enabled = Some(v);
             (ok(), true)
         }
+        // Same shape as `shadows` - `WindowManager::animations_enabled`
+        // already existed (config-settable at startup via `general.
+        // animations`) but had no live IPC toggle, unlike shadows/rounded
+        // corners which did. Added specifically so a performance-profile
+        // script (ported from a Hyprland one that used `hyprctl keyword
+        // animations:enabled`) has something real to call instead of
+        // silently no-op-ing under srdwm.
+        "animations" => {
+            let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("animations needs a boolean value"), false) };
+            wm.borrow_mut().animations_enabled = v;
+            (ok(), true)
+        }
         "blur" => (err("blur is not supported - no GPU shader path on this compositor's software renderer yet"), false),
+        // The two ported Hyprland `decoration:screen_shader` scripts --
+        // mutually exclusive by construction (`srdwm_core::ColorFilter` is
+        // one enum, not two bools), matching the original scripts' own
+        // "both point at the same single shader slot" behaviour: setting
+        // either key `true` clears the other, and `false` always clears to
+        // `None` regardless of which one (if any) was actually active.
+        "night_light" => {
+            let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("night_light needs a boolean value"), false) };
+            wm.borrow_mut().color_filter = if v { srdwm_core::ColorFilter::NightLight } else { srdwm_core::ColorFilter::None };
+            (ok(), true)
+        }
+        "reading_mode" => {
+            let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("reading_mode needs a boolean value"), false) };
+            wm.borrow_mut().color_filter = if v { srdwm_core::ColorFilter::ReadingMode } else { srdwm_core::ColorFilter::None };
+            (ok(), true)
+        }
         _ => (err("unknown set key"), false),
     }
 }
@@ -924,23 +1235,63 @@ mod tests {
         client.write_all(b"{\"cmd\":\"subscribe\"}\n").unwrap();
         server.poll(&wm);
 
-        // Three lines, not one: a client snapshot, a workspace snapshot,
-        // and a keyboard-layout snapshot, same as every later push - see
-        // the `"subscribe"` match arm's own doc comment for why all three
-        // are sent immediately rather than waiting for the first real
-        // change of each kind.
+        // Four lines, not one: a client snapshot, a workspace snapshot, a
+        // keyboard-layout snapshot, and a monitor snapshot, same as every
+        // later push - see the `"subscribe"` match arm's own doc comment
+        // for why all four are sent immediately rather than waiting for
+        // the first real change of each kind.
         let clients_line = read_line(&mut reader);
         assert!(clients_line.contains(r#""event":"clients""#));
         assert!(clients_line.contains(r#""clients":[]"#));
 
         let workspaces_line = read_line(&mut reader);
         assert!(workspaces_line.contains(r#""event":"workspaces""#));
-        assert!(workspaces_line.contains(r#""id":0"#));
+        assert!(workspaces_line.contains(r#""id":1"#));
         assert!(workspaces_line.contains(r#""active":true"#));
 
         let layout_line = read_line(&mut reader);
         assert!(layout_line.contains(r#""event":"keyboard_layout""#));
         assert!(layout_line.contains(r#""layout":""#));
+
+        let monitors_line = read_line(&mut reader);
+        assert!(monitors_line.contains(r#""event":"monitors""#));
+        assert!(monitors_line.contains(r#""monitors":[]"#));
+    }
+
+    #[test]
+    fn subscribe_then_a_monitor_change_pushes_a_fresh_monitors_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+        client.write_all(b"{\"cmd\":\"subscribe\"}\n").unwrap();
+        server.poll(&wm);
+        let _ = read_line(&mut reader); // clients
+        let _ = read_line(&mut reader); // workspaces
+        let _ = read_line(&mut reader); // keyboard_layout
+        let _ = read_line(&mut reader); // monitors (empty)
+
+        wm.borrow_mut().set_monitors(vec![{
+            let mut m = srdwm_core::Monitor::new(0, "HDMI-A-1", srdwm_core::Rect::new(0, 0, 1920, 1080));
+            m.primary = true;
+            m
+        }]);
+        server.poll(&wm);
+
+        // A real monitor existing for the first time also changes which
+        // monitor (if any) `WorkspaceInfo::monitor` reports for the
+        // now-visible workspace - `None` (no monitor existed to show it)
+        // to `Some(0)` - so a "workspaces" event fires too, ahead of
+        // "monitors" in `poll`'s own emission order. Drained here, not
+        // asserted on: this test is about the monitors event specifically.
+        let workspaces_line = read_line(&mut reader);
+        assert!(workspaces_line.contains(r#""event":"workspaces""#));
+
+        let line = read_line(&mut reader);
+        assert!(line.contains(r#""event":"monitors""#));
+        assert!(line.contains(r#""name":"HDMI-A-1""#));
     }
 
     #[test]
@@ -956,6 +1307,7 @@ mod tests {
         let _initial_clients = read_line(&mut reader);
         let _initial_workspaces = read_line(&mut reader);
         let _initial_layout = read_line(&mut reader);
+        let _initial_monitors = read_line(&mut reader);
 
         {
             let mut wm = wm.borrow_mut();
@@ -983,8 +1335,9 @@ mod tests {
         let _initial_clients = read_line(&mut reader);
         let _initial_workspaces = read_line(&mut reader);
         let _initial_layout = read_line(&mut reader);
+        let _initial_monitors = read_line(&mut reader);
 
-        wm.borrow_mut().switch_workspace(1);
+        wm.borrow_mut().switch_workspace(2);
         server.poll(&wm);
 
         // Switching touches no window, so the clients list is unchanged --
@@ -992,7 +1345,7 @@ mod tests {
         // clients one that never comes.
         let pushed = read_line(&mut reader);
         assert!(pushed.contains(r#""event":"workspaces""#));
-        assert!(pushed.contains(r#""id":1,"name":"2","layout":"dynamic","active":true"#));
+        assert!(pushed.contains(r#""id":2,"name":"2","layout":"dynamic","active":true"#));
     }
 
     #[test]
@@ -1008,6 +1361,7 @@ mod tests {
         let _initial_clients = read_line(&mut reader);
         let _initial_workspaces = read_line(&mut reader);
         let _initial_layout = read_line(&mut reader);
+        let _initial_monitors = read_line(&mut reader);
 
         // Nothing changed between these two polls - a second push would
         // show up as a second readable line the client isn't expecting.
@@ -1034,7 +1388,90 @@ mod tests {
 
         let line = read_line(&mut reader);
         assert!(!line.contains(r#""event""#), "one-shot command, same plain shape as \"clients\"");
-        assert!(line.contains(r#""id":0,"name":"1","layout":"dynamic","active":true"#));
+        assert!(line.contains(r#""id":1,"name":"1","layout":"dynamic","active":true"#));
+    }
+
+    #[test]
+    fn workspaces_and_monitors_agree_on_which_monitor_shows_which_workspace() {
+        // `WorkspaceInfo::monitor` and `MonitorInfo::active_workspace` are
+        // the same fact from either direction - requested by an AGS peer
+        // session so a workspace pill or a per-monitor picker can each
+        // read it from whichever side it already has in hand. Default
+        // `WindowManager::new()` starts on workspace `1` with no real
+        // monitor set up yet; adding one real monitor (id `0`) must make
+        // workspace `1`'s own `monitor` read back `0`, and that monitor's
+        // `active_workspace` read back `1`.
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        wm.borrow_mut().set_monitors(vec![srdwm_core::Monitor::new(0, "eDP-1", srdwm_core::Rect::new(0, 0, 1920, 1080))]);
+
+        // Two separate connections, not one reused - a one-shot command's
+        // connection closes after its reply (see `a_oneshot_clients_
+        // request_still_closes_the_connection_as_before`), so a second
+        // command on the same `client` would just hit a broken pipe.
+        let mut workspaces_client = UnixStream::connect(&server.path).unwrap();
+        let mut workspaces_reader = std::io::BufReader::new(workspaces_client.try_clone().unwrap());
+        workspaces_client.write_all(b"{\"cmd\":\"workspaces\"}\n").unwrap();
+        server.poll(&wm);
+        let workspaces_line = read_line(&mut workspaces_reader);
+        assert!(workspaces_line.contains(r#""id":1,"name":"1","layout":"dynamic","active":true,"monitor":0"#));
+
+        let mut monitors_client = UnixStream::connect(&server.path).unwrap();
+        let mut monitors_reader = std::io::BufReader::new(monitors_client.try_clone().unwrap());
+        monitors_client.write_all(b"{\"cmd\":\"monitors\"}\n").unwrap();
+        server.poll(&wm);
+        let monitors_line = read_line(&mut monitors_reader);
+        assert!(monitors_line.contains(r#""name":"eDP-1""#));
+        assert!(monitors_line.contains(r#""active_workspace":1"#));
+    }
+
+    #[test]
+    fn settings_command_reflects_a_prior_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+
+        // A fresh connection per command - one-shot commands close the
+        // connection after replying (see `a_oneshot_clients_request_
+        // still_closes_the_connection_as_before`), so a second write on
+        // the same client after its first reply hits a closed socket.
+        let mut set_client = UnixStream::connect(&server.path).unwrap();
+        set_client.write_all(b"{\"cmd\":\"set\",\"key\":\"night_light\",\"value\":true}\n").unwrap();
+        server.poll(&wm);
+        let _set_reply = read_line(&mut std::io::BufReader::new(set_client.try_clone().unwrap()));
+
+        let mut settings_client = UnixStream::connect(&server.path).unwrap();
+        settings_client.write_all(b"{\"cmd\":\"settings\"}\n").unwrap();
+        server.poll(&wm);
+        let line = read_line(&mut std::io::BufReader::new(settings_client));
+        assert!(!line.contains(r#""event""#), "one-shot command, same plain shape as \"clients\"");
+        assert!(line.contains(r#""night_light":true"#));
+        assert!(line.contains(r#""reading_mode":false"#), "night_light and reading_mode share one slot, so setting one leaves the other off");
+    }
+
+    #[test]
+    fn setting_night_light_then_reading_mode_clears_night_light() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        client.write_all(b"{\"cmd\":\"set\",\"key\":\"night_light\",\"value\":true}\n").unwrap();
+        server.poll(&wm);
+        let _ = read_line(&mut std::io::BufReader::new(client));
+
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        client.write_all(b"{\"cmd\":\"set\",\"key\":\"reading_mode\",\"value\":true}\n").unwrap();
+        server.poll(&wm);
+        let _ = read_line(&mut std::io::BufReader::new(client));
+
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        client.write_all(b"{\"cmd\":\"settings\"}\n").unwrap();
+        server.poll(&wm);
+        let line = read_line(&mut std::io::BufReader::new(client));
+        assert!(line.contains(r#""night_light":false"#));
+        assert!(line.contains(r#""reading_mode":true"#));
     }
 
     #[test]
@@ -1082,11 +1519,156 @@ mod tests {
 
         let mut client = UnixStream::connect(&server.path).unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
-        client.write_all(b"{\"cmd\":\"activate_workspace\",\"id\":1}\n").unwrap();
+        // `id: 2`, not `1` - `WindowManager::new`'s default workspace is
+        // id 1 (already current), and `switch_workspace` no-ops when asked
+        // to "switch" to the already-current workspace, so activating `1`
+        // would silently test nothing: the assertion below would pass
+        // whether or not this dispatch actually worked at all.
+        client.write_all(b"{\"cmd\":\"activate_workspace\",\"id\":2}\n").unwrap();
         server.poll(&wm);
         let _ = read_line(&mut reader);
 
-        assert_eq!(wm.borrow().current_workspace(), 1);
+        assert_eq!(wm.borrow().current_workspace(), 2);
+    }
+
+    #[test]
+    fn set_output_position_resolves_a_monitor_name_to_its_id() {
+        // The CLI (`srd dispatch set output position <name> <x> <y>`)
+        // sends a `name`, not an `id`, whenever the caller didn't already
+        // have a numeric id handy - `srd monitors` reports names, not an
+        // arbitrary index, so a display-arrangement UI reasonably works
+        // in those terms.
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        wm.borrow_mut().set_monitors(vec![
+            srdwm_core::Monitor::new(0, "EmbeddedDisplayPort-1", srdwm_core::Rect::new(0, 0, 1920, 1080)),
+            srdwm_core::Monitor::new(1, "HDMI-A-1", srdwm_core::Rect::new(1920, 0, 1920, 1080)),
+        ]);
+
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+        client.write_all(b"{\"cmd\":\"set_output_position\",\"name\":\"HDMI-A-1\",\"x\":1920,\"y\":0}\n").unwrap();
+        server.poll(&wm);
+        let _ = read_line(&mut reader);
+
+        let queued = wm.borrow_mut().drain_output_position_requests();
+        assert_eq!(queued, vec![(1, 1920, 0)], "must resolve to monitor id 1, not treat the name as missing");
+    }
+
+    #[test]
+    fn set_output_position_with_an_unknown_name_errors_instead_of_silently_no_opping() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        wm.borrow_mut().set_monitors(vec![srdwm_core::Monitor::new(0, "EmbeddedDisplayPort-1", srdwm_core::Rect::new(0, 0, 1920, 1080))]);
+
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+        client.write_all(b"{\"cmd\":\"set_output_position\",\"name\":\"nonexistent-output\",\"x\":0,\"y\":0}\n").unwrap();
+        server.poll(&wm);
+        let line = read_line(&mut reader);
+
+        assert!(line.contains(r#""error""#), "an unresolvable name must error, not silently queue nothing");
+        assert!(wm.borrow_mut().drain_output_position_requests().is_empty());
+    }
+
+    #[test]
+    fn set_output_enabled_accepts_a_name_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        wm.borrow_mut().set_monitors(vec![srdwm_core::Monitor::new(0, "HDMI-A-1", srdwm_core::Rect::new(0, 0, 1920, 1080))]);
+
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+        client.write_all(b"{\"cmd\":\"set_output_enabled\",\"name\":\"HDMI-A-1\",\"enabled\":false}\n").unwrap();
+        server.poll(&wm);
+        let _ = read_line(&mut reader);
+
+        assert_eq!(wm.borrow_mut().drain_output_enable_requests(), vec![("HDMI-A-1".to_string(), false)]);
+    }
+
+    #[test]
+    fn set_output_enabled_resolves_an_id_to_its_name_for_the_disable_direction() {
+        // `id` only ever resolves against the *live* monitor list - fine
+        // for disabling something currently connected, which is the only
+        // case where a stale-index concern doesn't apply yet.
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        wm.borrow_mut().set_monitors(vec![srdwm_core::Monitor::new(3, "HDMI-A-1", srdwm_core::Rect::new(0, 0, 1920, 1080))]);
+
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+        client.write_all(b"{\"cmd\":\"set_output_enabled\",\"id\":3,\"enabled\":false}\n").unwrap();
+        server.poll(&wm);
+        let _ = read_line(&mut reader);
+
+        assert_eq!(wm.borrow_mut().drain_output_enable_requests(), vec![("HDMI-A-1".to_string(), false)]);
+    }
+
+    #[test]
+    fn set_output_enabled_with_neither_name_nor_a_resolvable_id_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+        client.write_all(b"{\"cmd\":\"set_output_enabled\",\"enabled\":true}\n").unwrap();
+        server.poll(&wm);
+        let line = read_line(&mut reader);
+
+        assert!(line.contains(r#""error""#));
+        assert!(wm.borrow_mut().drain_output_enable_requests().is_empty());
+    }
+
+    #[test]
+    fn monitors_query_lists_a_disabled_output_alongside_live_ones() {
+        // What the AGS peer session asked for directly: a disabled output
+        // must not just vanish from `srd monitors` - it needs a row
+        // (name + `enabled: false`) to offer turning back on.
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        wm.borrow_mut().set_monitors(vec![srdwm_core::Monitor::new(0, "EmbeddedDisplayPort-1", srdwm_core::Rect::new(0, 0, 1920, 1080))]);
+        wm.borrow_mut().set_disabled_monitor("HDMI-A-1".to_string(), srdwm_core::Rect::new(1920, 0, 1920, 1080), srdwm_core::Rect::new(1920, 0, 1920, 1080), false);
+
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+        client.write_all(b"{\"cmd\":\"monitors\"}\n").unwrap();
+        server.poll(&wm);
+        let line = read_line(&mut reader);
+
+        assert!(line.contains(r#""name":"EmbeddedDisplayPort-1""#));
+        assert!(line.contains(r#""enabled":true"#), "live outputs must report enabled:true");
+        assert!(line.contains(r#""name":"HDMI-A-1""#), "disabled output must still be listed");
+        assert!(line.contains(r#""enabled":false"#), "the disabled output's own row must say so");
+    }
+
+    #[test]
+    fn monitors_query_marks_a_split_part_so_a_client_does_not_treat_it_as_a_real_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let whole = srdwm_core::Monitor::new(0, "eDP-1", srdwm_core::Rect::new(0, 0, 1920, 1080));
+        let mut half = srdwm_core::Monitor::new(1, "eDP-1-1", srdwm_core::Rect::new(0, 0, 960, 1080));
+        half.split = true;
+        wm.borrow_mut().set_monitors(vec![whole, half]);
+
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+        client.write_all(b"{\"cmd\":\"monitors\"}\n").unwrap();
+        server.poll(&wm);
+        let line = read_line(&mut reader);
+
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let monitors = parsed["monitors"].as_array().unwrap();
+        let whole = monitors.iter().find(|m| m["name"] == "eDP-1").unwrap();
+        let half = monitors.iter().find(|m| m["name"] == "eDP-1-1").unwrap();
+        assert_eq!(whole["split"], false, "an ordinary output must not be marked as a split part");
+        assert_eq!(half["split"], true, "a split part must be marked so a client can tell it apart from a real output");
     }
 
     #[test]
@@ -1201,13 +1783,13 @@ mod tests {
 
         let mut client = UnixStream::connect(&server.path).unwrap();
         let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
-        client.write_all(format!("{{\"cmd\":\"move_to_workspace\",\"id\":{id},\"workspace\":1}}\n").as_bytes()).unwrap();
+        client.write_all(format!("{{\"cmd\":\"move_to_workspace\",\"id\":{id},\"workspace\":2}}\n").as_bytes()).unwrap();
         server.poll(&wm);
         let _ = read_line(&mut reader);
 
         let wm = wm.borrow();
-        assert_eq!(wm.window(id).unwrap().workspace, 1);
-        assert_eq!(wm.current_workspace(), 0, "moving a window to a workspace must not also switch to it");
+        assert_eq!(wm.window(id).unwrap().workspace, 2);
+        assert_eq!(wm.current_workspace(), 1, "moving a window to a workspace must not also switch to it");
     }
 
     #[test]

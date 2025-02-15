@@ -19,6 +19,8 @@ impl X11Platform {
             atoms._NET_WM_STATE_MAXIMIZED_HORZ,
             atoms._NET_CLIENT_LIST,
             atoms._NET_ACTIVE_WINDOW,
+            atoms._NET_WM_STRUT,
+            atoms._NET_WM_STRUT_PARTIAL,
         ]).map_err(err)?;
 
         let font = conn.generate_id().map_err(err)?;
@@ -95,6 +97,7 @@ impl X11Platform {
             numlock_mask,
             ipc,
             appmenu_registrar: Some(srdwm_platform::AppmenuRegistrarState::new()),
+            struts: HashMap::new(),
         })
     }
 

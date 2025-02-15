@@ -357,7 +357,7 @@ where
 /// `blit_glyph`/`rgb_to_bgra`), promoted to `pub(crate)` there rather than
 /// duplicated here.
 fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8>, (i32, i32)) {
-    use crate::decoration::{blit_glyph, find_system_font, rgb_to_bgra, FONT_PIXELS, TEXT_LEFT_PADDING};
+    use crate::decoration::{blit_glyph, find_system_font, rgb_to_bgra, round_bottom_corners, round_top_corners, FONT_PIXELS, TEXT_LEFT_PADDING};
 
     const WIDTH: usize = 360;
     const HEIGHT: usize = 170;
@@ -408,18 +408,34 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
 
     // Border, drawn last so it isn't overdrawn by any fill above --
     // same convention `render_context_menu`/`render_snap_flyout` use.
+    // 2px, matching `ThemeConfig::default_border_width` - a 1px line at
+    // this box's size read as a thin, easy-to-miss hairline rather than a
+    // deliberate frame around the box.
+    const BORDER: usize = 2;
     let border_px = rgb_to_bgra(theme.box_border, 255);
-    for x in 0..WIDTH {
-        buf[x * 4..x * 4 + 4].copy_from_slice(&border_px);
-        let last_row = (HEIGHT - 1) * WIDTH + x;
-        buf[last_row * 4..last_row * 4 + 4].copy_from_slice(&border_px);
+    for t in 0..BORDER {
+        for x in 0..WIDTH {
+            buf[(t * WIDTH + x) * 4..(t * WIDTH + x) * 4 + 4].copy_from_slice(&border_px);
+            let row = (HEIGHT - 1 - t) * WIDTH + x;
+            buf[row * 4..row * 4 + 4].copy_from_slice(&border_px);
+        }
+        for y in 0..HEIGHT {
+            let left = y * WIDTH + t;
+            buf[left * 4..left * 4 + 4].copy_from_slice(&border_px);
+            let right = y * WIDTH + WIDTH - 1 - t;
+            buf[right * 4..right * 4 + 4].copy_from_slice(&border_px);
+        }
     }
-    for y in 0..HEIGHT {
-        let left = y * WIDTH;
-        buf[left * 4..left * 4 + 4].copy_from_slice(&border_px);
-        let right = y * WIDTH + WIDTH - 1;
-        buf[right * 4..right * 4 + 4].copy_from_slice(&border_px);
-    }
+
+    // Rounded, like every other srdwm-drawn surface (titlebar, window
+    // border) - `LockConfig::corner_radius` existed as a config field
+    // (default 10) already, but nothing here ever actually read it, so the
+    // lock box always rendered as a hard flat rectangle regardless of its
+    // value. Clipping after the border fill above means the corner pixels
+    // of that border get cut along with the background, the same "cut,
+    // don't stroke" treatment `render_titlebar`'s own corners get.
+    round_top_corners(&mut buf, WIDTH, HEIGHT, theme.corner_radius, theme.corner_radius as i32);
+    round_bottom_corners(&mut buf, WIDTH, HEIGHT, theme.corner_radius);
 
     (buf, (WIDTH as i32, HEIGHT as i32))
 }

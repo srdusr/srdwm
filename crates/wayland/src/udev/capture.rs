@@ -8,22 +8,32 @@
 //! workspace that, most of the time, is *not* the one presented.
 //!
 //! Deliberately simple, not a small reimplementation of
-//! `render_udev_frame`: only window content is drawn, no borders,
-//! shadows, titlebars, cursor or layer-shell surfaces - every consumer
-//! this was built for (a workspace-switcher tile) draws those tiny, where
-//! that detail is imperceptible, and skipping them keeps this from needing
-//! to duplicate that function's animation/occlusion bookkeeping. Always
-//! renders at the target monitor's native resolution and downscales
-//! afterward if a smaller size was requested, rather than trying to get
-//! smithay's fractional-output-scale rendering path exactly right for a
-//! target with no real `Output` behind it.
+//! `render_udev_frame`: no borders, shadows, titlebars or cursor --
+//! every consumer this was built for (a workspace-switcher tile) draws
+//! those tiny, where that detail is imperceptible, and skipping them
+//! keeps this from needing to duplicate that function's animation/
+//! occlusion bookkeeping. The background/bottom layer-shell surfaces
+//! (the wallpaper) *are* included, unlike the rest of that list - a
+//! capture with no windows on it and no wallpaper either is
+//! indistinguishable from broken, and was reported live as exactly that:
+//! "why does current workspace show black background" once measured
+//! against a real screenshot of the same moment (mean luminance ~0.5 vs.
+//! this capture's own ~0.03, i.e. genuinely near-black, not just "looks
+//! dark on this monitor"). An inactive workspace with literally no
+//! windows placed on it rendered *exactly* black (mean and variance both
+//! zero) for the same reason - there was nothing else in the frame at
+//! all to show. Always renders at the target monitor's native resolution
+//! and downscales afterward if a smaller size was requested, rather than
+//! trying to get smithay's fractional-output-scale rendering path
+//! exactly right for a target with no real `Output` behind it.
 
 use super::*;
 use smithay::backend::allocator::Fourcc;
-use smithay::backend::renderer::element::surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement};
+use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::{Bind, ExportMem, Offscreen};
 use smithay::utils::{Buffer as BufferCoord, Transform};
+use smithay::wayland::shell::wlr_layer::Layer;
 
 impl CompState {
     /// Services every capture request queued since the last poll. Takes
@@ -56,8 +66,8 @@ impl CompState {
         }
 
         let ids = self.wm.borrow().window_ids_on_workspace_front_to_back(req.workspace);
-        let mut elements: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = Vec::new();
         let Some(udev) = self.udev.as_mut() else { return Err("no udev backend".to_string()) };
+        let mut elements: Vec<crate::elements::OverlayElement<PixmanRenderer>> = Vec::new();
         for id in ids {
             let Some(w) = self.id_to_window.get(&id) else { continue };
             let Some(surface) = crate::input::dwindow_wl_surface(w) else { continue };
@@ -68,7 +78,26 @@ impl CompState {
             // a gap in the capture too.
             let content_offset = w.geometry().loc;
             let loc = (geom.x - origin.0 - content_offset.x, geom.y - origin.1 - content_offset.y);
-            elements.extend(render_elements_from_surface_tree(&mut udev.renderer, &surface, loc, 1.0, 1.0, Kind::Unspecified));
+            elements.extend(render_elements_from_surface_tree::<_, crate::elements::OverlayElement<PixmanRenderer>>(
+                &mut udev.renderer,
+                &surface,
+                loc,
+                1.0,
+                1.0,
+                Kind::Unspecified,
+            ));
+        }
+        // Background/bottom layer-shell (the wallpaper) last - bottommost,
+        // matching `render_udev_frame`'s own ordering convention (see that
+        // function's matching comment). The real output behind whichever
+        // monitor `origin`/`native` came from, matched by location; missing
+        // entirely (an output that vanished between resolving `origin`
+        // above and here, a narrow race) just means no wallpaper in this
+        // one capture, not a hard failure - windows above still render.
+        if let Some(head) = udev.heads.iter().find(|h| h.location == Point::from(origin)) {
+            elements.extend(crate::elements::output_layer_elements(&mut udev.renderer, &head.output, |layer| {
+                matches!(layer, Layer::Background | Layer::Bottom)
+            }));
         }
 
         let (nw, nh) = (native.0 as i32, native.1 as i32);

@@ -1,11 +1,11 @@
 use crate::geometry::Rect;
 use crate::layout::{Layout, MasterStackLayout, NoOpLayout, TilingConfig};
-use crate::monitor::{Monitor, MonitorId};
+use crate::monitor::{DisabledMonitor, Monitor, MonitorId, MonitorSplit};
 use crate::placement::{PlacementConfig, SmartPlacement, SnapZoneKind, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
 use crate::rules::WindowRule;
 use crate::lock_config::LockConfig;
 use crate::theme::ThemeConfig;
-use crate::window::{ResizeEdge, TitlebarHit, Window, WindowId, RESIZE_MARGIN};
+use crate::window::{likely_draws_own_titlebar, ResizeEdge, TitlebarHit, Window, WindowId, RESIZE_MARGIN};
 use crate::workspace::{Workspace, WorkspaceId};
 use std::collections::HashMap;
 
@@ -15,6 +15,25 @@ pub enum Direction {
     Right,
     Up,
     Down,
+}
+
+/// A whole-screen colour treatment, drawn by each Wayland backend as a
+/// translucent full-output overlay above every window but below the
+/// cursor - see `srdwm_wayland::color_filter` for the actual overlay
+/// colour/alpha each variant maps to, and why an alpha-blended overlay
+/// rather than a true per-pixel shader was chosen at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ColorFilter {
+    #[default]
+    None,
+    /// Warm tint, reduces perceived blue light. Ported from a Hyprland
+    /// `decoration:screen_shader` config that multiplied the framebuffer
+    /// by `vec3(1.0, 0.82, 0.60)`.
+    NightLight,
+    /// Desaturating tint, for reduced visual noise during long-form
+    /// reading. Ported from a Hyprland `decoration:screen_shader` config
+    /// that replaced every pixel with its own luminance (flat grayscale).
+    ReadingMode,
 }
 
 struct DragState {
@@ -55,6 +74,31 @@ pub struct WindowManager {
     /// backend's next monitor query, same as any other hotplug/reconfigure.
     output_position_requests: Vec<(MonitorId, i32, i32)>,
     /// Same cross-boundary-request pattern as `output_position_requests`
+    /// just above, for enable/disable - see `request_output_enabled`'s
+    /// own doc comment for why this is keyed by name, not `MonitorId`.
+    output_enable_requests: Vec<(String, bool)>,
+    /// The opposite direction of `output_enable_requests`: not a request
+    /// *to* the backend, but the backend *reporting* an administratively-
+    /// disabled-but-still-connected output's last-known state, purely for
+    /// listing purposes - see `set_disabled_monitor`'s own doc comment
+    /// for why this deliberately never touches `monitors`/real placement
+    /// at all.
+    disabled_monitors: HashMap<String, DisabledMonitor>,
+    /// `srd.monitor.split(name, parts, direction)` requests, by connector
+    /// name - read by a backend's own `monitors()` query to divide one
+    /// real output's rectangle into several logical `Monitor` entries. See
+    /// [`MonitorSplit`]'s own doc comment for what this deliberately does
+    /// and does not give a client (no new `wl_output`).
+    monitor_splits: HashMap<String, MonitorSplit>,
+    /// `srd.monitor.scale(name, factor)` requests, by connector name --
+    /// read once by a backend when it brings a head up (startup, hotplug,
+    /// or re-enable), so a physically large, low-DPI monitor can run
+    /// below `1.0` to show more logical desktop space instead of just
+    /// larger text at the same pixel count. srdwm otherwise always drove
+    /// every real output at a hardcoded `1.0`, with no way to change that
+    /// short of a client speaking wlr-output-management itself.
+    monitor_scales: HashMap<String, f64>,
+    /// Same cross-boundary-request pattern as `output_position_requests`
     /// just above - core has no way to actually blank the screen and
     /// start drawing srdwm's own lock UI itself (that's real compositor
     /// rendering, backend-owned), so an IPC `"lock"` dispatch queues the
@@ -68,11 +112,15 @@ pub struct WindowManager {
     /// screencopy protocol can see).
     capture_requests: Vec<capture::CaptureRequest>,
     workspaces: Vec<Workspace>,
-    /// One flat value shared by every monitor - not per-output. Unlike
-    /// Hyprland, srdwm has no notion of an independent workspace set per
-    /// monitor; switching workspace changes what's visible on every screen
-    /// at once. See `visible_windows`'s doc comment for the filter this
-    /// actually drives.
+    /// The shared-mode value, used directly when `per_monitor_workspaces`
+    /// is `false` (the default - unlike Hyprland, srdwm's original design
+    /// has no notion of an independent workspace set per monitor;
+    /// switching workspace changes what's visible on every screen at
+    /// once). Still meaningful even when `per_monitor_workspaces` is `true`
+    /// - it's the fallback `workspace_for_monitor` returns for a monitor
+    /// that has never had its own workspace switched independently yet,
+    /// and what a plain `current_workspace()` call reports either way. See
+    /// `visible_windows`'s doc comment for the filter this actually drives.
     current_workspace: WorkspaceId,
     /// Whichever workspace was current immediately before the current one
     /// became current - see `switch_workspace`'s doc comment.
@@ -82,6 +130,34 @@ pub struct WindowManager {
     /// instead - sway's `workspace_auto_back_and_forth` behavior, a quick
     /// "jump back to whatever I was just on" toggle on a single keybinding.
     pub auto_back_and_forth: bool,
+    /// Read from `workspace.per_monitor` - `false` (the default) keeps
+    /// srdwm's original single-shared-workspace design exactly as it was;
+    /// `true` switches to Hyprland/niri-style independent per-monitor
+    /// workspace sets, where each monitor tracks and displays its own
+    /// current workspace, switchable without affecting any other monitor.
+    /// Explicitly requested as a configurable choice, not a hardcoded
+    /// switch to one model or the other - see `workspace_for_monitor` and
+    /// `switch_workspace_on_monitor` for what this actually gates.
+    pub per_monitor_workspaces: bool,
+    /// Read from `monitor.primary_layout`/`monitor.secondary_layout` --
+    /// validated/defaulted config keys that were never read anywhere
+    /// before (same dead-config shape as `general.default_layout`'s own
+    /// siblings). Empty string means "not set, no override". Applied by
+    /// `set_monitors` to whichever workspace `workspace_for_monitor`
+    /// resolves for each connected monitor - which only ever *differs*
+    /// between monitors when `per_monitor_workspaces` is `true` (every
+    /// monitor shares one workspace otherwise, so a primary/secondary
+    /// split has nothing distinct to apply to and is skipped).
+    pub primary_layout: String,
+    pub secondary_layout: String,
+    /// Each monitor's own current workspace, when `per_monitor_workspaces`
+    /// is `true`. A monitor with no entry here yet (never had its
+    /// workspace switched independently - e.g. right after the mode was
+    /// turned on, or a newly connected monitor) falls back to
+    /// `current_workspace`, the same shared value shared-mode always uses
+    /// - see `workspace_for_monitor`. Unused, and left empty, whenever
+    /// `per_monitor_workspaces` is `false`.
+    monitor_workspaces: HashMap<MonitorId, WorkspaceId>,
     next_workspace_id: WorkspaceId,
     next_window_id: WindowId,
     layouts: HashMap<String, Box<dyn Layout>>,
@@ -113,6 +189,14 @@ pub struct WindowManager {
     /// redraws constantly - see `crates/wayland/src/rounded_corners.rs`).
     /// `Some(_)` only when the user explicitly set it, and wins either way.
     pub rounded_corners_enabled: Option<bool>,
+    /// The whole-screen colour treatment currently active (night light's
+    /// warm tint or reading mode's desaturation), live-settable via `srd
+    /// set night_light`/`srd set reading_mode` - see [`ColorFilter`]. Off
+    /// by default; the two are mutually exclusive by construction (one
+    /// enum, not two independent bools), matching the ported Hyprland
+    /// scripts this replaces, which pointed the same single
+    /// `screen_shader` slot at one file or the other.
+    pub color_filter: ColorFilter,
     /// Whether hovering a window (no click needed) focuses it, read from
     /// `general.focus_follows_mouse`. Off by default - matches
     /// `general.focus_follows_mouse`'s own documented default, and every
@@ -133,6 +217,23 @@ pub struct WindowManager {
     drag: Option<DragState>,
     resize: Option<ResizeState>,
     rules: Vec<WindowRule>,
+    /// Last floating size a user interactively resized each `app_id` to,
+    /// applied to that app's *next* new window instead of the fixed
+    /// 800x600 every backend otherwise hardcodes - see `end_resize` (where
+    /// this is recorded) and `add_window` (where it's read). Keyed by
+    /// `app_id` alone, not per-window: the ask is "my terminal should open
+    /// at the size I last used a terminal at", not per-window-instance
+    /// memory. Only an interactive drag-resize (`end_resize`) updates this
+    /// - not a maximize/fullscreen toggle (that's a separate, temporary
+    /// state with its own `restore_geometry`, not a new "size I want to
+    /// keep using") and not a drag-to-edge snap (a deliberate one-off
+    /// snap to a half/quarter of the screen isn't "the size I'll want my
+    /// next terminal to open at" either). Session-lifetime only, not
+    /// persisted to disk - a real per-app-size-memory feature that
+    /// survives a restart would need a config-file-backed store, which is
+    /// meaningfully more machinery than "remember it while running" asks
+    /// for.
+    remembered_sizes: HashMap<String, (u32, u32)>,
     /// Windows a client-close was requested for, drained once per tick by
     /// `main.rs`'s event loop and forwarded to `Platform::close`. Needed
     /// because `WindowManager` is platform-agnostic and has no way to send
@@ -155,6 +256,23 @@ pub struct WindowManager {
     /// `close_requests`, for the same reason: `WindowManager` has no real
     /// keyboard/seat handle of its own to cycle.
     keyboard_layout_cycle_requests: u32,
+    /// Which monitor the pointer is currently over, as last reported by
+    /// `set_pointer_monitor` - core has no pointer of its own (backend-
+    /// agnostic, same reason `close_requests` exists instead of a direct
+    /// client call), so a real backend's own pointer-motion handler is the
+    /// only thing that can ever know this. `add_window`'s own target-
+    /// monitor fallback chain reads it: a new window already preferred the
+    /// *focused* window's monitor over the primary one (see that fix's own
+    /// doc comment, `add_window`) - correct when something is focused on
+    /// the monitor the user is actually at, but not when nothing is (an
+    /// empty desktop there, or the last-focused window happens to sit on a
+    /// *different* monitor than the one the user is currently pointing at
+    /// while launching something new). Reported live: opening an
+    /// application while on a non-primary monitor with nothing focused
+    /// there still opened it on the primary one. `None` until the first
+    /// real pointer-motion event arrives (matches `focused`'s own `None`-
+    /// until-something-happens shape).
+    pointer_monitor: Option<MonitorId>,
 }
 
 impl Default for WindowManager {
@@ -176,13 +294,52 @@ impl WindowManager {
             focused: None,
             monitors: Vec::new(),
             output_position_requests: Vec::new(),
+            output_enable_requests: Vec::new(),
+            disabled_monitors: HashMap::new(),
+            monitor_splits: HashMap::new(),
+            monitor_scales: HashMap::new(),
             lock_requested: false,
             capture_requests: Vec::new(),
-            workspaces: vec![Workspace::new(0, "1", "dynamic")],
-            current_workspace: 0,
-            previous_workspace: 0,
+            // 1-based, not 0-based: workspace ids match the human-visible
+            // numbers (`workspace.names` defaults to "1".."9","0",
+            // `apply_workspace_count` names workspace `i+1` "i+1") - an id
+            // of `0` for the first workspace, with everything display-side
+            // calling it "1", was a standing off-by-one between what a user
+            // types/sees and the id `srd dispatch activate workspace <n>`
+            // (and AGS's workspace switcher, which sends the same number it
+            // shows) actually has to send. Matches how Hyprland's own
+            // workspace ids already work (natively 1-based, no translation
+            // layer needed) rather than niri's split id/idx or the
+            // 0-based-plus-AGS-side-`+1` scheme this used to be - both
+            // AGS integrations for those two compositors were checked
+            // before choosing this, and neither needs hand-rolled offset
+            // arithmetic the way srdwm's old 0-based ids forced `lib/
+            // srdwm.ts` to.
+            //
+            // Rolling this out requires `crates/config`'s shipped default,
+            // this user's own `~/.config/srd/keybindings.lua`, and AGS's
+            // `lib/srdwm.ts`/`service/wsPreview.ts` to all agree with core
+            // at the same time - they cannot update atomically with a
+            // single srdwm restart, so whichever of AGS/srdwm is running
+            // the *other* scheme during that window will visibly
+            // misbehave (confirmed live: AGS's Overview padding
+            // `workspace.count` slots and matching real workspaces onto
+            // them by id showed one extra/unmatched slot while AGS's own
+            // code had already been updated to assume 1-based ids but the
+            // live srdwm process was still 0-based). AGS's side is
+            // deliberately reverted back to its old `+1` offset for now,
+            // matching the still-running old build, and must be re-applied
+            // in the same breath as the next real srdwm restart - not
+            // before.
+            workspaces: vec![Workspace::new(1, "1", "dynamic")],
+            current_workspace: 1,
+            previous_workspace: 1,
             auto_back_and_forth: false,
-            next_workspace_id: 1,
+            per_monitor_workspaces: false,
+            primary_layout: String::new(),
+            secondary_layout: String::new(),
+            monitor_workspaces: HashMap::new(),
+            next_workspace_id: 2,
             next_window_id: 1,
             layouts,
             tiling: TilingConfig::default(),
@@ -192,6 +349,7 @@ impl WindowManager {
             shadows_enabled: true,
             resize_margin: RESIZE_MARGIN,
             rounded_corners_enabled: None,
+            color_filter: ColorFilter::None,
             focus_follows_mouse: false,
             auto_raise: false,
             theme: ThemeConfig::default(),
@@ -199,9 +357,11 @@ impl WindowManager {
             drag: None,
             resize: None,
             rules: Vec::new(),
+            remembered_sizes: HashMap::new(),
             close_requests: Vec::new(),
             keyboard_layout: String::new(),
             keyboard_layout_cycle_requests: 0,
+            pointer_monitor: None,
         }
     }
 

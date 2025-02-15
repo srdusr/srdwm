@@ -75,6 +75,11 @@ impl Engine {
         workspace.set("move_window", self.fn_workspace_move_window()?)?;
         srd.set("workspace", workspace)?;
 
+        let monitor = lua.create_table()?;
+        monitor.set("split", self.fn_monitor_split()?)?;
+        monitor.set("scale", self.fn_monitor_scale()?)?;
+        srd.set("monitor", monitor)?;
+
         let theme = lua.create_table()?;
         theme.set("set_colors", self.fn_theme_set("theme.colors")?)?;
         theme.set("set_decorations", self.fn_theme_set("theme.decorations")?)?;
