@@ -194,14 +194,40 @@ impl Engine {
         })?)
     }
 
+    /// `srd.load("keybindings")`/`"themes"`/`"rules"`/`"startup"`: each is
+    /// its own file, its own logical concern, and - deliberately, since
+    /// this function catches its own execution error rather than letting
+    /// `?` propagate one - its own failure domain. A `mlua::Error` from
+    /// one module used to unwind straight out through this function and
+    /// back into whatever was running `init.lua` itself, aborting every
+    /// statement after that `srd.load` call, including every *other*
+    /// `srd.load` - a typo in `rules.lua` silently took `startup.lua`
+    /// (autostart) down with it, and there was no way from the config
+    /// author's side to prevent that, short of never making a mistake.
+    /// Reproduced live in the worse but related case (the error was in
+    /// `init.lua` itself, above every `srd.load` call, which this
+    /// function alone can't isolate against): a session that started with
+    /// nothing but a bare cursor, zero autostart, zero keybindings, no
+    /// error visible anywhere except one `WARN` line in a multi-hundred-
+    /// megabyte log file. A module failing now still leaves the user
+    /// without whatever that module would have set up, logged clearly at
+    /// `error` level with the module name and the file path - but
+    /// everything *else* `init.lua` goes on to load still does.
     pub(super) fn fn_load(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |lua, module: String| {
             let dir = state.borrow().config_dir.clone();
             let path = dir.join(format!("{module}.lua"));
-            let src = std::fs::read_to_string(&path)
-                .map_err(|e| mlua::Error::RuntimeError(format!("srd.load('{module}'): {e} ({})", path.display())))?;
-            lua.load(&src).set_name(path.to_string_lossy().as_ref()).exec()?;
+            let src = match std::fs::read_to_string(&path) {
+                Ok(src) => src,
+                Err(e) => {
+                    log::error!("srd.load('{module}'): {e} ({}) - this module did not load, but the rest of init.lua still will", path.display());
+                    return Ok(());
+                }
+            };
+            if let Err(e) = lua.load(&src).set_name(path.to_string_lossy().as_ref()).exec() {
+                log::error!("srd.load('{module}'): {e} - this module did not finish loading, but the rest of init.lua still will");
+            }
             Ok(())
         })?)
     }

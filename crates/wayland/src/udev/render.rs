@@ -66,11 +66,12 @@ impl CompState {
             self.screencopy_pending.extend(captures);
             return;
         }
+        let now = Instant::now();
         let ready: Vec<(usize, Output)> = udev
             .heads
             .iter()
             .enumerate()
-            .filter(|(_, h)| !h.flip_pending)
+            .filter(|(_, h)| !h.flip_pending && h.flip_retry_after.is_none_or(|t| now >= t))
             .map(|(i, h)| (i, h.output.clone()))
             .collect();
         // Kept separately from `presented` below: layer-shell surfaces
@@ -208,18 +209,35 @@ impl CompState {
                     // else here - not `w.geometry` - for the identical
                     // reason: a shadow that stayed at the pre-tween rect
                     // while the window slid past it would look exactly as
-                    // detached as the border did before that fix. Not
-                    // fragment-clipped against `occluders` like the titlebar/
-                    // border below: at `SHADOW_MAX_ALPHA`'s low opacity, a
-                    // shadow bleeding slightly onto a window stacked in front
-                    // of this one reads as a soft edge, not the hard-line
-                    // bleed-through that made the titlebar/border need it.
+                    // detached as the border did before that fix.
+                    //
+                    // Fragment-clipped against `occluders` now, same as the
+                    // titlebar/border below - this used to skip that on the
+                    // reasoning that `SHADOW_MAX_ALPHA`'s low opacity would
+                    // read as a soft edge, not the hard-line bleed-through
+                    // that made the titlebar/border need it. True along a
+                    // shadow's straight edges, false at its corners:
+                    // `shadow_bitmap` falls off by Chebyshev (square-ring)
+                    // distance, not radial, so each corner is a hard-edged
+                    // square block at up to ~35% opacity, not a soft
+                    // vignette - reported live as a small dark rectangular
+                    // patch sitting on top of whatever window a floating/
+                    // cascaded window's own corner happened to overlap,
+                    // most visible exactly where two windows' corners
+                    // nearly meet, which this compositor's default cascade
+                    // placement does constantly.
                     if let Some(shadow) = self.shadow_buffers.get(&id) {
                         let rect = decoration::shadow_rect(geom);
-                        let pos = ((rect.x - origin.x) as f64, (rect.y - origin.y) as f64);
-                        match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, shadow, None, None, None, Kind::Unspecified) {
-                            Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
-                            Err(e) => log::warn!("udev: failed to import shadow buffer: {e}"),
+                        for fragment in crate::elements::visible_border_fragments(rect, &occluders) {
+                            let pos = ((fragment.x - origin.x) as f64, (fragment.y - origin.y) as f64);
+                            let src = Rectangle::new(
+                                Point::from(((fragment.x - rect.x) as f64, (fragment.y - rect.y) as f64)),
+                                Size::from((fragment.width as f64, fragment.height as f64)),
+                            );
+                            match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, shadow, None, Some(src), None, Kind::Unspecified) {
+                                Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                                Err(e) => log::warn!("udev: failed to import shadow buffer: {e}"),
+                            }
                         }
                     }
                     if let Some(deco) = self.decorations.get(&id) {
@@ -500,9 +518,25 @@ impl CompState {
             if has_damage {
                 let head = &mut udev.heads[index];
                 if let Err(e) = head.copy_and_flip(&udev.card, back) {
-                    log::error!("udev: page flip failed: {e}");
+                    // Backed off, not retried on the very next poll tick --
+                    // see `UdevHead::flip_retry_after`'s own doc comment for
+                    // the real, live-reproduced incident this prevents: a
+                    // failing flip (confirmed live as `EBUSY` right after a
+                    // VT-switch resume, while the kernel's own `set_crtc`
+                    // commit was still settling) used to be retried
+                    // immediately, forever, since nothing else gated
+                    // `ready` on anything but `flip_pending` - which a
+                    // failed `page_flip` call never sets. A fixed, short
+                    // cooldown is enough to ride out that kind of transient
+                    // kernel-side race without needing to distinguish it
+                    // from a real, permanent failure - either way, hammering
+                    // the same doomed `page_flip` call in a tight loop with
+                    // no backoff at all was never the right response.
+                    head.flip_retry_after = Some(Instant::now() + Duration::from_millis(200));
+                    log::error!("udev: page flip failed: {e} - retrying in 200ms");
                     continue;
                 }
+                head.flip_retry_after = None;
                 // This buffer is now fully up to date. It won't be rendered
                 // into again until the *other* slot has also been presented
                 // once (strict two-buffer alternation), so by then it will

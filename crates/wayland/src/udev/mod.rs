@@ -149,6 +149,30 @@ pub(crate) struct UdevHead {
     /// Origin of this head in the global coordinate space.
     pub(crate) location: Point<i32, Logical>,
     pub(crate) size: (i32, i32),
+    /// Set when [`UdevHead::copy_and_flip`] fails; no new flip is attempted
+    /// for this head again until this deadline passes.
+    ///
+    /// Without this, a failed `page_flip` (real and reproduced live: the
+    /// kernel returns `EBUSY`/"device or resource busy" for a brief window
+    /// right after a VT-switch resume's `set_crtc` reasserts the mode,
+    /// before that commit has actually settled) left `flip_pending` still
+    /// `false` - `copy_and_flip`'s early-return `?` on the failing
+    /// `page_flip` call skips the line just after it that would have set
+    /// `flip_pending = true`, so nothing ever marked this head "busy". The
+    /// next call to `render_udev_frame` (every ~16ms, or sooner --
+    /// `event_loop.dispatch`'s timeout is only an upper bound) saw the
+    /// exact same head still "ready" and every prior damage still pending,
+    /// tried the exact same flip again, failed the exact same way, forever
+    /// - a true busy loop with no backoff at all, not merely a missed
+    /// optimization. Confirmed live from a real session log: tens of
+    /// thousands of consecutive `page flip failed: Device or resource
+    /// busy` lines a few *microseconds* apart, the compositor's one thread
+    /// spinning flat out on nothing else, which is what actually explains
+    /// the user's report of losing pointer input and the ability to
+    /// switch VTs at all after switching away and back once - not a
+    /// separate input bug, this loop simply never yielded the CPU back to
+    /// anything else, libinput's own event processing included.
+    pub(crate) flip_retry_after: Option<Instant>,
 }
 
 /// Everything the DRM/udev backend needs that the nested winit backend

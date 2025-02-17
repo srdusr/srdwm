@@ -59,6 +59,7 @@ pub(crate) fn bring_up_head(
         ages: [0, 0],
         location,
         size: (width, height),
+        flip_retry_after: None,
     };
     Ok((head, crate::state::OutputEntry { output, location }))
 }

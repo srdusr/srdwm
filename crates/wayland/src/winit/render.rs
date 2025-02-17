@@ -19,7 +19,41 @@ impl WaylandPlatform {
             layer_map_for_output(&self.output).arrange();
         }
 
-        let age = self.backend.buffer_age().unwrap_or(0);
+        // Always `0` ("contents undefined, damage everything"), not
+        // `self.backend.buffer_age()` - deliberately never trusted here,
+        // confirmed live to actually be the source of a real corruption
+        // bug, not just a missed optimization. `age` tells
+        // `damage_tracker.render_output` how many past frames' worth of
+        // damage history it can trust the *current* target buffer to
+        // already reflect, so it can skip repainting regions nothing has
+        // touched since. That guarantee depends on the platform's own
+        // buffer-age report being an honest account of this exact backing
+        // buffer's real history - which this backend cannot get from a
+        // nested `winit`/EGL surface hosted inside another Wayland
+        // session: reproduced live, stable, not a one-frame race --
+        // raising one floating window (Firefox) above another (a plain
+        // terminal) left a rectangular patch of the terminal's own old
+        // pixels sitting untouched at one edge of Firefox's new, larger,
+        // fully-opaque topmost window, persisting indefinitely across
+        // many further frames with no damage anywhere near it to explain
+        // clearing it. Forcing `age = 0` here (full redraw, every frame)
+        // made the corruption disappear completely and immediately, and
+        // nothing else about the scene changed - narrowing the cause to
+        // exactly this value being wrong, not a geometry, occlusion, or
+        // z-order bug elsewhere in this file (all independently verified
+        // correct against the same repro: the window's own border and
+        // content elements were logged as computed with the right full
+        // geometry and zero occluders on every single one of the frames
+        // that still rendered the stale patch). Real hardware's udev
+        // backend is not affected - it never queries a platform buffer
+        // age at all, only its own hand-tracked `UdevHead::ages`, advanced
+        // deterministically from this codebase's own strict two-buffer
+        // page-flip alternation, not borrowed trust in an outer
+        // compositor's EGL implementation. This backend exists for nested
+        // development/testing, not as the real compositor, so paying a
+        // full software-composited redraw every frame here is the safe
+        // trade against silently wrong pixels persisting on screen.
+        let age = 0;
         let (renderer, mut framebuffer) = self.backend.bind().map_err(err)?;
 
         // Locked: srdwm's own native lock UI, or an external locker's
@@ -147,15 +181,35 @@ impl WaylandPlatform {
             // (reported live as the border "not flush" with the window
             // during an animated maximize/fullscreen/open-slide transition).
             let geom = self.state.window_anims.get(&id).map(crate::state::WindowAnim::current_rect).unwrap_or(w.geometry);
-            // Same reasoning as udev/render.rs's matching push: positioned from
-            // `geom`, not `w.geometry`, and not fragment-clipped against
-            // `occluders` - see that comment.
+            // Same reasoning as udev/render.rs's matching push: positioned
+            // from `geom`, not `w.geometry`. Fragment-clipped against
+            // `occluders` now, same as the titlebar/border below - a
+            // shadow used to draw in full regardless of what was stacked
+            // in front of it (its own doc comment argued the low opacity
+            // made that read as "a soft edge, not the hard-line bleed-
+            // through that made the titlebar/border need it"), but that
+            // reasoning only holds along a shadow's straight edges: the
+            // corner regions use Chebyshev (square-ring), not radial,
+            // falloff (see `shadow_bitmap`'s own doc comment), so a
+            // shadow's corner is a hard-edged square block at up to
+            // `SHADOW_MAX_ALPHA` (~35%) opacity, not a soft radial
+            // vignette - reported live as a small dark rectangular patch
+            // sitting on top of whatever window a floating/cascaded
+            // window's own corner happened to overlap, most visible
+            // exactly where two windows' corners nearly meet, which this
+            // compositor's default cascade placement does constantly.
             if let Some(shadow) = self.state.shadow_buffers.get(&id) {
                 let rect = decoration::shadow_rect(geom);
-                let pos = (rect.x as f64, rect.y as f64);
-                match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, shadow, None, None, None, Kind::Unspecified) {
-                    Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
-                    Err(e) => log::warn!("failed to import shadow buffer for window {id}: {e}"),
+                for fragment in crate::elements::visible_border_fragments(rect, &occluders) {
+                    let pos = (fragment.x as f64, fragment.y as f64);
+                    let src = Rectangle::new(
+                        Point::from(((fragment.x - rect.x) as f64, (fragment.y - rect.y) as f64)),
+                        Size::from((fragment.width as f64, fragment.height as f64)),
+                    );
+                    match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, shadow, None, Some(src), None, Kind::Unspecified) {
+                        Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
+                        Err(e) => log::warn!("failed to import shadow buffer for window {id}: {e}"),
+                    }
                 }
             }
             if let Some(deco) = self.state.decorations.get(&id) {
