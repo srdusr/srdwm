@@ -107,6 +107,7 @@ pub(crate) fn register_session_notifier(handle: &LoopHandle<'static, CompState>,
                         // scanned out something else entirely in between).
                         head.flip_pending = false;
                         head.ages = [0, 0];
+                        head.flip_retry_after = None;
                     }
                     data.render_udev_frame();
                 }

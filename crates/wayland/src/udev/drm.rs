@@ -93,6 +93,7 @@ pub(crate) fn bring_up_head(
         location,
         size: (width, height),
         mode: probe.mode,
+        flip_retry_after: None,
     };
     Ok((head, crate::state::OutputEntry { output, location }))
 }
