@@ -1,11 +1,7 @@
 use super::*;
-use super::border::*;
 use super::buttons::*;
 use super::color::*;
-use super::corners::*;
-use super::font::*;
 use super::shadow::*;
-use super::titlebar::*;
 
 #[test]
 fn border_strips_surround_geometry_without_overlapping_it() {

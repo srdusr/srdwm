@@ -40,7 +40,6 @@ use smithay::backend::input::{
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
-use smithay::backend::renderer::element::solid::SolidColorBuffer;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::pixman::PixmanRenderer;
 use smithay::backend::renderer::{Bind, ImportDma};
@@ -474,7 +473,7 @@ mod copy_damaged_rows_tests {
         let mut dst = vec![0u8; w * h * 4];
         // Only the single pixel at (1, 1).
         copy_damaged_rows(&src, &mut dst, w * 4, w * 4, w, h, &[rect(1, 1, 1, 1)]);
-        let idx = (1 * w + 1) * 4;
+        let idx = (w + 1) * 4;
         assert_eq!(dst[idx], src[idx], "the damaged pixel must be copied");
         assert_eq!(dst[0], 0, "a pixel outside the damage rect must stay untouched");
         assert_eq!(dst[dst.len() - 4], 0, "the last row's pixel is also outside the rect and must stay untouched");

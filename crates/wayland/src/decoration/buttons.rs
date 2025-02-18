@@ -169,6 +169,7 @@ fn glossy_shade(color: (u8, u8, u8), dx: f32, dy: f32, radius: f32) -> (u8, u8, 
 /// the titlebar's real foreground colour for one drawn straight on the
 /// titlebar background instead (see `titlebar::render_titlebar`'s own
 /// `glyph_shade` local for which, and why).
+#[allow(clippy::too_many_arguments)]
 fn blend_glyph_px(buf: &mut [u8], width: usize, height: usize, x: i32, y: i32, alpha: u8, coverage: f32, shade: (u8, u8, u8)) {
     if x < 0 || y < 0 || x as usize >= width || y as usize >= height || alpha == 0 || coverage <= 0.0 {
         return;
@@ -243,6 +244,7 @@ fn glyph_box(width: usize, height: usize, offset: usize, from_left: bool, margin
     ((cx - half).round() as i32, (cy - half).round() as i32, (cx + half).round() as i32, (cy + half).round() as i32)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_close_glyph(buf: &mut [u8], width: usize, height: usize, offset: usize, from_left: bool, margin: f32, alpha: u8, shade: (u8, u8, u8)) {
     let (x0, y0, x1, y1) = glyph_box(width, height, offset, from_left, margin);
     blend_glyph_line(buf, width, height, (x0, y0), (x1, y1), alpha, shade);
@@ -254,6 +256,7 @@ pub(super) fn draw_close_glyph(buf: &mut [u8], width: usize, height: usize, offs
 /// convention), and still what a traffic-light-style maximize falls back
 /// to if it doesn't get `draw_zoom_glyph` instead. See `titlebar::
 /// render_titlebar`'s own call site for which mode picks which.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_maximize_glyph(buf: &mut [u8], width: usize, height: usize, offset: usize, from_left: bool, margin: f32, alpha: u8, shade: (u8, u8, u8)) {
     let (x0, y0, x1, y1) = glyph_box(width, height, offset, from_left, margin);
     blend_glyph_line(buf, width, height, (x0, y0), (x1, y0), alpha, shade);
@@ -262,6 +265,7 @@ pub(super) fn draw_maximize_glyph(buf: &mut [u8], width: usize, height: usize, o
     blend_glyph_line(buf, width, height, (x1, y0), (x1, y1), alpha, shade);
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_minimize_glyph(buf: &mut [u8], width: usize, height: usize, offset: usize, from_left: bool, margin: f32, alpha: u8, shade: (u8, u8, u8)) {
     let (x0, y0, x1, y1) = glyph_box(width, height, offset, from_left, margin);
     let mid = (y0 + y1) / 2;
@@ -277,6 +281,7 @@ pub(super) fn draw_minimize_glyph(buf: &mut [u8], width: usize, height: usize, o
 /// glyph here already uses, so this reads as the same family of icon
 /// rather than a different rendering technique bolted on just for this one
 /// shape.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_zoom_glyph(buf: &mut [u8], width: usize, height: usize, offset: usize, from_left: bool, margin: f32, alpha: u8, shade: (u8, u8, u8)) {
     let (x0, y0, x1, y1) = glyph_box(width, height, offset, from_left, margin);
     blend_glyph_line(buf, width, height, (x0, y1), (x1, y0), alpha, shade);

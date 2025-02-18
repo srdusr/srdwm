@@ -171,8 +171,16 @@ where
 /// comment) or because it hasn't been attempted yet this call; either way
 /// the caller's fallback is the same: render `surface`'s content unrounded
 /// via [`surface_content_elements`].
+/// Cache entry for [`rounded_content_buffer`]: `(content_epoch, radius_bits,
+/// loc, size, masked_buffer)` - keyed by [`srdwm_core::WindowId`], one entry
+/// per window. The four values ahead of the buffer are exactly what that
+/// function's own staleness check compares against on every call; see its
+/// doc comment for why each one has to be part of the key.
+pub(crate) type RoundedContentCache = std::collections::HashMap<srdwm_core::WindowId, (u64, u32, (i32, i32), (i32, i32), smithay::backend::renderer::element::memory::MemoryRenderBuffer)>;
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn rounded_content_buffer<'a>(
-    cache: &'a mut std::collections::HashMap<srdwm_core::WindowId, (u64, u32, (i32, i32), (i32, i32), smithay::backend::renderer::element::memory::MemoryRenderBuffer)>,
+    cache: &'a mut RoundedContentCache,
     renderer: &mut smithay::backend::renderer::pixman::PixmanRenderer,
     epoch: u64,
     id: srdwm_core::WindowId,

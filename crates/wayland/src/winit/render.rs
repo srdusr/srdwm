@@ -105,7 +105,7 @@ impl WaylandPlatform {
         {
             let color_filter = self.wm.borrow().color_filter;
             let output_name = self.output.name();
-            let buf = self.state.color_filter_buffers.entry(output_name).or_insert_with(SolidColorBuffer::default);
+            let buf = self.state.color_filter_buffers.entry(output_name).or_default();
             if let Some(elem) = crate::color_filter::render_element(buf, color_filter, (size.w, size.h)) {
                 custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Solid(elem)));
             }

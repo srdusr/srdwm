@@ -154,6 +154,7 @@ impl CompState {
         // frame-callback loop below (after `udev` is no longer borrowed)
         // can notify only the windows that damage actually overlapped --
         // see `windows_touched_by_damage`'s doc comment in elements.rs.
+        #[allow(clippy::type_complexity)]
         let mut presented: Vec<(Output, Point<i32, Logical>, Vec<Rectangle<i32, Physical>>)> = Vec::new();
         for (index, output) in ready {
             let lock_surface = self.lock_surface_for(&output).cloned();
@@ -193,7 +194,7 @@ impl CompState {
                 // pointer itself. See `color_filter::render_element` for
                 // why an overlay rather than a true per-pixel shader.
                 let color_filter = self.wm.borrow().color_filter;
-                let buf = self.color_filter_buffers.entry(output.name()).or_insert_with(SolidColorBuffer::default);
+                let buf = self.color_filter_buffers.entry(output.name()).or_default();
                 if let Some(elem) = crate::color_filter::render_element(buf, color_filter, hsize) {
                     custom_elements.push(crate::elements::OverlayElement::Solid(elem));
                 }

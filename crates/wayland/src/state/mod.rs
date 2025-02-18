@@ -481,7 +481,7 @@ pub(crate) struct CompState {
     /// shader instead, `rounded_corners_program`), but costs nothing to
     /// declare here unconditionally, the same call `rounded_corners_
     /// program` itself already makes.
-    pub(crate) rounded_content_buffers: HashMap<WindowId, (u64, u32, (i32, i32), (i32, i32), MemoryRenderBuffer)>,
+    pub(crate) rounded_content_buffers: crate::elements::RoundedContentCache,
     /// Persistent solid-colour buffers backing a window's other three
     /// border strips (bottom, left, right - `decoration::border_strips`'
     /// order past index 0), reused by position every frame rather than
