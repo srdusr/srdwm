@@ -361,23 +361,6 @@ impl CompState {
                         false
                     };
                     let border_curve_is_safe = w.decorated || content_will_be_masked;
-                    // Temporary: a peer session precisely measured a real
-                    // window's border curving correctly while its content
-                    // stayed hard-square (radius 0), despite both this
-                    // probe and the real content-render call ~200 lines
-                    // below passing identical arguments against the same
-                    // cache - logs the three inputs that decide which
-                    // branch each one actually takes, so a live repro
-                    // says definitively whether `w.decorated` is really
-                    // `false` here (the rule's own intent) or the mask
-                    // genuinely succeeds-then-somehow-doesn't-render.
-                    // Remove once resolved.
-                    log::debug!(
-                        "udev::render: corner-mask state for {} (id {id:?}): decorated={} content_will_be_masked={content_will_be_masked} border_curve_is_safe={border_curve_is_safe} resizing={}",
-                        w.app_id,
-                        w.decorated,
-                        self.wm.borrow().resizing_window() == Some(id)
-                    );
                     // Pushed *before* the titlebar band below, deliberately --
                     // unlike the bottom/side strips further down, this one
                     // isn't confined to `geometry`'s own outside: whenever
@@ -429,15 +412,6 @@ impl CompState {
                                 let (row0, rows, shift) = decoration::border_top_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);
                                 let pos = ((strips[0].x - origin.x) as f64, (strips[0].y - origin.y + shift as i32) as f64);
                                 let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((strips[0].width as f64, rows as f64))));
-                                // Temporary: chasing a live report that the
-                                // bottom two corners render square while the
-                                // top two curve correctly, on the same
-                                // window, same frame. Logs this strip's own
-                                // computed rows/shift/position so a live
-                                // repro can be compared directly against the
-                                // matching bottom-strip line below. Remove
-                                // once resolved.
-                                log::debug!("udev::render: TOP border strip for {} (id {id:?}): row0={row0} rows={rows} shift={shift} pos={pos:?} strip_rect={:?}", w.app_id, strips[0]);
                                 match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, src, None, Kind::Unspecified) {
                                     Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
                                     Err(e) => log::warn!("udev: failed to import top border buffer: {e}"),
@@ -508,9 +482,6 @@ impl CompState {
                                 let (row0, rows, shift) = decoration::border_bottom_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);
                                 let pos = ((strips[1].x - origin.x) as f64, (strips[1].y - origin.y - shift as i32) as f64);
                                 let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((strips[1].width as f64, rows as f64))));
-                                // Temporary: see the matching TOP border log
-                                // above. Remove once resolved.
-                                log::debug!("udev::render: BOTTOM border strip for {} (id {id:?}): row0={row0} rows={rows} shift={shift} pos={pos:?} strip_rect={:?}", w.app_id, strips[1]);
                                 match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, src, None, Kind::Unspecified) {
                                     Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
                                     Err(e) => log::warn!("udev: failed to import bottom border buffer: {e}"),

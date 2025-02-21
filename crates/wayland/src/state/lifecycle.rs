@@ -211,31 +211,6 @@ impl CompState {
             }
             if strips[1].width > 0 && strips[1].height > 0 {
                 let data = decoration::render_border_bottom(strips[1].width, w.border_width, color, w.corner_radius);
-                // Temporary: chasing a live report that the bottom two
-                // corners render as a solid, uncurved block for the buffer's
-                // own "extra" rows (0..height-thickness) while the nominal
-                // rows (height-thickness..height) curve correctly. Dumps the
-                // alpha byte at x=0..11 for row 0 (should already show some
-                // cutting per a standalone simulation of this exact
-                // algorithm) and the last nominal row, straight out of the
-                // buffer this function just built - before it's wrapped
-                // into a MemoryRenderBuffer at all, so this is ground truth
-                // for whether `render_border_bottom` itself is the problem
-                // or something downstream of it is. Remove once resolved.
-                let w_usize = strips[1].width.max(1) as usize;
-                let h_usize = strip_h.max(1) as usize;
-                let alpha_row = |row: usize| -> Vec<u8> {
-                    (0..12.min(w_usize)).map(|x| data.get((row * w_usize + x) * 4 + 3).copied().unwrap_or(255)).collect()
-                };
-                log::debug!(
-                    "udev::lifecycle: BOTTOM border buffer for {} (id {id:?}): dims={w_usize}x{h_usize} row0_alpha={:?} row3_alpha={:?} row7_alpha={:?} row8_alpha={:?} row11_alpha={:?}",
-                    w.app_id,
-                    alpha_row(0),
-                    alpha_row(3.min(h_usize.saturating_sub(1))),
-                    alpha_row(7.min(h_usize.saturating_sub(1))),
-                    alpha_row(8.min(h_usize.saturating_sub(1))),
-                    alpha_row(11.min(h_usize.saturating_sub(1))),
-                );
                 let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (strips[1].width as i32, strip_h as i32), 1, Transform::Normal, None);
                 self.border_bottom_decorations.insert(id, buffer);
             } else {
