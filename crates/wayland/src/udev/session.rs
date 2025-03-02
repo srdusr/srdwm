@@ -102,6 +102,39 @@ pub(crate) fn register_session_notifier(handle: &LoopHandle<'static, CompState>,
                         if let Err(e) = card.set_crtc(head.crtc, Some(fb), (0, 0), &[head.connector], Some(head.mode)) {
                             log::warn!("udev: failed to reassert crtc on resume: {e}");
                         }
+                        // A real VT-switch-back can leave the panel itself
+                        // powered down (DPMS off/standby) even once the CRTC
+                        // above is genuinely re-driving it - mode-setting
+                        // and display power are two separate pieces of KMS
+                        // state, and only the former was ever touched here.
+                        // Confirmed live: page flips kept succeeding with no
+                        // error logged anywhere (this backend's own
+                        // `copy_and_flip` never saw a failure) for the rest
+                        // of a 30+ minute session after a real switch-away-
+                        // and-back, and neither the screen nor keyboard
+                        // input ever recovered on their own - every frame
+                        // was genuinely being composited and flipped to a
+                        // CRTC the panel simply wasn't lit to show. Setting
+                        // "DPMS" straight to on here, unconditionally, is
+                        // the same property `set_output_power` already
+                        // writes for `zwlr_output_power_v1` - this is just
+                        // that same write happening automatically on every
+                        // resume instead of only when a client explicitly
+                        // asks, since nothing else in this codebase ever
+                        // calls it after a VT switch. A no-op on hardware
+                        // that never needed it (the property is simply
+                        // already `on`, or genuinely absent on some virtual/
+                        // headless outputs - `find` below just yields
+                        // nothing and this silently continues to the next
+                        // head either way).
+                        const DRM_MODE_DPMS_ON: u64 = 0;
+                        if let Ok(props) = card.get_properties(head.connector) {
+                            if let Some(dpms_prop) = props.as_props_and_values().0.iter().copied().find(|&h| card.get_property(h).is_ok_and(|info| info.name().to_str() == Ok("DPMS"))) {
+                                if let Err(e) = card.set_property(head.connector, dpms_prop, DRM_MODE_DPMS_ON) {
+                                    log::warn!("udev: failed to reassert DPMS-on for output {} on resume: {e}", head.output.name());
+                                }
+                            }
+                        }
                         // Force a full repaint: contents are undefined after
                         // the VT switch (another VT's session may have
                         // scanned out something else entirely in between).

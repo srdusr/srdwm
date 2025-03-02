@@ -201,6 +201,37 @@ impl WaylandPlatform {
             // really committed - see `effective_frame`'s own doc comment
             // and the matching comment in `udev/render.rs`'s render loop.
             let frame = self.state.effective_frame(id, geom);
+            // Whether this window's *content* will actually get its
+            // corners rounded this frame - an undecorated (CSD) window's
+            // border has no titlebar band to safely absorb its own top/
+            // bottom strip's curve-only "extra" rows into (see `decoration::
+            // border_top_visible_rows`'s doc comment), so cropping them --
+            // and the flat side strips below, which would otherwise poke a
+            // solid-coloured straight line through that curve's own
+            // transparent cutout - is only safe when the *content* is
+            // also going to be cut to match. This used to check `w.decorated`
+            // alone, which is wrong for exactly the CSD case those crops
+            // exist for in the first place: an undecorated window's border
+            // never got cropped at all, regardless of whether its content
+            // masking would actually succeed, guaranteeing the square-
+            // meets-curve artifact this doc comment is describing on every
+            // single CSD window with a nonzero `border_width` - reported
+            // live (screenshot + raw pixel sampling) as a hard right-angle
+            // "staircase" where a smooth curve should be, on both a CSD
+            // window (Firefox, content masking legitimately in play) and,
+            // via the matching bug in `udev/render.rs`, windows this same
+            // reasoning also affects there. `rounded_content_element`'s own
+            // (and `rounded_corners_pixman::masked_content_buffer`'s, on
+            // the udev backend) only real failure mode is a surface with
+            // subsurface children - checking that directly here is the
+            // same cheap, single-condition test both of those already
+            // gate on internally, without needing to actually run either
+            // one's real (comparatively expensive) rendering work twice
+            // just to ask "would this have worked".
+            let content_will_be_masked = rounded_corners_enabled
+                && self.wm.borrow().resizing_window() != Some(id)
+                && self.state.id_to_window.get(&id).and_then(crate::elements::window_wl_surface).is_some_and(|surface| smithay::wayland::compositor::get_children(&surface).is_empty());
+            let border_curve_is_safe = w.decorated || content_will_be_masked;
             if let Some(deco) = self.state.decorations.get(&id) {
                 // Fragment-clipped, same as udev/render.rs's matching titlebar
                 // push - see that comment for why all-or-nothing (skip
@@ -252,7 +283,7 @@ impl WaylandPlatform {
                         // titlebar band to safely absorb this buffer's own
                         // corner-curve-only extra rows, so they're cropped
                         // away instead of landing on real content.
-                        let (row0, rows, shift) = decoration::border_top_visible_rows(w.decorated, w.border_width, w.corner_radius);
+                        let (row0, rows, shift) = decoration::border_top_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);
                         let pos = (strips[0].x as f64, (strips[0].y + shift as i32) as f64);
                         let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((strips[0].width as f64, rows as f64))));
                         match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, src, None, Kind::Unspecified) {
@@ -268,7 +299,7 @@ impl WaylandPlatform {
                     if let Some(buffer) = self.state.border_bottom_decorations.get(&id) {
                         // See `decoration::border_bottom_visible_rows`'s
                         // own doc comment.
-                        let (row0, rows, shift) = decoration::border_bottom_visible_rows(w.decorated, w.border_width, w.corner_radius);
+                        let (row0, rows, shift) = decoration::border_bottom_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);
                         let pos = (strips[1].x as f64, (strips[1].y - shift as i32) as f64);
                         let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((strips[1].width as f64, rows as f64))));
                         match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, src, None, Kind::Unspecified) {
@@ -286,11 +317,15 @@ impl WaylandPlatform {
                 // solid fill bled through the curve's own transparent
                 // cutout as a straight vertical line poking out of an
                 // otherwise correctly-rounded corner - reported live,
-                // confirmed via raw pixel sampling on the udev backend;
-                // this backend shares the identical strip geometry and was
-                // never actually confirmed clean, just never specifically
-                // screenshotted the same way.
-                let extra = if w.decorated { w.border_width.max(w.corner_radius).saturating_sub(w.border_width) } else { 0 };
+                // confirmed via raw pixel sampling: a hard right-angle
+                // "staircase" instead of a curve, on an undecorated (CSD)
+                // window specifically, since `border_curve_is_safe` (not
+                // `w.decorated` alone - see this window's own doc comment
+                // above) is what actually decides whether this crop is
+                // safe to apply, and the CSD case is exactly the one
+                // `w.decorated` alone always answered "no" to regardless
+                // of whether content masking would really succeed.
+                let extra = if border_curve_is_safe { w.border_width.max(w.corner_radius).saturating_sub(w.border_width) } else { 0 };
                 let mut side_strips = [strips[2], strips[3]];
                 for s in &mut side_strips {
                     s.y += extra as i32;
