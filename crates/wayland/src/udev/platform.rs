@@ -269,8 +269,8 @@ impl UdevPlatform {
 
         let handle = event_loop.handle();
         register_drm_fd(&handle, &card)?;
-        register_libinput(&handle, &session, &seat_name)?;
-        register_session_notifier(&handle, notifier)?;
+        let libinput_handle = register_libinput(&handle, &session, &seat_name)?;
+        register_session_notifier(&handle, notifier, libinput_handle)?;
         if let Err(e) = register_udev_monitor(&handle, &seat_name) {
             log::warn!("udev: connector hotplug unavailable ({e}); monitors are fixed at startup");
         }

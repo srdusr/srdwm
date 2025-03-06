@@ -38,9 +38,20 @@ pub(crate) fn register_drm_fd(handle: &LoopHandle<'static, CompState>, card: &Rc
     Ok(())
 }
 
-pub(crate) fn register_libinput(handle: &LoopHandle<'static, CompState>, session: &LibSeatSession, seat_name: &str) -> PlatformResult<()> {
+/// Registers the real libinput event source and hands back a second,
+/// reference-counted handle onto the exact same underlying context (`Libinput`
+/// wraps a `libinput_ref`/`libinput_unref`-counted C pointer - see its own
+/// `Clone` impl - so this is the same live context `LibinputInputBackend`
+/// dispatches events from, not a separate one) for `register_session_notifier`
+/// to call `suspend()`/`resume()` on across a VT switch. `LibinputInputBackend`
+/// itself only ever exposes an immutable `&Libinput` (`context()`), and is
+/// moved into calloop's event source registration below with no way to get
+/// a `&mut` back out afterward - cloning before that move is the only way
+/// to keep a callable handle at all.
+pub(crate) fn register_libinput(handle: &LoopHandle<'static, CompState>, session: &LibSeatSession, seat_name: &str) -> PlatformResult<Libinput> {
     let mut libinput_context = Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(session.clone().into());
     libinput_context.udev_assign_seat(seat_name).map_err(|_| PlatformError::Other("udev: libinput udev_assign_seat failed".into()))?;
+    let resume_handle = libinput_context.clone();
     let libinput_backend = LibinputInputBackend::new(libinput_context);
 
     handle
@@ -48,10 +59,16 @@ pub(crate) fn register_libinput(handle: &LoopHandle<'static, CompState>, session
             handle_libinput_event(data, event);
         })
         .map_err(|e| PlatformError::Other(format!("failed to register libinput backend: {e}")))?;
-    Ok(())
+    Ok(resume_handle)
 }
 
-pub(crate) fn register_session_notifier(handle: &LoopHandle<'static, CompState>, notifier: LibSeatSessionNotifier) -> PlatformResult<()> {
+/// `libinput` is a second handle onto the exact same context
+/// `register_libinput` gave its own event source - see that function's own
+/// doc comment for why a clone is the only way to get one at all. Kept
+/// alive by this closure for as long as this event source is registered
+/// (the entire life of the process), purely so `suspend()`/`resume()` can be
+/// called on it here.
+pub(crate) fn register_session_notifier(handle: &LoopHandle<'static, CompState>, notifier: LibSeatSessionNotifier, mut libinput: Libinput) -> PlatformResult<()> {
     handle
         .insert_source(notifier, move |event, &mut (), data: &mut CompState| {
             let Some(udev) = data.udev.as_mut() else { return };
@@ -59,10 +76,42 @@ pub(crate) fn register_session_notifier(handle: &LoopHandle<'static, CompState>,
                 SessionEvent::PauseSession => {
                     log::info!("udev: session paused (VT switch away)");
                     udev.active = false;
+                    // Not strictly required (the kernel revokes every input
+                    // device's fd across a VT switch regardless), but this
+                    // is the documented, correct way to tell libinput that's
+                    // about to happen rather than let it discover revoked
+                    // fds as surprise read errors - see `resume()`'s own
+                    // doc comment below for why the other half of this pair
+                    // is not optional at all.
+                    libinput.suspend();
                 }
                 SessionEvent::ActivateSession => {
                     log::info!("udev: session resumed (VT switch back)");
                     udev.active = true;
+                    // Without this, libinput's own internal device list
+                    // stays exactly as it was before the switch away, still
+                    // holding the same file descriptors the kernel already
+                    // revoked the moment this session lost the VT --
+                    // `receive_events`/`dispatch` on a revoked fd doesn't
+                    // error, it just silently never produces another event,
+                    // forever. Confirmed live: after one real VT switch, no
+                    // further keyboard or mouse input reached this
+                    // compositor for the rest of the session (30+ minutes,
+                    // multiple confirmed attempts) with literally nothing
+                    // logged anywhere to explain it - rendering, the DRM/
+                    // DPMS state above, and even libseat's own session
+                    // activation all recovered correctly on their own, which
+                    // is what made this the one piece actually missing
+                    // rather than a repeat of the DPMS bug. `resume()`
+                    // (`libinput_resume`) is libinput's own documented API
+                    // for exactly this: it re-opens every device through
+                    // the (now reactivated) session and resumes producing
+                    // real events, the same call every other libinput-based
+                    // compositor's session-resume path makes and this one
+                    // never did.
+                    if libinput.resume().is_err() {
+                        log::warn!("udev: libinput resume failed after VT switch back - input devices may not recover; a full restart will be needed if so");
+                    }
                     let card = udev.card.clone();
 
                     // A flip issued right before the VT switch away may
