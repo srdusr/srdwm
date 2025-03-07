@@ -231,6 +231,13 @@ pub(crate) struct UdevState {
     /// regardless (every head starts with `ages: [0, 0]` - see
     /// `UdevHead`'s own field).
     pub(crate) last_rendered_workspace: Option<srdwm_core::WorkspaceId>,
+    /// Order-sensitive hash of every visible window's id and rect, compared
+    /// each frame in `render_udev_frame` to force `ages` back to `[0, 0]`
+    /// on any move/resize/open/close/restack - see that comparison's own
+    /// doc comment for the live-reproduced ghost-content bug this catches.
+    /// `None` before the first frame, same reasoning as `last_rendered_
+    /// workspace` above (renders fully regardless).
+    pub(crate) last_rendered_layout: Option<u64>,
 }
 
 impl UdevState {

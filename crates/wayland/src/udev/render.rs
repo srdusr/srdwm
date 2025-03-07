@@ -46,7 +46,40 @@ impl CompState {
         // happen per head below without needing `self` itself mutably) --
         // see the per-head loop for why decoration/border buffers still get
         // looked up fresh per head (head-local `origin` translation).
-        let ids: Vec<srdwm_core::WindowId> = if locked { Vec::new() } else { self.wm.borrow().visible_windows_front_to_back().map(|w| w.id).collect() };
+        // `layout_signature` folds in every visible window's id and rect
+        // (order-sensitive, so a restack counts as a change too) - compared
+        // against `udev.last_rendered_layout` below to force `ages = [0, 0]`
+        // whenever a window moves, resizes, opens, closes, or restacks
+        // between one frame and the next. Without this, a window vacating
+        // part of the screen (closing, moving away, un-maximizing) can leave
+        // stale content from its old position baked into whichever DRM
+        // buffer isn't due to be written again for a while - confirmed
+        // live: maximizing a window over a second one, then un-maximizing,
+        // left a persistent ghost of the second window's old titlebar/status
+        // text sitting in the vacated corner, unchanged across multiple
+        // otherwise-idle frames, because `OutputDamageTracker`'s own element-
+        // level diffing (relied on by the workspace-switch reset's own doc
+        // comment above) evidently doesn't always catch a vacated region on
+        // its own - most visible right where a rounded corner's mask should
+        // have revealed the desktop underneath but instead revealed this.
+        // Same "defensive, not a fix for a proven bug in the diffing itself"
+        // reasoning as the workspace-switch reset already documents; this is
+        // just a second, complementary trigger for the same reset.
+        let (ids, layout_signature): (Vec<srdwm_core::WindowId>, u64) = if locked {
+            (Vec::new(), 0)
+        } else {
+            let wm = self.wm.borrow();
+            let mut ids = Vec::new();
+            let mut sig: u64 = 0xcbf29ce484222325;
+            for w in wm.visible_windows_front_to_back() {
+                ids.push(w.id);
+                for part in [w.id, w.geometry.x as u64, w.geometry.y as u64, w.geometry.width as u64, w.geometry.height as u64] {
+                    sig ^= part;
+                    sig = sig.wrapping_mul(0x100000001b3);
+                }
+            }
+            (ids, sig)
+        };
         let focused = self.wm.borrow().focused_id();
         // Stays default `false` here, unlike winit's `unwrap_or(true)` --
         // see `rounded_corners_pixman`'s module doc comment for the real
@@ -102,6 +135,15 @@ impl CompState {
         let current_workspace = self.wm.borrow().current_workspace();
         if udev.last_rendered_workspace != Some(current_workspace) {
             udev.last_rendered_workspace = Some(current_workspace);
+            for head in &mut udev.heads {
+                head.ages = [0, 0];
+            }
+        }
+        // See `layout_signature`'s own doc comment above for what this
+        // catches that the workspace-switch reset above doesn't: any move,
+        // resize, open, close, or restack within the *same* workspace.
+        if !locked && udev.last_rendered_layout != Some(layout_signature) {
+            udev.last_rendered_layout = Some(layout_signature);
             for head in &mut udev.heads {
                 head.ages = [0, 0];
             }

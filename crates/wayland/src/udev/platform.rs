@@ -130,6 +130,7 @@ impl UdevPlatform {
             session: session.clone(),
             disabled_connectors: std::collections::HashSet::new(),
             last_rendered_workspace: None,
+            last_rendered_layout: None,
         };
 
         let mut state = CompState {
