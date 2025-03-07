@@ -64,7 +64,41 @@ impl CompState {
         // yet done.
         let Some(w) = wm.borrow().window(id).cloned() else { return geom };
         let Some(dwindow) = id_to_window.get(&id) else { return geom };
-        let content = dwindow.geometry();
+        // `dwindow.geometry()` - `xdg_surface::set_window_geometry` - is,
+        // per smithay's own implementation, that cached hint *intersected*
+        // with `bbox()`, falling back to `bbox()` only if the client never
+        // set one. Nothing in the protocol obliges a client to resend the
+        // hint on every resize (only when the visible-content-vs-buffer
+        // relationship itself changes), and `intersection()` can never
+        // return something larger than its smaller operand - so once a
+        // client's cached hint is smaller than its current real buffer,
+        // `geometry()` stays clamped there permanently, no matter how much
+        // larger the buffer grows afterward. Confirmed live: after a
+        // *passive* tiling reflow (this window resized only as a side
+        // effect of a sibling moving, no direct action on this window
+        // itself), Firefox's real content filled the correct, much larger
+        // area immediately, but its border/decoration - both driven by
+        // this function, see `redraw_decoration_buffer`'s and the render
+        // loops' own call sites - stayed rendered at a small fraction of
+        // that, unchanged for several seconds (long past both animation
+        // settling and any reasonable commit-throttle window), until an
+        // unrelated maximize/restore cycle on the same window happened to
+        // prompt Firefox into resending a fresh hint and self-correcting.
+        // `bbox()` - the real bounding box of the window's current surface
+        // tree - updates on every commit unconditionally, independent of
+        // whether the client also chose to resend the optional hint, so it
+        // has no equivalent staleness window. The one thing this gives up
+        // is excluding a CSD client's own invisible drop-shadow margin from
+        // the border/content area - but `sync_geometry` already
+        // unconditionally tells every window it is tiled on all four sides
+        // specifically so a compliant client (GTK4/Firefox concretely, see
+        // that function's own doc comment) reserves no such margin at all,
+        // so a compliant client loses nothing here. A client that ignores
+        // the tiled hint and reserves one anyway ends up with a border a
+        // few pixels larger than its real visible chrome - a real but
+        // strictly smaller, more cosmetic problem than one stuck at the
+        // wrong size and position indefinitely.
+        let content = dwindow.bbox();
         if content.size.w <= 0 || content.size.h <= 0 {
             // No real committed content yet - racing the first commit
             // right after creation, most likely. Nothing to correct
@@ -72,10 +106,11 @@ impl CompState {
             // collapsing every dimension down to (near) zero.
             return geom;
         }
-        // `content` is `xdg_surface::set_window_geometry` - specified to
-        // carry *logical* points, same as `sync_geometry`'s own `size`
-        // going the other direction (see that function's matching doc
-        // comment). Every caller of this method (border, shadow, occlusion,
+        // `content` (`bbox()`) is in the same *logical* points as
+        // `xdg_surface::set_window_geometry` would have been, same as
+        // `sync_geometry`'s own `size` going the other direction (see that
+        // function's matching doc comment). Every caller of this method
+        // (border, shadow, occlusion,
         // resize-margin hit-test) works in this compositor's own physical
         // convention, same as `geom` - so `content.size` needs converting
         // back to physical here, the same `* scale` `sync_geometry` divides
