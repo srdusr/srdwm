@@ -84,21 +84,44 @@ impl CompState {
         // settling and any reasonable commit-throttle window), until an
         // unrelated maximize/restore cycle on the same window happened to
         // prompt Firefox into resending a fresh hint and self-correcting.
-        // `bbox()` - the real bounding box of the window's current surface
-        // tree - updates on every commit unconditionally, independent of
-        // whether the client also chose to resend the optional hint, so it
-        // has no equivalent staleness window. The one thing this gives up
-        // is excluding a CSD client's own invisible drop-shadow margin from
-        // the border/content area - but `sync_geometry` already
-        // unconditionally tells every window it is tiled on all four sides
-        // specifically so a compliant client (GTK4/Firefox concretely, see
-        // that function's own doc comment) reserves no such margin at all,
-        // so a compliant client loses nothing here. A client that ignores
-        // the tiled hint and reserves one anyway ends up with a border a
-        // few pixels larger than its real visible chrome - a real but
-        // strictly smaller, more cosmetic problem than one stuck at the
-        // wrong size and position indefinitely.
-        let content = dwindow.bbox();
+        //
+        // A first fix switched outright to `bbox()` - the real bounding
+        // box of the window's current surface tree, which updates on every
+        // commit unconditionally - on the reasoning that `sync_geometry`
+        // already unconditionally tells every window it is tiled on all
+        // four sides specifically so a compliant client reserves no
+        // invisible shadow margin, so nothing would be lost by no longer
+        // excluding one. Wrong: confirmed live via temporary diagnostic
+        // logging, Chrome reserves a real, correctly-current 10px margin on
+        // all four sides regardless of the tiled hint (Firefox, the window
+        // that exposed the original bug, does not - the two disagree on
+        // this, not just on how quickly they resend the hint). Raw `bbox()`
+        // gave the border/content mask Chrome's *entire* buffer, margin
+        // included - 20px wider and taller than its real visible chrome on
+        // each axis, with no compensating position shift - so the rounded
+        // border curve traced a rectangle Chrome's real content never
+        // reached, and its true, still-square corner poked straight through
+        // the curve instead of being hidden by it.
+        //
+        // The fix keeps both properties at once: a margin, `dwindow_
+        // geometry.loc`, assumed symmetric (left == right, top == bottom --
+        // true of every real CSD shadow margin observed here: a fixed
+        // design constant, not something that scales with window size) is
+        // far more durable than the rest of that same hint. A resize
+        // changes a client's real content size; it does not change how
+        // large that client's own shadow is, so the margin has no
+        // equivalent staleness window even while the hint's absolute size
+        // does. Subtracting it from the always-fresh `bbox()` - instead of
+        // trusting the hint's own absolute size (stale-prone) or using
+        // bbox() raw (margin-blind) - gets a content rect that is both
+        // current and correctly excludes the invisible margin, for a
+        // client that reserves one (Chrome) and one that doesn't (Firefox,
+        // where the hint's `.loc` is always `(0, 0)` and this reduces to
+        // plain `bbox()`) alike.
+        let dwindow_geometry = dwindow.geometry();
+        let bbox = dwindow.bbox();
+        let margin = (dwindow_geometry.loc.x.max(0), dwindow_geometry.loc.y.max(0));
+        let content = Rectangle::new(bbox.loc, (bbox.size.w - 2 * margin.0, bbox.size.h - 2 * margin.1).into());
         if content.size.w <= 0 || content.size.h <= 0 {
             // No real committed content yet - racing the first commit
             // right after creation, most likely. Nothing to correct
