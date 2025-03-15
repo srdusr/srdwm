@@ -87,7 +87,13 @@ pub(crate) fn round_top_corners(buf: &mut [u8], width: usize, height: usize, rad
             blend_corner_pixel(buf, width, x, y, rf, cy, rf);
         }
         for x in (width - r)..width {
-            blend_corner_pixel(buf, width, x, y, (width - r - 1) as f32, cy, rf);
+            // `width - r`, not `width - r - 1` - see `blend_corner_pixel`'s
+            // own doc comment: that `- 1` compensated for this function not
+            // sampling at the pixel centre, which it now does, so the
+            // right corner's centre column lines up with `rounded_corners_
+            // pixman.rs`'s `apply_corner_mask` (`px.clamp(radius, wf -
+            // radius)`, which clamps to exactly `w - r` here) without it.
+            blend_corner_pixel(buf, width, x, y, (width - r) as f32, cy, rf);
         }
     }
 }
@@ -115,7 +121,20 @@ pub(crate) fn round_top_corners(buf: &mut [u8], width: usize, height: usize, rad
 /// `clipped_corner_pixels_are_fully_premultiplied_zero_not_just_alpha`
 /// already established for the hard-cut case this replaces.
 fn blend_corner_pixel(buf: &mut [u8], width: usize, x: usize, y: usize, cx: f32, cy: f32, radius: f32) {
-    let (dx, dy) = (x as f32 - cx, y as f32 - cy);
+    // Sampled at the pixel's own *center* (`+ 0.5`), not its raw integer
+    // coordinate - matching `rounded_corners_pixman.rs`'s `apply_corner_
+    // mask` (`px = x as f32 + 0.5`) and `rounded_corners.rs`'s GLES shader,
+    // both of which already use this standard rasterization convention.
+    // This function didn't, a half-pixel systematic difference between
+    // this border-strip curve and the client-content curve it's supposed
+    // to trace exactly the same circle as - confirmed live at extreme
+    // zoom: a small but real right-angle step partway along an otherwise
+    // smooth arc, right where the two curves are supposed to meet
+    // (reported as "squares on the inside corners of each vertex").
+    // `round_top_corners`/`round_bottom_corners`'s own right-edge/bottom
+    // `cx`/`cy` had a compensating `- 1` baked in against the *old*
+    // convention - removed alongside this, see their own doc comments.
+    let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
     let dist = (dx * dx + dy * dy).sqrt();
     let t = ((dist - (radius - 1.0)) / 2.0).clamp(0.0, 1.0);
     let mask = 1.0 - (t * t * (3.0 - 2.0 * t));
@@ -150,16 +169,23 @@ pub(crate) fn round_bottom_corners(buf: &mut [u8], width: usize, height: usize, 
     let rf = r as f32;
     // As a float, not the signed-`i64`-offset trick the hard-cut version
     // needed to avoid a `usize` underflow - `blend_corner_pixel` already
-    // takes float centres, so `height - r - 1` going negative when `r >
+    // takes float centres, so `height - r` going negative when `r >
     // height` (the strip-thinner-than-radius case above) is just a
-    // negative `f32`, no special-casing required.
-    let cy = height as f32 - rf - 1.0;
+    // negative `f32`, no special-casing required. Plain `height - r`, not
+    // `height - r - 1` - see `blend_corner_pixel`'s own doc comment: that
+    // `- 1` compensated for this function not sampling at the pixel
+    // centre, which it now does, so this lines up with `rounded_corners_
+    // pixman.rs`'s own bottom-box centre (`py.clamp(radius, hf - radius)`,
+    // which clamps to exactly `h - r`) without it.
+    let cy = height as f32 - rf;
     for y in (height - rows)..height {
         for x in 0..r {
             blend_corner_pixel(buf, width, x, y, rf, cy, rf);
         }
         for x in (width - r)..width {
-            blend_corner_pixel(buf, width, x, y, (width - r - 1) as f32, cy, rf);
+            // See `round_top_corners`'s matching comment for why this is
+            // `width - r`, not `width - r - 1`.
+            blend_corner_pixel(buf, width, x, y, (width - r) as f32, cy, rf);
         }
     }
 }
