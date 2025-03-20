@@ -629,6 +629,25 @@ impl Platform for UdevPlatform {
 
     fn apply_geometry(&mut self, window: srdwm_core::WindowId, _geometry: srdwm_core::Rect) -> PlatformResult<()> {
         self.state.sync_geometry(window);
+        // `redraw_decoration_buffer` sizes the cached border-strip/titlebar
+        // bitmaps from `effective_frame`, which (see that function's own
+        // doc comment) can differ from `w.geometry` alone once a CSD
+        // client's own invisible shadow margin enters the picture. Without
+        // this, the bitmap stays sized from whatever it was last built at
+        // - correct right up until this specific call changes `w.geometry`
+        // (`toggle_maximize`/`apply_snap_zone`, the two core-side callers of
+        // this callback) - and the *next* rebuild only happens whenever
+        // this window's own client next commits (`protocols/compositor.rs`'s
+        // per-commit call) or something else unrelated triggers one, not
+        // reliably right away. Confirmed live: maximizing then restoring a
+        // Chrome window left its border strips sized for the *maximized*
+        // frame while its real content had already settled back to the
+        // smaller restored size, immediately and permanently until some
+        // later unrelated trigger (a fresh commit) happened to catch it up
+        // - a real, visible gap between content and border on the far
+        // edges, not the half-pixel seam `blend_corner_pixel`'s own fix
+        // addressed.
+        self.state.redraw_decoration_buffer(window);
         Ok(())
     }
 
@@ -660,6 +679,8 @@ impl Platform for UdevPlatform {
 
     fn restore(&mut self, window: srdwm_core::WindowId) -> PlatformResult<()> {
         self.state.sync_geometry(window);
+        // See `apply_geometry`'s own doc comment - same gap, same fix.
+        self.state.redraw_decoration_buffer(window);
         Ok(())
     }
 

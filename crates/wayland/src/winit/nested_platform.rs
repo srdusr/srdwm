@@ -102,6 +102,10 @@ impl Platform for WaylandPlatform {
     fn apply_geometry(&mut self, window: WindowId, geometry: srdwm_core::Rect) -> PlatformResult<()> {
         let _ = geometry;
         self.state.sync_geometry(window);
+        // See `udev/platform.rs`'s own `apply_geometry` doc comment - same
+        // gap (the cached border/titlebar bitmap only rebuilds on a commit,
+        // focus change, or a few specific paths, not this one), same fix.
+        self.state.redraw_decoration_buffer(window);
         Ok(())
     }
 
@@ -126,6 +130,7 @@ impl Platform for WaylandPlatform {
 
     fn restore(&mut self, window: WindowId) -> PlatformResult<()> {
         self.state.sync_geometry(window);
+        self.state.redraw_decoration_buffer(window);
         Ok(())
     }
 
