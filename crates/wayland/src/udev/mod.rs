@@ -531,6 +531,7 @@ mod copy_damaged_rows_tests {
 
 mod capture;
 mod drm;
+pub(crate) mod gpu;
 mod outputs;
 mod platform;
 mod render;

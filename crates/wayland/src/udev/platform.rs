@@ -36,6 +36,11 @@ impl UdevPlatform {
             .open(&gpu_path, rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC)
             .map_err(err)?;
         let card = Rc::new(Card(fd));
+        // Opt-in only (`SRDWM_GPU=1`, unset by default) - see `gpu::probe`'s
+        // own doc comment for exactly what this does and does not do yet.
+        // A no-op unless that variable is set, so this line changes nothing
+        // about any session that doesn't set it.
+        let _gpu_probe = super::gpu::probe(&card);
 
         // Every connected connector becomes a head, laid out left-to-right.
         let connected = probe_connected(&card)?;

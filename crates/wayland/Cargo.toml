@@ -62,6 +62,13 @@ features = [
     "backend_libinput",
     "backend_udev",
     "backend_session_libseat",
+    # `backend_egl`/`backend_gbm`: the udev backend's opt-in (`SRDWM_GPU=1`)
+    # GPU render path - see `udev/gpu.rs`'s own module doc comment. Additive
+    # to the existing `renderer_pixman` dumb-buffer path below, not a
+    # replacement: that path stays the default for portability (a low-spec
+    # machine or a VM with no GBM/3D support still needs it to work).
+    "backend_egl",
+    "backend_gbm",
     "renderer_gl",
     "renderer_pixman",
     "desktop",
