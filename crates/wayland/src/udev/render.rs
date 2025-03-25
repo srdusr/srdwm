@@ -212,6 +212,35 @@ impl CompState {
             let origin = self.udev.as_ref().map(|u| u.heads[index].location).unwrap_or_default();
 
             let Some(udev) = self.udev.as_mut() else { return };
+            let head_crtc = udev.heads[index].crtc;
+            // Phase 2 of the GPU-rendering plan (`gpu.rs`'s own module doc
+            // comment): the one head `initialize_output` was called for
+            // (if `SRDWM_GPU=1` and everything up to that point succeeded)
+            // renders a plain clear color through the real GBM+EGL+
+            // DrmCompositor pipeline instead of anything below - no
+            // window content, decorations, or cursor yet, deliberately
+            // (see that module's own doc comment for why). Every other
+            // head, and this same head whenever `udev.gpu`/its `output`
+            // is `None`, falls straight through to the existing,
+            // untouched Pixman path unchanged.
+            if let Some(gpu) = udev.gpu.as_mut() {
+                if let Some((gpu_crtc, gpu_output)) = gpu.output.as_mut() {
+                    if *gpu_crtc == head_crtc {
+                        let elements: [smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<smithay::backend::renderer::gles::GlesRenderer>; 0] = [];
+                        let clear_color = [0.05, 0.05, 0.08, 1.0];
+                        match gpu_output.render_frame(&mut gpu.renderer, &elements, clear_color, smithay::backend::drm::compositor::FrameFlags::DEFAULT) {
+                            Ok(res) if !res.is_empty => match gpu_output.queue_frame(None) {
+                                Ok(()) => {}
+                                Err(e) => log::warn!("udev: SRDWM_GPU=1 queue_frame failed for crtc {head_crtc:?}: {e:?}"),
+                            },
+                            Ok(_) => {}
+                            Err(e) => log::warn!("udev: SRDWM_GPU=1 render_frame failed for crtc {head_crtc:?}: {e:?}"),
+                        }
+                        continue;
+                    }
+                }
+            }
+
             let head = &mut udev.heads[index];
             let back = 1 - head.front;
 

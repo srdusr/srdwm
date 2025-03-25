@@ -238,6 +238,13 @@ pub(crate) struct UdevState {
     /// `None` before the first frame, same reasoning as `last_rendered_
     /// workspace` above (renders fully regardless).
     pub(crate) last_rendered_layout: Option<u64>,
+    /// Set only when `SRDWM_GPU=1` and `gpu::probe` succeeds on this
+    /// hardware - see that function's own doc comment for exactly what
+    /// it does and does not do yet. `None` (the default, every session
+    /// that doesn't set the env var, and every one where the probe fails)
+    /// means every head renders through `renderer`/`PixmanRenderer` above,
+    /// completely unaffected by this field's existence.
+    pub(crate) gpu: Option<gpu::GpuContext>,
 }
 
 impl UdevState {

@@ -38,6 +38,51 @@ pub(crate) fn register_drm_fd(handle: &LoopHandle<'static, CompState>, card: &Rc
     Ok(())
 }
 
+/// Registers the `DrmDeviceNotifier` [`gpu::probe`](super::gpu::probe)
+/// returns on success as its own calloop event source - a real,
+/// independent `DrmDevice`/fd from the legacy one [`register_drm_fd`]
+/// above already watches, so this is a second, parallel registration, not
+/// a replacement. Only called from `udev/platform.rs`'s startup path when
+/// `SRDWM_GPU=1` and the probe actually succeeded; a no-op (never called
+/// at all) otherwise.
+///
+/// `DrmEvent::VBlank` marks the matching `GpuOutput` (if any - `udev.gpu`
+/// might still be mid-construction, or the crtc might not be this
+/// backend's GPU-driven one) as having had its frame actually scanned
+/// out, via `frame_submitted()` - required by `DrmOutput::queue_frame`'s
+/// own doc comment (see `render_udev_frame`'s GPU branch), or the
+/// underlying swapchain eventually runs out of buffers. `DrmEvent::Error`
+/// is logged, not treated as fatal - matching every other error-handling
+/// choice in this GPU path, which always prefers "log and keep going" over
+/// tearing down the whole session for an experimental, opt-in feature.
+pub(crate) fn register_gpu_drm_notifier(handle: &LoopHandle<'static, CompState>, notifier: smithay::backend::drm::DrmDeviceNotifier) -> PlatformResult<()> {
+    // Fully qualified, not the bare `DrmEvent` this module's own `use
+    // super::*` already brings in - that name is `drm::control::Event`
+    // (the legacy raw drm-rs event type `register_drm_fd` above reads via
+    // `card.receive_events()`, with a `PageFlip` variant), a different
+    // type from smithay's own higher-level `backend::drm::DrmEvent` (with
+    // `Vblank`/`Error` variants) this notifier actually produces.
+    handle
+        .insert_source(notifier, move |event, _metadata, data: &mut CompState| match event {
+            smithay::backend::drm::DrmEvent::VBlank(crtc) => {
+                if let Some(udev) = data.udev.as_mut() {
+                    if let Some(gpu) = udev.gpu.as_ref() {
+                        if let Some((gpu_crtc, gpu_output)) = gpu.output.as_ref() {
+                            if *gpu_crtc == crtc {
+                                if let Err(e) = gpu_output.frame_submitted() {
+                                    log::warn!("udev: SRDWM_GPU=1 frame_submitted failed for crtc {crtc:?}: {e:?}");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            smithay::backend::drm::DrmEvent::Error(e) => log::warn!("udev: SRDWM_GPU=1 DrmDevice error: {e:?}"),
+        })
+        .map_err(|e| PlatformError::Other(format!("failed to register GPU DRM notifier: {e}")))?;
+    Ok(())
+}
+
 /// Registers the real libinput event source and hands back a second,
 /// reference-counted handle onto the exact same underlying context (`Libinput`
 /// wraps a `libinput_ref`/`libinput_unref`-counted C pointer - see its own

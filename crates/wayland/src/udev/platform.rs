@@ -1,6 +1,6 @@
 use super::*;
 use super::drm::{bring_up_head, pick_crtc, probe_connected};
-use super::session::{register_drm_fd, register_libinput, register_session_notifier, register_udev_monitor};
+use super::session::{register_drm_fd, register_gpu_drm_notifier, register_libinput, register_session_notifier, register_udev_monitor};
 
 pub struct UdevPlatform {
     event_loop: EventLoop<'static, CompState>,
@@ -39,8 +39,15 @@ impl UdevPlatform {
         // Opt-in only (`SRDWM_GPU=1`, unset by default) - see `gpu::probe`'s
         // own doc comment for exactly what this does and does not do yet.
         // A no-op unless that variable is set, so this line changes nothing
-        // about any session that doesn't set it.
-        let _gpu_probe = super::gpu::probe(&card);
+        // about any session that doesn't set it. `gpu_notifier` is
+        // registered as its own calloop event source further down
+        // (alongside `register_drm_fd`'s own registration for the
+        // existing legacy heads); `gpu_context` is stored on `UdevState`
+        // below and consulted by `render_udev_frame`.
+        let (mut gpu_context, gpu_notifier) = match super::gpu::probe(&card) {
+            Some((ctx, notifier)) => (Some(ctx), Some(notifier)),
+            None => (None, None),
+        };
 
         // Every connected connector becomes a head, laid out left-to-right.
         let connected = probe_connected(&card)?;
@@ -94,6 +101,15 @@ impl UdevPlatform {
         // `WaylandPlatform::connect` for why this isn't optional.
         smithay::wayland::output::OutputManagerState::new_with_xdg_output::<CompState>(&display_handle);
 
+        // Phase 2 of the GPU-rendering plan (`gpu.rs`'s own module doc
+        // comment) only ever targets one head - the first, same as the
+        // pointer-centring choice just above - not every head at once.
+        // A no-op whenever `gpu_context` is `None` (every session that
+        // doesn't set `SRDWM_GPU=1`, or where `gpu::probe` itself failed).
+        if let Some(ctx) = gpu_context.as_mut() {
+            ctx.initialize_output(first.crtc, first.mode, first.connector, &first.output);
+        }
+
         let compositor_state = CompositorState::new::<CompState>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<CompState>(&display_handle);
         let xdg_decoration_state = XdgDecorationState::new::<CompState>(&display_handle);
@@ -136,6 +152,7 @@ impl UdevPlatform {
             disabled_connectors: std::collections::HashSet::new(),
             last_rendered_workspace: None,
             last_rendered_layout: None,
+            gpu: gpu_context,
         };
 
         let mut state = CompState {
@@ -275,6 +292,17 @@ impl UdevPlatform {
 
         let handle = event_loop.handle();
         register_drm_fd(&handle, &card)?;
+        // Only when `SRDWM_GPU=1` and `gpu::probe` succeeded - see
+        // `register_gpu_drm_notifier`'s own doc comment. A failure here
+        // (this specific registration, not the probe itself) is logged,
+        // not fatal: the GPU head just never gets a `frame_submitted()`
+        // call and its swapchain eventually stalls, no worse than the
+        // probe never having succeeded at all.
+        if let Some(gpu_notifier) = gpu_notifier {
+            if let Err(e) = register_gpu_drm_notifier(&handle, gpu_notifier) {
+                log::warn!("udev: SRDWM_GPU=1 but failed to register the GPU DRM notifier: {e}");
+            }
+        }
         let libinput_handle = register_libinput(&handle, &session, &seat_name)?;
         register_session_notifier(&handle, notifier, libinput_handle)?;
         if let Err(e) = register_udev_monitor(&handle, &seat_name) {
