@@ -129,6 +129,16 @@ pub(crate) fn register_session_notifier(handle: &LoopHandle<'static, CompState>,
                     // doc comment below for why the other half of this pair
                     // is not optional at all.
                     libinput.suspend();
+                    // `SRDWM_GPU=1` only - see `gpu::probe`'s own doc
+                    // comment. `DrmOutputManager::pause` (-> `DrmDevice::
+                    // pause`) drops this device's own DRM master lock and
+                    // marks it inactive, the same pairing `anvil` itself
+                    // uses around a VT switch - a separate device/fd from
+                    // the legacy `Card` above, so this is additive, not a
+                    // substitute for anything already happening here.
+                    if let Some(gpu) = udev.gpu.as_mut() {
+                        gpu.output_manager.pause();
+                    }
                 }
                 SessionEvent::ActivateSession => {
                     log::info!("udev: session resumed (VT switch back)");
@@ -181,8 +191,49 @@ pub(crate) fn register_session_notifier(handle: &LoopHandle<'static, CompState>,
                         Err(e) => log::debug!("udev: no pending flip events to drain on resume: {e}"),
                     }
 
+                    // `SRDWM_GPU=1` only. `DrmOutputManager::activate` (->
+                    // `DrmDevice::activate`) re-acquires this device's own
+                    // DRM master lock - a separate device/fd from the
+                    // legacy `Card` below, so this can run regardless of
+                    // whether any legacy head also needs reasserting.
+                    // Deliberately does *not* also force a fresh render
+                    // here: `data.render_udev_frame()` at the end of this
+                    // arm already reaches the GPU head unconditionally
+                    // (`render.rs`'s GPU branch), and `DrmCompositor::
+                    // render_frame` always issues a full state commit --
+                    // atomic or legacy, whichever this specific device
+                    // negotiated (see `gpu::probe`'s own doc comment) --
+                    // not just a buffer swap, so that one call already
+                    // reasserts mode-set and CRTC-active state together,
+                    // unlike the legacy heads below, which need `set_crtc`
+                    // called explicitly first because their own flip path
+                    // (`copy_and_flip`) only ever swaps the buffer.
+                    // `disable_connectors: false` - matches this
+                    // compositor's own control over which connectors are
+                    // actually driven (`disabled_connectors`), not
+                    // something this resume path should reset.
+                    if let Some(gpu) = udev.gpu.as_mut() {
+                        if let Err(e) = gpu.output_manager.activate(false) {
+                            log::warn!("udev: SRDWM_GPU=1 failed to reactivate DrmOutputManager on resume: {e}");
+                        }
+                    }
+                    // The crtc `SRDWM_GPU=1`'s `DrmOutputManager` is driving
+                    // (if any) - excluded from the legacy reassert loop
+                    // below, since that loop's `set_crtc` runs through the
+                    // *legacy* `Card`/fd, a completely different device
+                    // handle than the GPU path's own `DrmDeviceFd`. Two
+                    // separate fds issuing mode-set commands against the
+                    // same physical CRTC is exactly the kind of conflict
+                    // that produced this session's own worst VT-switch
+                    // incidents when it was really one fd racing itself
+                    // (`EBUSY` loops - see `UdevHead::flip_retry_after`'s
+                    // own doc comment) - not a risk worth re-introducing
+                    // here for a head this resume path already just
+                    // reactivated correctly through its own, real API.
+                    let gpu_crtc = udev.gpu.as_ref().and_then(|g| g.output.as_ref()).map(|(crtc, _)| *crtc);
                     // Some drivers reset mode-setting state across a VT
-                    // switch; reassert every head before rendering again.
+                    // switch; reassert every (non-GPU-driven) head before
+                    // rendering again.
                     //
                     // The real connector and mode, not an empty connector
                     // list and no mode - that shape is DRM/KMS's own way
@@ -191,7 +242,7 @@ pub(crate) fn register_session_notifier(handle: &LoopHandle<'static, CompState>,
                     // switching back with no further VT switch, either
                     // direction, able to recover it. See `UdevHead::mode`'s
                     // own doc comment.
-                    for head in &mut udev.heads {
+                    for head in udev.heads.iter_mut().filter(|h| Some(h.crtc) != gpu_crtc) {
                         let fb = head.buffers[head.front].fb;
                         if let Err(e) = card.set_crtc(head.crtc, Some(fb), (0, 0), &[head.connector], Some(head.mode)) {
                             log::warn!("udev: failed to reassert crtc on resume: {e}");
