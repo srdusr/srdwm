@@ -434,8 +434,8 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
     // value. Clipping after the border fill above means the corner pixels
     // of that border get cut along with the background, the same "cut,
     // don't stroke" treatment `render_titlebar`'s own corners get.
-    round_top_corners(&mut buf, WIDTH, HEIGHT, theme.corner_radius, theme.corner_radius as i32);
-    round_bottom_corners(&mut buf, WIDTH, HEIGHT, theme.corner_radius);
+    round_top_corners(&mut buf, WIDTH, HEIGHT, theme.corner_radius, theme.corner_radius as i32, theme.corner_radius as i32, None);
+    round_bottom_corners(&mut buf, WIDTH, HEIGHT, theme.corner_radius, None);
 
     (buf, (WIDTH as i32, HEIGHT as i32))
 }

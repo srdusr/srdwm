@@ -503,36 +503,46 @@ fn border_top_and_titlebar_corners_meet_without_a_seam() {
     let border = render_border_top(width, thickness, color, radius);
     let titlebar = render_titlebar(width, 24, "", color, (0xff, 0xff, 0xff), true, radius, thickness, true, None, false, false, false, None, true, false);
     let border_alpha_at = |x: usize| border[((thickness as usize - 1) * width as usize + x) * 4 + 3];
-    let titlebar_alpha_at = |x: usize| titlebar[x * 4 + 3];
-    // Every column across the curve's actual reach, not just one
-    // sample point - a seam bug shows up as a jump at some columns
-    // and not others (the exact shape of the mismatch between two
-    // differently-sized circles), so checking only the corner pixel
-    // or only the centre could miss it entirely, the same way the
-    // original bug slipped past the test above it for months. Worked
-    // out by hand (see this fix's own commit) what the two designs
-    // actually produce at every column for radius=6/thickness=4: the
-    // old (`radius + thickness`-for-the-border) design jumped by as
-    // much as 187 out of 255, at *every* column past the first two;
-    // this design jumps by at most 70, confined to the two columns
-    // nearest the exact tip - an inherent limit of splitting one
-    // steep curve across two separately-rasterised bitmaps a single
-    // row apart, not a bug to chase further. `< 90` catches any
-    // regression back toward the old behaviour without demanding
-    // more precision than two 1px-apart raster buffers can give.
-    for x in 0..radius as usize + 2 {
-        let (b, t) = (border_alpha_at(x), titlebar_alpha_at(x));
+    let titlebar_alpha_at = |xt: usize| titlebar[xt * 4 + 3];
+    // `x` below is the shared *global* column - distance from the true
+    // left corner tip, in the border strip's own coordinate frame (its
+    // column 0 is that tip). The titlebar's own buffer starts `thickness`
+    // columns further in (its column 0 sits at global column `thickness`,
+    // not 0 - a border strip is wider than the titlebar it sits above by
+    // `thickness` on each side, same as `round_top_corners`'s own
+    // `center_col` doc comment already says for the vertical case), so
+    // the titlebar-local column that corresponds to a given global column
+    // `x` is `x - thickness`, not `x` itself. Comparing raw index `x` on
+    // both sides used to "pass" here for the wrong reason: both curves
+    // used the same (incorrectly) unshifted centre column, so indexing
+    // them identically happened to compare matching *formula* output
+    // without the two indices actually referring to the same real screen
+    // column - fixing that shared centre (`round_top_corners`'s own
+    // `center_col` parameter) is what surfaced this test needing the same
+    // correction.
+    //
+    // Every column across the curve's actual reach, not just one sample
+    // point - a seam bug shows up as a jump at some columns and not
+    // others, so checking only the corner pixel or only the centre could
+    // miss it entirely, the same way the original bug slipped past the
+    // test above it for months. `< 90` catches any regression back toward
+    // a visibly stepped seam without demanding more precision than two
+    // 1px-apart raster buffers a single row apart can give.
+    for x in thickness as usize..radius as usize + 2 {
+        let xt = x - thickness as usize;
+        let (b, t) = (border_alpha_at(x), titlebar_alpha_at(xt));
         let jump = (b as i32 - t as i32).abs();
-        assert!(jump < 90, "column {x}: border's last row (alpha={b}) and titlebar's first row (alpha={t}) must be close, not a sharp seam (jump={jump})");
+        assert!(jump < 90, "global column {x} (titlebar column {xt}): border's last row (alpha={b}) and titlebar's first row (alpha={t}) must be close, not a sharp seam (jump={jump})");
     }
-    // Past the tip's unavoidable steepness (columns 0-1 above), the
-    // curve should be genuinely, near-exactly continuous - both
-    // rows fully opaque by then for this radius/thickness, not just
+    // Past the tip's unavoidable steepness (the first two global columns
+    // above), the curve should be genuinely, near-exactly continuous --
+    // both rows fully opaque by then for this radius/thickness, not just
     // "close enough".
-    for x in 2..radius as usize + 2 {
-        let (b, t) = (border_alpha_at(x), titlebar_alpha_at(x));
+    for x in (thickness as usize + 2)..radius as usize + 2 {
+        let xt = x - thickness as usize;
+        let (b, t) = (border_alpha_at(x), titlebar_alpha_at(xt));
         let jump = (b as i32 - t as i32).abs();
-        assert!(jump <= 2, "column {x}: past the corner tip the seam should be essentially exact, not just under the looser tip tolerance (jump={jump})");
+        assert!(jump <= 2, "global column {x} (titlebar column {xt}): past the corner tip the seam should be essentially exact, not just under the looser tip tolerance (jump={jump})");
     }
 }
 
@@ -621,17 +631,31 @@ fn border_top_curve_actually_closes_within_the_side_strips_own_width() {
     // `border_width` columns - so with `radius` meaningfully larger
     // than `border_width`, there was a real gap of bare background
     // between them, at exactly the column range a real vertical border
-    // strip occupies. This checks that gap is actually closed: by this
-    // buffer's own last row (where the curve should have fully
-    // resolved to flat, for a `radius` that fits within the strip's
-    // half-width), the column right at the edge of where a
-    // `border_width`-wide side strip would sit must already be opaque.
+    // strip occupies. `border_width` here matches `thickness` (as every
+    // real call site does - both come from the same `w.border_width`),
+    // not an arbitrary different value: `corners::carve_inner_corner_
+    // pixel`'s own inner-ring cut is sized from `thickness`, so a test
+    // that fed it a different, unrelated "real side strip width" would
+    // no longer be testing this compositor's own real geometry at all.
+    //
+    // `> 180`, not `== 255`: the ring now has smooth antialiasing on
+    // *both* its outer and inner edges (see `carve_inner_corner_pixel`'s
+    // own doc comment for why the inner one is new) - the exact corner
+    // this samples (right at the ring's own width, on its very last row)
+    // sits close enough to both transition bands to be genuinely, by
+    // design, a little short of fully opaque, the same way the outer
+    // curve's own edge already was before this fix existed. `> 180`
+    // catches the real regression this test exists for - the curve
+    // never reaching this column at all (alpha near 0, a visible gap) --
+    // without demanding more precision than two overlapping antialiased
+    // edges can give at their closest approach.
     let color = (0x40, 0x50, 0x60);
-    let (width, thickness, border_width, radius) = (60u32, 2u32, 3u32, 6u32);
+    let (width, thickness, radius) = (60u32, 3u32, 6u32);
     let buf = render_border_top(width, thickness, color, radius);
     let height = (thickness as usize).max(radius as usize);
     let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
-    assert_eq!(alpha_at(border_width as usize - 1, height - 1), 255, "the side strip's own rightmost column must be fully covered by the curve at the buffer's last row, not left as a gap");
+    let alpha = alpha_at(thickness as usize - 1, height - 1);
+    assert!(alpha > 180, "the side strip's own rightmost column must be visibly covered by the curve at the buffer's last row, not left as a gap (alpha={alpha})");
 }
 
 #[test]

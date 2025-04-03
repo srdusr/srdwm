@@ -71,7 +71,14 @@ pub fn render_border_top(width: u32, thickness: u32, color: (u8, u8, u8), radius
     for px in buf.chunks_exact_mut(4) {
         px.copy_from_slice(&bg);
     }
-    round_top_corners(&mut buf, width, height, radius, radius as i32);
+    // `Some(radius - thickness)`: without this, the corner stayed a solid
+    // filled disk out to the centre column/row instead of a proper ring --
+    // see `corners::carve_inner_corner_pixel`'s own doc comment for the
+    // full story (reported live as "squares on the inside corners").
+    // `None` when `radius <= thickness` - no ring to carve, the corner is
+    // already exactly `thickness` px wide at most.
+    let inner_radius = (radius as usize > thickness).then(|| radius - thickness as u32);
+    round_top_corners(&mut buf, width, height, radius, radius as i32, radius as i32, inner_radius);
     clip_middle_beyond_thickness(&mut buf, width, radius as usize, thickness..height);
     buf
 }
@@ -127,7 +134,10 @@ pub fn render_border_bottom(width: u32, thickness: u32, color: (u8, u8, u8), rad
     // real corner. `render_border_top` gets `radius` used unshifted here
     // for the same reason it does: this buffer's own outermost row is
     // genuinely the true tip of the shape.
-    round_bottom_corners(&mut buf, width, height, radius);
+    // See `render_border_top`'s own matching comment for why this needs an
+    // inner radius too.
+    let inner_radius = (radius as usize > thickness).then(|| radius - thickness as u32);
+    round_bottom_corners(&mut buf, width, height, radius, inner_radius);
     // Extra rows sit above the original `thickness`, not below - the
     // bottom strip's curve resolves going *up* into content, the mirror of
     // the top strip's resolving *down* into it. See

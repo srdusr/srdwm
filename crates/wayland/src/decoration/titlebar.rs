@@ -288,7 +288,13 @@ pub fn render_titlebar(
         }
     }
     if round_corners {
-        round_top_corners(&mut buf, width, height, radius, radius as i32 - border_width as i32);
+        // Same shift both ways - see `round_top_corners`'s own doc comment
+        // on `center_col`: this titlebar's buffer starts `border_width`
+        // columns inside the true left/right edges the same way it starts
+        // `border_width` rows inside the true top, so both centres need
+        // the identical correction, not just the row one.
+        let shift = radius as i32 - border_width as i32;
+        round_top_corners(&mut buf, width, height, radius, shift, shift, None);
     }
     buf
 }
