@@ -415,7 +415,18 @@ impl CompState {
                     // built at, or `rounded_content_buffer`'s cache would
                     // never consider one stale after a resize.
                     let content_will_be_masked = if rounded_corners_enabled && self.wm.borrow().resizing_window() != Some(id) {
-                        let content_offset = self.id_to_window.get(&id).map(|dw| dw.geometry().loc).unwrap_or_default();
+                        // Clamped to non-negative - see the matching clamp
+                        // on the real content push's own `content_offset`
+                        // further down for why: a real CSD shadow margin is
+                        // never negative, but a live Firefox window was
+                        // observed reporting `loc = (-10, -10)` despite the
+                        // tiled-state hint telling it to reserve no margin
+                        // at all (`TEMP-DIAG5`, confirmed live). Treating
+                        // that raw negative value as a real offset shifts
+                        // this mask's own origin the *wrong* way - away
+                        // from alignment with the border, not toward it.
+                        let raw_offset = self.id_to_window.get(&id).map(|dw| dw.geometry().loc).unwrap_or_default();
+                        let content_offset = Point::<i32, Logical>::from((raw_offset.x.max(0), raw_offset.y.max(0)));
                         let band = if w.decorated { srdwm_core::TITLEBAR_HEIGHT as i32 } else { 0 };
                         let content_size = (frame.width as i32, (frame.height as i32 - band).max(0));
                         let loc = (-content_offset.x, -content_offset.y);
@@ -706,8 +717,56 @@ impl CompState {
                             // over each window" - confirmed by diffing a
                             // corner crop against the real wallpaper at
                             // that exact screen position, pixel for pixel.
-                            let content_offset = dwindow.geometry().loc;
-                            let pos = (geom.x - origin.x - content_offset.x, geom.y + band - origin.y - content_offset.y);
+                            //
+                            // Clamped to non-negative: a real shadow margin
+                            // is never negative, but a live Firefox window
+                            // was observed reporting `loc = (-10, -10)`
+                            // despite `sync_geometry`'s tiled-state hint
+                            // telling it to reserve no margin at all
+                            // (`TEMP-DIAG5`, confirmed live). Subtracting
+                            // that raw negative value shifts content the
+                            // *wrong* way - further from the border this
+                            // window's own `frame`/`effective_frame_of`
+                            // (which already clamps this same value the
+                            // same way for its own size calc) draws around,
+                            // not toward it - reported live as Firefox's
+                            // border sitting visibly detached, up and to
+                            // the left, from its own real content.
+                            let raw_offset = dwindow.geometry().loc;
+                            let content_offset = Point::<i32, Logical>::from((raw_offset.x.max(0), raw_offset.y.max(0)));
+                            // Where the window's real, margin-excluded
+                            // visible content belongs on screen - what the
+                            // masked/rounded buffer below is placed at,
+                            // since `rounded_content_buffer`'s own `loc`
+                            // parameter (`-content_offset`, just below)
+                            // already renders that buffer's surface tree
+                            // shifted so the buffer's *own* `(0, 0)` lands
+                            // exactly on this same real content top-left --
+                            // the margin has already been compensated for
+                            // once, inside the buffer itself.
+                            let content_pos = (geom.x - origin.x, geom.y + band - origin.y);
+                            // Only for the *fallback* path below
+                            // (`surface_content_elements`, pushed when
+                            // masking is off or fails): that renders the
+                            // client's raw surface tree directly, with no
+                            // prior margin compensation of its own, so it's
+                            // the one place `content_offset` still needs
+                            // subtracting here. Reusing `content_pos` for
+                            // both (what an earlier version of this did)
+                            // double-applied the shift for the masked
+                            // buffer - its own internal `loc`-based
+                            // compensation, then this `pos` subtracting the
+                            // same margin a second time - landing the
+                            // masked buffer `content_offset` px too far up
+                            // and left of the border wrapping it. Confirmed
+                            // live via pixel sampling a real Firefox window
+                            // (`raw_offset = (10, 10)`): its own chrome
+                            // rendered starting 10px above where the
+                            // border's nominal top edge began, fully
+                            // exposed, square, with no border over it at
+                            // all - reported as "border isn't correctly
+                            // over the window."
+                            let pos = (content_pos.0 - content_offset.x, content_pos.1 - content_offset.y);
                             let mut rounded_elem = None;
                             // Skipped for whichever window is being
                             // interactively resized right now, specifically
@@ -762,7 +821,7 @@ impl CompState {
                                 let loc = (-content_offset.x, -content_offset.y);
                                 let masked = crate::elements::rounded_content_buffer(&mut self.rounded_content_buffers, &mut udev.renderer, epoch, id, &surface, loc, content_size, w.corner_radius as f32, corners);
                                 if let Some(buffer) = masked {
-                                    match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, (pos.0 as f64, pos.1 as f64), buffer, Some(w.opacity), None, None, Kind::Unspecified) {
+                                    match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, (content_pos.0 as f64, content_pos.1 as f64), buffer, Some(w.opacity), None, None, Kind::Unspecified) {
                                         Ok(elem) => rounded_elem = Some(elem),
                                         Err(e) => log::warn!("udev: failed to import rounded content buffer: {e}"),
                                     }
