@@ -88,6 +88,19 @@ impl UdevPlatform {
             let resolved_scale = head.output.current_scale().fractional_scale();
             x_offset += head.size.0;
             logical_x += (head.size.0 as f64 / resolved_scale).round() as i32;
+            // Every connected head gets a chance at the GPU path, not just
+            // the first - `DrmOutputManager` already supports driving
+            // several crtcs at once (`GpuContext::outputs`' own doc
+            // comment), Phase 2 simply never called this more than once.
+            // A no-op whenever `gpu_context` is `None` (every session that
+            // doesn't set `SRDWM_GPU=1`, or where `gpu::probe` itself
+            // failed). A head this fails for individually (logged inside
+            // `initialize_output`) just falls back to the legacy Pixman
+            // path below, same as before - this loop doesn't need to know
+            // which outcome happened.
+            if let Some(ctx) = gpu_context.as_mut() {
+                ctx.initialize_output(head.crtc, head.mode, head.connector, &head.output);
+            }
             heads.push(head);
             output_entries.push(entry);
         }
@@ -100,15 +113,6 @@ impl UdevPlatform {
         // xdg-output - see the matching comment in `lib.rs`'s
         // `WaylandPlatform::connect` for why this isn't optional.
         smithay::wayland::output::OutputManagerState::new_with_xdg_output::<CompState>(&display_handle);
-
-        // Phase 2 of the GPU-rendering plan (`gpu.rs`'s own module doc
-        // comment) only ever targets one head - the first, same as the
-        // pointer-centring choice just above - not every head at once.
-        // A no-op whenever `gpu_context` is `None` (every session that
-        // doesn't set `SRDWM_GPU=1`, or where `gpu::probe` itself failed).
-        if let Some(ctx) = gpu_context.as_mut() {
-            ctx.initialize_output(first.crtc, first.mode, first.connector, &first.output);
-        }
 
         let compositor_state = CompositorState::new::<CompState>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<CompState>(&display_handle);

@@ -67,11 +67,9 @@ pub(crate) fn register_gpu_drm_notifier(handle: &LoopHandle<'static, CompState>,
             smithay::backend::drm::DrmEvent::VBlank(crtc) => {
                 if let Some(udev) = data.udev.as_mut() {
                     if let Some(gpu) = udev.gpu.as_ref() {
-                        if let Some((gpu_crtc, gpu_output)) = gpu.output.as_ref() {
-                            if *gpu_crtc == crtc {
-                                if let Err(e) = gpu_output.frame_submitted() {
-                                    log::warn!("udev: SRDWM_GPU=1 frame_submitted failed for crtc {crtc:?}: {e:?}");
-                                }
+                        if let Some(gpu_output) = gpu.output_for(crtc) {
+                            if let Err(e) = gpu_output.frame_submitted() {
+                                log::warn!("udev: SRDWM_GPU=1 frame_submitted failed for crtc {crtc:?}: {e:?}");
                             }
                         }
                     }
@@ -217,20 +215,22 @@ pub(crate) fn register_session_notifier(handle: &LoopHandle<'static, CompState>,
                             log::warn!("udev: SRDWM_GPU=1 failed to reactivate DrmOutputManager on resume: {e}");
                         }
                     }
-                    // The crtc `SRDWM_GPU=1`'s `DrmOutputManager` is driving
-                    // (if any) - excluded from the legacy reassert loop
-                    // below, since that loop's `set_crtc` runs through the
-                    // *legacy* `Card`/fd, a completely different device
-                    // handle than the GPU path's own `DrmDeviceFd`. Two
-                    // separate fds issuing mode-set commands against the
-                    // same physical CRTC is exactly the kind of conflict
-                    // that produced this session's own worst VT-switch
-                    // incidents when it was really one fd racing itself
-                    // (`EBUSY` loops - see `UdevHead::flip_retry_after`'s
-                    // own doc comment) - not a risk worth re-introducing
-                    // here for a head this resume path already just
-                    // reactivated correctly through its own, real API.
-                    let gpu_crtc = udev.gpu.as_ref().and_then(|g| g.output.as_ref()).map(|(crtc, _)| *crtc);
+                    // Every crtc `SRDWM_GPU=1`'s `DrmOutputManager` is
+                    // driving (if any - now possibly several, since it
+                    // targets every head it could, not just one) --
+                    // excluded from the legacy reassert loop below, since
+                    // that loop's `set_crtc` runs through the *legacy*
+                    // `Card`/fd, a completely different device handle than
+                    // the GPU path's own `DrmDeviceFd`. Two separate fds
+                    // issuing mode-set commands against the same physical
+                    // CRTC is exactly the kind of conflict that produced
+                    // this session's own worst VT-switch incidents when it
+                    // was really one fd racing itself (`EBUSY` loops - see
+                    // `UdevHead::flip_retry_after`'s own doc comment) - not
+                    // a risk worth re-introducing here for a head this
+                    // resume path already just reactivated correctly
+                    // through its own, real API.
+                    let gpu_crtcs: Vec<crtc::Handle> = udev.gpu.as_ref().map(|g| g.outputs.iter().map(|(c, _)| *c).collect()).unwrap_or_default();
                     // Some drivers reset mode-setting state across a VT
                     // switch; reassert every (non-GPU-driven) head before
                     // rendering again.
@@ -242,7 +242,7 @@ pub(crate) fn register_session_notifier(handle: &LoopHandle<'static, CompState>,
                     // switching back with no further VT switch, either
                     // direction, able to recover it. See `UdevHead::mode`'s
                     // own doc comment.
-                    for head in udev.heads.iter_mut().filter(|h| Some(h.crtc) != gpu_crtc) {
+                    for head in udev.heads.iter_mut().filter(|h| !gpu_crtcs.contains(&h.crtc)) {
                         let fb = head.buffers[head.front].fb;
                         if let Err(e) = card.set_crtc(head.crtc, Some(fb), (0, 0), &[head.connector], Some(head.mode)) {
                             log::warn!("udev: failed to reassert crtc on resume: {e}");

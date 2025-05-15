@@ -214,30 +214,36 @@ impl CompState {
             let Some(udev) = self.udev.as_mut() else { return };
             let head_crtc = udev.heads[index].crtc;
             // Phase 2 of the GPU-rendering plan (`gpu.rs`'s own module doc
-            // comment): the one head `initialize_output` was called for
-            // (if `SRDWM_GPU=1` and everything up to that point succeeded)
-            // renders a plain clear color through the real GBM+EGL+
-            // DrmCompositor pipeline instead of anything below - no
-            // window content, decorations, or cursor yet, deliberately
-            // (see that module's own doc comment for why). Every other
-            // head, and this same head whenever `udev.gpu`/its `output`
-            // is `None`, falls straight through to the existing,
-            // untouched Pixman path unchanged.
+            // comment), now extended to every head `initialize_output`
+            // succeeded for (`GpuContext::outputs`' own doc comment), not
+            // just the first: each renders a plain clear color through the
+            // real GBM+EGL+DrmCompositor pipeline instead of anything
+            // below - no window content, decorations, or cursor yet,
+            // deliberately (see that module's own doc comment for why).
+            // Any head `output_for_mut` finds nothing for - either
+            // `SRDWM_GPU` was never set, or `initialize_output` failed for
+            // this specific crtc - falls straight through to the
+            // existing, untouched Pixman path unchanged.
             if let Some(gpu) = udev.gpu.as_mut() {
-                if let Some((gpu_crtc, gpu_output)) = gpu.output.as_mut() {
-                    if *gpu_crtc == head_crtc {
-                        let elements: [smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<smithay::backend::renderer::gles::GlesRenderer>; 0] = [];
-                        let clear_color = [0.05, 0.05, 0.08, 1.0];
-                        match gpu_output.render_frame(&mut gpu.renderer, &elements, clear_color, smithay::backend::drm::compositor::FrameFlags::DEFAULT) {
-                            Ok(res) if !res.is_empty => match gpu_output.queue_frame(None) {
-                                Ok(()) => {}
-                                Err(e) => log::warn!("udev: SRDWM_GPU=1 queue_frame failed for crtc {head_crtc:?}: {e:?}"),
-                            },
-                            Ok(_) => {}
-                            Err(e) => log::warn!("udev: SRDWM_GPU=1 render_frame failed for crtc {head_crtc:?}: {e:?}"),
-                        }
-                        continue;
+                // Direct field access (`gpu.outputs`), not `GpuContext::
+                // output_for_mut` - that method takes `&mut self`, which
+                // the borrow checker treats as borrowing all of `gpu`,
+                // including `gpu.renderer` needed a few lines below. Rust's
+                // disjoint-field-borrow analysis only sees through *direct*
+                // field access, not a method call, even one that (like
+                // this one) only actually touches `self.outputs`.
+                if let Some(gpu_output) = gpu.outputs.iter_mut().find(|(c, _)| *c == head_crtc).map(|(_, o)| o) {
+                    let elements: [smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<smithay::backend::renderer::gles::GlesRenderer>; 0] = [];
+                    let clear_color = [0.05, 0.05, 0.08, 1.0];
+                    match gpu_output.render_frame(&mut gpu.renderer, &elements, clear_color, smithay::backend::drm::compositor::FrameFlags::DEFAULT) {
+                        Ok(res) if !res.is_empty => match gpu_output.queue_frame(None) {
+                            Ok(()) => {}
+                            Err(e) => log::warn!("udev: SRDWM_GPU=1 queue_frame failed for crtc {head_crtc:?}: {e:?}"),
+                        },
+                        Ok(_) => {}
+                        Err(e) => log::warn!("udev: SRDWM_GPU=1 render_frame failed for crtc {head_crtc:?}: {e:?}"),
                     }
+                    continue;
                 }
             }
 

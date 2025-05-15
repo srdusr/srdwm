@@ -56,13 +56,36 @@ pub(crate) type GpuOutputManager = DrmOutputManager<
 pub(crate) struct GpuContext {
     pub(crate) renderer: GlesRenderer,
     pub(crate) output_manager: GpuOutputManager,
-    /// The one head [`GpuContext::initialize_output`] was successfully
-    /// called for, if any - Phase 2 of the plan this was built from only
-    /// ever targets a single head, see that call site (`udev/platform.rs`)
-    /// for which one and why. `render_udev_frame` (`udev/render.rs`)
-    /// checks this to decide whether a given head renders through here or
-    /// through the existing legacy Pixman path.
-    pub(crate) output: Option<(crtc::Handle, GpuOutput)>,
+    /// Every head [`GpuContext::initialize_output`] was successfully
+    /// called for - Phase 2 of the plan this was built from only ever
+    /// targeted a single head; `udev/platform.rs`'s startup path now calls
+    /// `initialize_output` for every connected head instead of just the
+    /// first, so a machine with several monitors gets all of them through
+    /// this same GBM+EGL+`DrmCompositor` pipeline rather than only one.
+    /// `DrmOutputManager` itself already supports driving multiple crtcs
+    /// at once (`initialize_output` is a per-crtc call on the one shared
+    /// manager, same as `anvil`'s own multi-output handling) - Phase 2
+    /// simply never exercised that. A head this fails for individually
+    /// (logged, not fatal) just has no entry here and falls back to the
+    /// existing legacy Pixman path exactly as before, same as it always
+    /// could when `SRDWM_GPU` was unset entirely. `render_udev_frame`
+    /// (`udev/render.rs`) looks a head's own crtc up here to decide
+    /// whether it renders through this path or through Pixman.
+    pub(crate) outputs: Vec<(crtc::Handle, GpuOutput)>,
+}
+
+impl GpuContext {
+    /// The `GpuOutput` driving `crtc`, if [`initialize_output`](Self::initialize_output)
+    /// was called for it and succeeded. Only an `&self` lookup (`session.rs`'s
+    /// VBlank handler doesn't need mutable access) - `render.rs`'s own
+    /// render-frame call site needs `&mut gpu.outputs` *and* `&mut gpu.
+    /// renderer` at once, which it does via direct field access instead of
+    /// an equivalent `&mut self` method here, since Rust's disjoint-field-
+    /// borrow analysis only sees through direct field access, not a method
+    /// call that borrows all of `self` even when it only touches one field.
+    pub(crate) fn output_for(&self, crtc: crtc::Handle) -> Option<&GpuOutput> {
+        self.outputs.iter().find(|(c, _)| *c == crtc).map(|(_, o)| o)
+    }
 }
 
 /// Reasonable, widely-supported scanout formats to try, most-preferred
@@ -189,34 +212,33 @@ pub(crate) fn probe(card: &Card) -> Option<(GpuContext, DrmDeviceNotifier)> {
         "udev: SRDWM_GPU=1 - GBM+EGL+GLES+DrmOutputManager all initialized successfully on this hardware. \
          No output is being driven through it yet (see gpu::probe's own doc comment); every head still renders via Pixman for now."
     );
-    Some((GpuContext { renderer, output_manager, output: None }, notifier))
+    Some((GpuContext { renderer, output_manager, outputs: Vec::new() }, notifier))
 }
 
 impl GpuContext {
-    /// Drives exactly one head (`crtc`/`mode`/`connector`/`output`, the
-    /// same values `udev/drm.rs`'s `bring_up_head` already resolved for
-    /// this head's *existing* legacy `UdevHead`) through this context's
-    /// `DrmOutputManager`, returning the resulting `GpuOutput` on success.
+    /// Drives one head (`crtc`/`mode`/`connector`/`output`, the same
+    /// values `udev/drm.rs`'s `bring_up_head` already resolved for this
+    /// head's *existing* legacy `UdevHead`) through this context's shared
+    /// `DrmOutputManager`, appending the resulting `GpuOutput` to
+    /// `self.outputs` on success - call once per connected head from
+    /// `udev/platform.rs`'s startup path, same loop that already brings up
+    /// each head's legacy `UdevHead`.
     ///
-    /// `elements` is always empty for this phase (Phase 2 of the plan this
-    /// was built from renders a plain clear color only, no window content/
-    /// decorations/cursor yet) - so the concrete choice of `E` here
-    /// ([`GpuElement`], a plain `MemoryRenderBufferRenderElement`) is
-    /// arbitrary; nothing about it is load-bearing until a later phase
-    /// actually pushes real elements through this same call shape.
+    /// `elements` is always empty here - initial output setup, not a real
+    /// frame - so the concrete choice of `E` ([`GpuElement`], a plain
+    /// `MemoryRenderBufferRenderElement`) is arbitrary.
     ///
-    /// Returns `false` and leaves `self.output` untouched on failure
-    /// (logged) - same fallback contract as [`probe`] itself: a head this
-    /// fails for simply never gets an entry in `self.output_manager`'s
-    /// internal map, so it can still be driven through the existing
-    /// legacy Pixman path exactly as if `SRDWM_GPU` had never been set for
-    /// that particular head.
+    /// Returns `false` and leaves `self.outputs` unchanged on failure
+    /// (logged): that one head simply never gets an entry, so it renders
+    /// through the existing legacy Pixman path exactly as if `SRDWM_GPU`
+    /// had never been set for it, while every other head this succeeded
+    /// for is unaffected.
     pub(crate) fn initialize_output(&mut self, crtc: crtc::Handle, mode: DrmMode, connector: connector::Handle, output: &Output) -> bool {
         let elements: DrmOutputRenderElements<GlesRenderer, GpuElement> = DrmOutputRenderElements::default();
         match self.output_manager.initialize_output::<GlesRenderer, GpuElement>(crtc, mode, &[connector], output, None, &mut self.renderer, &elements) {
             Ok(gpu_output) => {
                 log::info!("udev: SRDWM_GPU=1 - output initialized through DrmOutputManager for crtc {crtc:?}");
-                self.output = Some((crtc, gpu_output));
+                self.outputs.push((crtc, gpu_output));
                 true
             }
             Err(e) => {
