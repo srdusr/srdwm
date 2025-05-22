@@ -408,7 +408,14 @@ impl WaylandPlatform {
                     // invisible shadow margin) was never subtracted, so
                     // that margin's worth of gap showed through at this
                     // window's top-left corner.
-                    let content_offset = dwindow.geometry().loc;
+                    //
+                    // Clamped to non-negative, same as that same call site's
+                    // own fix: a real shadow margin is never negative, but a
+                    // live Firefox window was observed reporting
+                    // `loc = (-10, -10)` - subtracting that raw value would
+                    // shift content away from the border instead of into it.
+                    let raw_offset = dwindow.geometry().loc;
+                    let content_offset = smithay::utils::Point::<i32, smithay::utils::Logical>::from((raw_offset.x.max(0), raw_offset.y.max(0)));
                     let pos = (geom.x - content_offset.x, geom.y + band - content_offset.y);
                     let rounded = rounded_corners_enabled.then_some(self.state.rounded_corners_program.as_ref()).flatten().and_then(|program| {
                         let corners = if w.decorated { crate::rounded_corners::RoundedCorners::BOTTOM_ONLY } else { crate::rounded_corners::RoundedCorners::ALL };
