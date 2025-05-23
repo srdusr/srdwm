@@ -203,7 +203,7 @@ impl CompState {
             // exactly the extra height.
             let strip_h = w.border_width.max(w.corner_radius);
             if strips[0].width > 0 && strips[0].height > 0 {
-                let data = decoration::render_border_top(strips[0].width, w.border_width, color, w.corner_radius);
+                let data = decoration::render_border_top(strips[0].width, w.border_width, color, w.corner_radius, w.decorated);
                 let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (strips[0].width as i32, strip_h as i32), 1, Transform::Normal, None);
                 self.border_top_decorations.insert(id, buffer);
             } else {

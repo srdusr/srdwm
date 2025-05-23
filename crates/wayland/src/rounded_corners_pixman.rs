@@ -142,7 +142,7 @@ pub(crate) fn masked_content_buffer(renderer: &mut PixmanRenderer, surface: &WlS
 /// rather than a per-corner mirrored center, so one formula handles all
 /// four boxes correctly regardless of which edges of the image they sit
 /// against.
-fn apply_corner_mask(buf: &mut [u8], w: i32, h: i32, stride: i32, radius: f32, corners: RoundedCorners) {
+pub(crate) fn apply_corner_mask(buf: &mut [u8], w: i32, h: i32, stride: i32, radius: f32, corners: RoundedCorners) {
     if radius < 1.0 || w <= 0 || h <= 0 {
         return;
     }

@@ -468,7 +468,7 @@ fn border_top_rounds_its_own_top_corners_to_match_the_titlebar() {
     // change now depends on.
     let color = (0x40, 0x50, 0x60);
     let (width, thickness) = (60, 2);
-    let buf = render_border_top(width, thickness, color, CORNER_RADIUS);
+    let buf = render_border_top(width, thickness, color, CORNER_RADIUS, true);
     let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
     assert_eq!(alpha_at(0, 0), 0, "top-left corner pixel should be clipped");
     assert_eq!(alpha_at(width as usize - 1, 0), 0, "top-right corner pixel should be clipped");
@@ -500,7 +500,7 @@ fn border_top_and_titlebar_corners_meet_without_a_seam() {
     // immediately below it.
     let color = (0x40, 0x50, 0x60);
     let (width, thickness, radius) = (60, 4, 6);
-    let border = render_border_top(width, thickness, color, radius);
+    let border = render_border_top(width, thickness, color, radius, true);
     let titlebar = render_titlebar(width, 24, "", color, (0xff, 0xff, 0xff), true, radius, thickness, true, None, false, false, false, None, true, false);
     let border_alpha_at = |x: usize| border[((thickness as usize - 1) * width as usize + x) * 4 + 3];
     let titlebar_alpha_at = |xt: usize| titlebar[xt * 4 + 3];
@@ -544,6 +544,86 @@ fn border_top_and_titlebar_corners_meet_without_a_seam() {
         let jump = (b as i32 - t as i32).abs();
         assert!(jump <= 2, "global column {x} (titlebar column {xt}): past the corner tip the seam should be essentially exact, not just under the looser tip tolerance (jump={jump})");
     }
+}
+
+#[test]
+fn border_top_and_content_mask_have_no_gap_along_the_corner_diagonal_when_undecorated() {
+    // The undecorated counterpart to `border_top_and_titlebar_corners_
+    // meet_without_a_seam`: an undecorated (CSD) window has no titlebar
+    // band under the border's own "extra" rows - client content sits
+    // there directly, masked by `rounded_corners_pixman::apply_corner_
+    // mask` at its own independently-centred circle, not the titlebar's
+    // shared one. `InnerRing`'s own doc comment has the full geometry:
+    // content's mask circle is offset `(thickness, thickness)` from the
+    // border's own outer circle - two same-radius circles with
+    // *different* centres, not one circle at two different radii, so
+    // "which single row/column is the seam" (the titlebar test's own
+    // approach) doesn't carry over cleanly here. What has to hold
+    // instead: at every point *along the diagonal ray* from the true
+    // corner outward (the direction the two circles' centres are
+    // actually offset along, so the worst case for a gap between them),
+    // at least one of the two curves covers it. Verified by hand first
+    // (see this fix's own commit) that the two circles' coverage
+    // actually overlaps continuously along this ray for a real
+    // radius/thickness pair; this checks that promise against the real
+    // rendering functions, not a reimplementation of their math.
+    let color = (0x40, 0x50, 0x60);
+    let (width, thickness, radius) = (60u32, 4u32, 6u32);
+    let border = render_border_top(width, thickness, color, radius, false);
+    let border_h = (thickness as usize).max(radius as usize);
+    // A real content buffer, masked the same way `masked_content_buffer`
+    // masks a window's actual composited surface tree - opaque
+    // premultiplied white everywhere before masking, so alpha alone
+    // tells the whole story.
+    let (cw, ch) = (width - 2 * thickness, radius * 4);
+    let mut content = vec![0u8; (cw * ch * 4) as usize];
+    for px in content.chunks_exact_mut(4) {
+        px.copy_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+    }
+    crate::rounded_corners_pixman::apply_corner_mask(&mut content, cw as i32, ch as i32, cw as i32 * 4, radius as f32, crate::rounded_corners::RoundedCorners::ALL);
+    // Both sampled in the *same* global coordinate frame (border's own
+    // origin is the true corner, `(0, 0)`) - `None` past either
+    // buffer's own edge, same as that position genuinely contributing no
+    // coverage of its own there.
+    let border_alpha_at = |row: i32, col: i32| -> u8 {
+        if row < 0 || col < 0 || row as usize >= border_h || col as usize >= width as usize {
+            return 0;
+        }
+        border[(row as usize * width as usize + col as usize) * 4 + 3]
+    };
+    let content_alpha_at = |row: i32, col: i32| -> u8 {
+        let (r, c) = (row - thickness as i32, col - thickness as i32);
+        if r < 0 || c < 0 || r as usize >= ch as usize || c as usize >= cw as usize {
+            return 0;
+        }
+        content[(r as usize * cw as usize + c as usize) * 4 + 3]
+    };
+    // Every half-pixel step along the 45-degree diagonal from just past
+    // the true corner tip (where both curves are correctly, deliberately
+    // transparent - that IS the rounding) out to comfortably past where
+    // content's own circle takes over full coverage.
+    let mut steps = 0;
+    let mut min_combined = 255u8;
+    let mut min_at = 0.0f32;
+    let mut s = radius as f32 - 1.0;
+    while s <= (radius + thickness + radius) as f32 - 2.0 {
+        let (row, col) = ((s / std::f32::consts::SQRT_2).round() as i32, (s / std::f32::consts::SQRT_2).round() as i32);
+        let combined = border_alpha_at(row, col).max(content_alpha_at(row, col));
+        if combined < min_combined {
+            min_combined = combined;
+            min_at = s;
+        }
+        steps += 1;
+        s += 0.5;
+    }
+    assert!(steps > 10, "sanity: the sampled range should cover more than a couple of points");
+    assert!(min_combined > 160, "diagonal distance {min_at} from the true corner: neither border (alpha={}) nor content (alpha={}) covers this point - a real gap", {
+        let (row, col) = ((min_at / std::f32::consts::SQRT_2).round() as i32, (min_at / std::f32::consts::SQRT_2).round() as i32);
+        border_alpha_at(row, col)
+    }, {
+        let (row, col) = ((min_at / std::f32::consts::SQRT_2).round() as i32, (min_at / std::f32::consts::SQRT_2).round() as i32);
+        content_alpha_at(row, col)
+    });
 }
 
 #[test]
@@ -605,7 +685,7 @@ fn border_top_extra_rows_are_transparent_outside_the_corners() {
     // live-confirmed bug, the top-strip half of the pair).
     let color = (0x40, 0x50, 0x60);
     let (width, thickness, radius) = (60, 2, 6);
-    let buf = render_border_top(width, thickness, color, radius);
+    let buf = render_border_top(width, thickness, color, radius, true);
     let height = (thickness as usize).max(radius as usize);
     assert_eq!(buf.len(), width as usize * height * 4, "buffer must actually be the taller max(thickness, radius) height");
     let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
@@ -651,7 +731,7 @@ fn border_top_curve_actually_closes_within_the_side_strips_own_width() {
     // edges can give at their closest approach.
     let color = (0x40, 0x50, 0x60);
     let (width, thickness, radius) = (60u32, 3u32, 6u32);
-    let buf = render_border_top(width, thickness, color, radius);
+    let buf = render_border_top(width, thickness, color, radius, true);
     let height = (thickness as usize).max(radius as usize);
     let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
     let alpha = alpha_at(thickness as usize - 1, height - 1);

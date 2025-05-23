@@ -4,7 +4,7 @@
 //! the caller as plain flat fills (`elements::border_side_render_element`).
 
 use super::color::rgb_to_bgra;
-use super::corners::{round_bottom_corners, round_top_corners};
+use super::corners::{round_bottom_corners, round_top_corners, InnerRing};
 
 pub fn border_strips(geometry: srdwm_core::Rect, width: u32) -> [srdwm_core::Rect; 4] {
     let w = width as i32;
@@ -63,7 +63,14 @@ pub fn border_strips(geometry: srdwm_core::Rect, width: u32) -> [srdwm_core::Rec
 /// rounding rather than left as solid `color` (which would otherwise paint
 /// a solid border-coloured bar over the titlebar's own left/right edges
 /// for however many rows this extended by).
-pub fn render_border_top(width: u32, thickness: u32, color: (u8, u8, u8), radius: u32) -> Vec<u8> {
+///
+/// `decorated` picks which of the two things sits underneath this strip's
+/// own "extra" rows - a titlebar band (`decorated = true`) or client
+/// content directly (`decorated = false`) - and therefore which circle
+/// the inner ring needs to trace to meet it with no gap; see
+/// [`InnerRing`]'s own doc comment for why those are two genuinely
+/// different circles, not the same one at two different radii.
+pub fn render_border_top(width: u32, thickness: u32, color: (u8, u8, u8), radius: u32, decorated: bool) -> Vec<u8> {
     let (width, thickness) = (width.max(1) as usize, thickness.max(1) as usize);
     let height = thickness.max(radius as usize).max(1);
     let bg = rgb_to_bgra(color, 255);
@@ -71,14 +78,22 @@ pub fn render_border_top(width: u32, thickness: u32, color: (u8, u8, u8), radius
     for px in buf.chunks_exact_mut(4) {
         px.copy_from_slice(&bg);
     }
-    // `Some(radius - thickness)`: without this, the corner stayed a solid
-    // filled disk out to the centre column/row instead of a proper ring --
-    // see `corners::carve_inner_corner_pixel`'s own doc comment for the
-    // full story (reported live as "squares on the inside corners").
-    // `None` when `radius <= thickness` - no ring to carve, the corner is
-    // already exactly `thickness` px wide at most.
-    let inner_radius = (radius as usize > thickness).then(|| radius - thickness as u32);
-    round_top_corners(&mut buf, width, height, radius, radius as i32, radius as i32, inner_radius);
+    // Without an inner ring at all, the corner stayed a solid filled disk
+    // out to the centre column/row instead of a proper ring - see
+    // `corners::carve_inner_corner_pixel`'s own doc comment for the full
+    // story (reported live as "squares on the inside corners"). Which
+    // ring depends on `decorated` - see this function's own doc comment
+    // and `InnerRing`'s. `None` when `radius <= thickness`: no ring to
+    // carve, the corner is already exactly `thickness` px wide at most.
+    let inner = (radius as usize > thickness).then(|| {
+        if decorated {
+            InnerRing { center_row: radius as i32, center_col: radius as i32, radius: radius - thickness as u32 }
+        } else {
+            let shifted = radius as i32 + thickness as i32;
+            InnerRing { center_row: shifted, center_col: shifted, radius }
+        }
+    });
+    round_top_corners(&mut buf, width, height, radius, radius as i32, radius as i32, inner);
     clip_middle_beyond_thickness(&mut buf, width, radius as usize, thickness..height);
     buf
 }
@@ -116,6 +131,15 @@ fn clip_middle_beyond_thickness(buf: &mut [u8], width: usize, radius: usize, row
 /// fragments`) - the same trade-off `render_border_top`'s own call site
 /// already makes and for the same reason: cropping a rounded bitmap's
 /// source rect per fragment is real extra work for a strip this thin.
+///
+/// Unlike `render_border_top`, there is no `decorated` parameter here --
+/// this compositor never draws a *bottom* titlebar, so whatever sits under
+/// this strip's own "extra" rows is always client content directly,
+/// decorated window or not (a decorated window still gets its own bottom
+/// two corners content-masked - `RoundedCorners::BOTTOM_ONLY`, not `NONE`
+/// - specifically so this strip has real rounded content to meet). See
+/// [`InnerRing`]'s own doc comment for why that's a different circle from
+/// the titlebar-aligned one `render_border_top` sometimes needs.
 pub fn render_border_bottom(width: u32, thickness: u32, color: (u8, u8, u8), radius: u32) -> Vec<u8> {
     let (width, thickness) = (width.max(1) as usize, thickness.max(1) as usize);
     let height = thickness.max(radius as usize).max(1);
@@ -134,10 +158,22 @@ pub fn render_border_bottom(width: u32, thickness: u32, color: (u8, u8, u8), rad
     // real corner. `render_border_top` gets `radius` used unshifted here
     // for the same reason it does: this buffer's own outermost row is
     // genuinely the true tip of the shape.
-    // See `render_border_top`'s own matching comment for why this needs an
-    // inner radius too.
-    let inner_radius = (radius as usize > thickness).then(|| radius - thickness as u32);
-    round_bottom_corners(&mut buf, width, height, radius, inner_radius);
+    //
+    // The inner ring's own centre is content's real mask circle, not this
+    // strip's own outer one at a smaller radius - see `render_border_top`'s
+    // matching `inner` and `InnerRing`'s own doc comment. Content sits
+    // `thickness` rows *above* (smaller row index than) this strip's own
+    // outer centre, since content is inside the ring by `thickness` and
+    // this strip's rows grow *upward* into it (see this function's own
+    // "extra rows sit above" comment on `clip_middle_beyond_thickness`
+    // below) - the mirror image of `render_border_top`'s `+ thickness`
+    // shift, which grows downward instead.
+    let inner = (radius as usize > thickness).then(|| {
+        let center_col = radius as i32 + thickness as i32;
+        let center_row = height as i32 - radius as i32 - thickness as i32;
+        InnerRing { center_row, center_col, radius }
+    });
+    round_bottom_corners(&mut buf, width, height, radius, inner);
     // Extra rows sit above the original `thickness`, not below - the
     // bottom strip's curve resolves going *up* into content, the mirror of
     // the top strip's resolving *down* into it. See
