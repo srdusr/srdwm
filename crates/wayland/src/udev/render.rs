@@ -214,16 +214,15 @@ impl CompState {
             let Some(udev) = self.udev.as_mut() else { return };
             let head_crtc = udev.heads[index].crtc;
             // Phase 2 of the GPU-rendering plan (`gpu.rs`'s own module doc
-            // comment), now extended to every head `initialize_output`
-            // succeeded for (`GpuContext::outputs`' own doc comment), not
-            // just the first: each renders a plain clear color through the
-            // real GBM+EGL+DrmCompositor pipeline instead of anything
-            // below - no window content, decorations, or cursor yet,
-            // deliberately (see that module's own doc comment for why).
-            // Any head `output_for_mut` finds nothing for - either
-            // `SRDWM_GPU` was never set, or `initialize_output` failed for
-            // this specific crtc - falls straight through to the
-            // existing, untouched Pixman path unchanged.
+            // comment), extended to every head `initialize_output`
+            // succeeded for (`GpuContext::outputs`' own doc comment) and
+            // now, past clear-color-only, to the real cursor too - see
+            // this block's own `elements` for the still-missing pieces
+            // (window content, decorations). Any head `output_for_mut`
+            // finds nothing for - either `SRDWM_GPU` was never set, or
+            // `initialize_output` failed for this specific crtc - falls
+            // straight through to the existing, untouched Pixman path
+            // unchanged.
             if let Some(gpu) = udev.gpu.as_mut() {
                 // Direct field access (`gpu.outputs`), not `GpuContext::
                 // output_for_mut` - that method takes `&mut self`, which
@@ -233,7 +232,21 @@ impl CompState {
                 // field access, not a method call, even one that (like
                 // this one) only actually touches `self.outputs`.
                 if let Some(gpu_output) = gpu.outputs.iter_mut().find(|(c, _)| *c == head_crtc).map(|(_, o)| o) {
-                    let elements: [smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<smithay::backend::renderer::gles::GlesRenderer>; 0] = [];
+                    // The one real element this phase pushes: the same
+                    // `cursor::render_elements` the Pixman path already
+                    // uses, generic over the renderer (`R: Renderer +
+                    // ImportAll + ImportMem`), so it works unmodified
+                    // against `gpu.renderer` (`GlesRenderer`) instead of
+                    // `udev.renderer` (`PixmanRenderer`). Window content
+                    // and decorations are real, separate scope past this
+                    // (they need either a GLES-side version of the
+                    // border/titlebar bitmap upload path, or the rounded-
+                    // corner GLES shader `winit/render.rs` already has
+                    // wired for its own single-output case) - not
+                    // attempted here, so a GPU-driven head still shows a
+                    // plain clear color under its own real, moving cursor,
+                    // not yet any windows.
+                    let elements = crate::cursor::render_elements(&cursor_status, &cursor_buffers, &mut gpu.renderer, udev.pointer_pos, origin, udev.heads[index].size);
                     let clear_color = [0.05, 0.05, 0.08, 1.0];
                     match gpu_output.render_frame(&mut gpu.renderer, &elements, clear_color, smithay::backend::drm::compositor::FrameFlags::DEFAULT) {
                         Ok(res) if !res.is_empty => match gpu_output.queue_frame(None) {

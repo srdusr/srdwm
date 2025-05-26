@@ -1,8 +1,14 @@
 //! Opt-in (`SRDWM_GPU=1`) GBM+EGL+`DrmCompositor` GPU render path for the
 //! udev backend - see [`probe`]'s own doc comment for exactly what this
-//! does and does not do yet (Phase 2: one output, clear-color only, no
-//! window content/decorations, no VT-switch support - see the plan this
-//! was built from, `snappy-percolating-boole.md`, for the full scoping).
+//! does and does not do yet. Past the original Phase 2 (one output,
+//! clear-color only - see the plan this was built from, `snappy-
+//! percolating-boole.md`, for that phase's own scoping): every head
+//! `initialize_output` succeeds for gets driven, not just the first
+//! (`GpuContext::outputs`), VT-switch pause/activate is wired
+//! (`udev/session.rs`'s `SessionEvent` handlers), and the real cursor
+//! renders on top of the clear color (`udev/render.rs`'s own GPU branch).
+//! Window content and decorations are the remaining gap - a GPU-driven
+//! head still shows no windows, just its own clear color and cursor.
 
 use std::os::fd::{AsFd, OwnedFd};
 
@@ -11,7 +17,6 @@ use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::output::{DrmOutput, DrmOutputManager, DrmOutputRenderElements};
 use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmDeviceNotifier};
 use smithay::backend::egl::{EGLContext, EGLDevice, EGLDisplay};
-use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::output::Output;
 use smithay::reexports::drm::buffer::DrmFourcc;
@@ -21,11 +26,16 @@ use smithay::utils::DeviceFd;
 
 use super::Card;
 
-/// The concrete render-element type this phase's (empty) element list uses
-/// - see [`GpuContext::initialize_output`]'s own doc comment for why the
-/// actual choice of `E` doesn't matter yet, since no real elements are
-/// passed through it.
-type GpuElement = MemoryRenderBufferRenderElement<GlesRenderer>;
+/// The render-element type real frames on the GPU path push through --
+/// `crate::elements::OverlayElement`, the same enum (Surface/Memory/Solid)
+/// the Pixman path's own `custom_elements` already uses, just instantiated
+/// for `GlesRenderer` instead of `PixmanRenderer`. Started out as a bare
+/// `MemoryRenderBufferRenderElement<GlesRenderer>` back when this phase's
+/// element list was always empty and the concrete choice genuinely didn't
+/// matter - widened once `render_udev_frame`'s GPU branch started pushing
+/// a real cursor (`cursor::render_elements`' own return type) through
+/// `render_frame`.
+type GpuElement = crate::elements::OverlayElement<GlesRenderer>;
 
 /// One head successfully driven through `DrmOutputManager::initialize_output`
 /// - see [`GpuContext::initialize_output`]'s own doc comment.
