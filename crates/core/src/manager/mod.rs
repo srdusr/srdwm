@@ -189,6 +189,23 @@ pub struct WindowManager {
     /// redraws constantly - see `crates/wayland/src/rounded_corners.rs`).
     /// `Some(_)` only when the user explicitly set it, and wins either way.
     pub rounded_corners_enabled: Option<bool>,
+    /// Whether the udev backend attempts real GBM+EGL+`DrmCompositor` GPU
+    /// rendering instead of the default, always-available software
+    /// (Pixman/dumb-buffer) path - read from `general.gpu`, `false` by
+    /// default (unlike `rounded_corners_enabled`'s `Option`, this has one
+    /// unambiguous default regardless of backend: GPU rendering is udev-
+    /// only and experimental everywhere, so "off" is correct whether or
+    /// not the eventual backend even has a GPU path at all). `true` here
+    /// only ever *attempts* it - `udev::gpu::probe` still falls back to
+    /// the untouched software path on any failure at any step (no GBM
+    /// device, no atomic-modesetting support, a software-only EGL
+    /// renderer, ...), logged but never fatal, so setting this on a
+    /// machine or VM without real GPU/KMS support costs nothing beyond
+    /// the one failed probe at startup. `SRDWM_GPU=1` (an env var, unset
+    /// by default) remains a separate, lower-level override for testing
+    /// without touching config - `udev::platform::connect` attempts the
+    /// probe if *either* this or the env var says to.
+    pub gpu_enabled: bool,
     /// The whole-screen colour treatment currently active (night light's
     /// warm tint or reading mode's desaturation), live-settable via `srd
     /// set night_light`/`srd set reading_mode` - see [`ColorFilter`]. Off
@@ -349,6 +366,7 @@ impl WindowManager {
             shadows_enabled: true,
             resize_margin: RESIZE_MARGIN,
             rounded_corners_enabled: None,
+            gpu_enabled: false,
             color_filter: ColorFilter::None,
             focus_follows_mouse: false,
             auto_raise: false,

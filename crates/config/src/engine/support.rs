@@ -144,6 +144,16 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     set("general.animation_duration", Number(200.0));
     set("general.shadows", Bool(true));
     set("general.resize_margin", Number(6.0));
+    // `false`: real GBM+EGL+`DrmCompositor` GPU rendering on the udev
+    // backend is opt-in and still missing real window content/decoration
+    // support (see `crates/wayland/src/udev/gpu.rs`'s own module doc
+    // comment for exactly what it does render) - unlike `general.
+    // rounded_corners` just above, this has one unambiguous default
+    // regardless of which backend ends up connecting (GPU rendering is
+    // udev-only and experimental everywhere), so it's seeded here like
+    // every other ordinary flag rather than left absent for a backend to
+    // decide.
+    set("general.gpu", Bool(false));
     // Deliberately *not* seeded here, unlike every other `general.*` key --
     // its actual default differs by backend (GLES/winit: on; udev/Pixman:
     // off, an untested-on-real-hardware CPU cost too real to default to on

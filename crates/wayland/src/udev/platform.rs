@@ -36,15 +36,21 @@ impl UdevPlatform {
             .open(&gpu_path, rustix::fs::OFlags::RDWR | rustix::fs::OFlags::CLOEXEC)
             .map_err(err)?;
         let card = Rc::new(Card(fd));
-        // Opt-in only (`SRDWM_GPU=1`, unset by default) - see `gpu::probe`'s
-        // own doc comment for exactly what this does and does not do yet.
-        // A no-op unless that variable is set, so this line changes nothing
-        // about any session that doesn't set it. `gpu_notifier` is
-        // registered as its own calloop event source further down
-        // (alongside `register_drm_fd`'s own registration for the
-        // existing legacy heads); `gpu_context` is stored on `UdevState`
-        // below and consulted by `render_udev_frame`.
-        let (mut gpu_context, gpu_notifier) = match super::gpu::probe(&card) {
+        // Opt-in only - `general.gpu` in config (`wm.gpu_enabled`,
+        // `false` by default) or the lower-level `SRDWM_GPU=1` env var,
+        // whichever says yes - see `gpu::probe`'s own doc comment for
+        // exactly what this does and does not do yet. A no-op unless
+        // either says to, so this line changes nothing about any session
+        // that leaves both alone. The env var stays as a quick manual
+        // override for testing without touching config (still works even
+        // if `general.gpu` is explicitly `false`) - it does not gate
+        // config *off*, only ever adds an extra way to opt *in*.
+        // `gpu_notifier` is registered as its own calloop event source
+        // further down (alongside `register_drm_fd`'s own registration
+        // for the existing legacy heads); `gpu_context` is stored on
+        // `UdevState` below and consulted by `render_udev_frame`.
+        let gpu_enabled = wm.borrow().gpu_enabled || std::env::var("SRDWM_GPU").as_deref() == Ok("1");
+        let (mut gpu_context, gpu_notifier) = match super::gpu::probe(&card, gpu_enabled) {
             Some((ctx, notifier)) => (Some(ctx), Some(notifier)),
             None => (None, None),
         };

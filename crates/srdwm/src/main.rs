@@ -171,6 +171,7 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     // - see `WindowManager::rounded_corners_enabled`'s doc comment for why
     // this can't just be `get_bool(..., true)` like every other flag here.
     let rounded_corners = engine.get("general.rounded_corners").and_then(|v| v.as_bool());
+    let gpu = engine.get_bool("general.gpu", false);
     let focus_follows_mouse = engine.get_bool("general.focus_follows_mouse", false);
     let auto_raise = engine.get_bool("general.auto_raise", false);
 
@@ -295,6 +296,7 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     wm.shadows_enabled = shadows;
     wm.resize_margin = resize_margin;
     wm.rounded_corners_enabled = rounded_corners;
+    wm.gpu_enabled = gpu;
     wm.focus_follows_mouse = focus_follows_mouse;
     wm.auto_raise = auto_raise;
     wm.theme = theme;

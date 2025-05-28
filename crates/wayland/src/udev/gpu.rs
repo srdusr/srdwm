@@ -1,6 +1,7 @@
-//! Opt-in (`SRDWM_GPU=1`) GBM+EGL+`DrmCompositor` GPU render path for the
-//! udev backend - see [`probe`]'s own doc comment for exactly what this
-//! does and does not do yet. Past the original Phase 2 (one output,
+//! Opt-in (`general.gpu` in config, or the lower-level `SRDWM_GPU=1` env
+//! var) GBM+EGL+`DrmCompositor` GPU render path for the udev backend --
+//! see [`probe`]'s own doc comment for exactly what this does and does
+//! not do yet. Past the original Phase 2 (one output,
 //! clear-color only - see the plan this was built from, `snappy-
 //! percolating-boole.md`, for that phase's own scoping): every head
 //! `initialize_output` succeeds for gets driven, not just the first
@@ -106,15 +107,20 @@ impl GpuContext {
 const COLOR_FORMATS: [DrmFourcc; 2] = [DrmFourcc::Argb8888, DrmFourcc::Xrgb8888];
 
 /// Attempts the full GBM+EGL+GLES+`DrmDevice`+`DrmOutputManager` chain
-/// against `card`'s DRM fd, gated behind `SRDWM_GPU=1` (unset - the
-/// default - skips this entirely: zero cost, zero risk, identical to
-/// every session before this one). Returns `None` on *any* failure at any
-/// step, each logged with which step failed and why, so a machine without
-/// working KMS+3D driver support (or a VM with only dumb-buffer scanout --
-/// this backend's own long-standing default target, see `udev/mod.rs`'s
-/// module doc comment) gets one clear, harmless log line instead of
-/// anything touching the actual rendering/modesetting this backend already
-/// does.
+/// against `card`'s DRM fd, gated behind `enabled` (the caller's own
+/// combined decision - `udev/platform.rs`'s call site attempts this
+/// whenever *either* `general.gpu` in config or the lower-level
+/// `SRDWM_GPU=1` env-var override says to; both unset/`false` is the
+/// default, and skips this entirely: zero cost, zero risk, identical to
+/// every session before this option existed). Returns `None` on *any*
+/// failure at any step, each logged with which step failed and why, so a
+/// machine without working KMS+3D driver support (or a VM with only
+/// dumb-buffer scanout - this backend's own long-standing default
+/// target, see `udev/mod.rs`'s module doc comment) gets one clear,
+/// harmless log line instead of anything touching the actual rendering/
+/// modesetting this backend already does, and falls straight back to
+/// that same always-available software path with no further action
+/// needed from whoever enabled this.
 ///
 /// `DrmDevice::new`'s own `disable_connectors` parameter (passed `false`
 /// here, matching the existing legacy path's own connector handling) is
@@ -132,8 +138,8 @@ const COLOR_FORMATS: [DrmFourcc; 2] = [DrmFourcc::Argb8888, DrmFourcc::Xrgb8888]
 /// is building a ready-to-use `GpuContext`; which head (if any) actually
 /// gets driven through it is a per-session, per-head decision the caller
 /// (`udev/platform.rs`'s startup path) makes once this succeeds.
-pub(crate) fn probe(card: &Card) -> Option<(GpuContext, DrmDeviceNotifier)> {
-    if std::env::var("SRDWM_GPU").as_deref() != Ok("1") {
+pub(crate) fn probe(card: &Card, enabled: bool) -> Option<(GpuContext, DrmDeviceNotifier)> {
+    if !enabled {
         return None;
     }
     // One `DrmDeviceFd` used for everything below - GBM, EGL, and the
