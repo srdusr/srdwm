@@ -160,15 +160,14 @@ pub struct Window {
     /// Geometry to restore to when un-maximizing.
     pub restore_geometry: Option<Rect>,
     pub decorated: bool,
-    /// Whether this window declared an `xdg_toplevel` parent (`set_parent`)
-    /// - a dialog/utility window belonging to another one, not a normal
-    /// top-level app window. Backend-set (the wayland crate reads the real
-    /// `ToplevelSurface::parent()`, refreshed on every decoration redraw),
-    /// same as `decorated` itself; `core` has no protocol concept of its
-    /// own to derive this from. Only ever `true` for a genuine `xdg_
-    /// toplevel` client that set a parent - an XWayland dialog's own
-    /// `WM_TRANSIENT_FOR` isn't read yet, so this misses those specifically
-    /// (a real, known gap, not an oversight). Requested directly: a
+    /// Whether this window declared itself a dialog/utility window
+    /// belonging to another one, not a normal top-level app window --
+    /// a native `xdg_toplevel`'s own `parent()` (`set_parent`), or an
+    /// XWayland `X11Surface`'s ICCCM `WM_TRANSIENT_FOR` hint
+    /// (`is_transient_for()`). Backend-set (the wayland crate reads
+    /// whichever real accessor applies, refreshed on every decoration
+    /// redraw), same as `decorated` itself; `core` has no protocol
+    /// concept of its own to derive this from. Requested directly: a
     /// dialog's titlebar should show only a close button, no traffic
     /// lights - see `hit_test`'s and `decoration::render_titlebar`'s own
     /// use of this for what actually changes.

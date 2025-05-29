@@ -825,6 +825,21 @@ impl XwmHandler for CompState {
     /// (a dock's running-indicator, an app switcher, icon lookup), not just
     /// this compositor's own UI.
     fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
+        // `WM_TRANSIENT_FOR` - `Window::is_dialog`'s own X11 half (see its
+        // doc comment) - can arrive after the window's already mapped and
+        // decorated: a client that sets it slightly late, or one this
+        // compositor granted the map request for before XWayland finished
+        // resolving the property. `redraw_decoration_buffer` re-reads
+        // `is_transient_for()` fresh every call, so simply calling it again
+        // here picks up the change - same "cheap once nothing's actually
+        // different" self-guard (`decoration_signatures`) every other
+        // redraw trigger in this codebase already relies on.
+        if matches!(property, WmWindowProperty::TransientFor) {
+            if let Some(&id) = self.xwayland_windows.get(&window.window_id()) {
+                self.redraw_decoration_buffer(id);
+            }
+            return;
+        }
         if !matches!(property, WmWindowProperty::Title | WmWindowProperty::Class) {
             return;
         }

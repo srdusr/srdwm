@@ -81,11 +81,24 @@ impl CompState {
         // change. Written back onto the real `Window` (not just used
         // locally) so `ResizeEdge::hit_test`'s own `is_dialog` parameter
         // - read from `core`, which has no protocol concept to derive
-        // this from itself - agrees with whatever got drawn here. An
-        // XWayland window's own `WM_TRANSIENT_FOR` isn't read yet, so this
-        // stays `false` for those specifically - see `Window::is_dialog`'s
-        // own doc comment.
-        let is_dialog = self.id_to_window.get(&id).and_then(|dw| dw.toplevel()).map(|t| t.parent().is_some()).unwrap_or(false);
+        // this from itself - agrees with whatever got drawn here.
+        //
+        // Checks both real toplevel kinds a `DWindow` can wrap: a native
+        // `xdg_toplevel`'s own `parent()`, or an XWayland `X11Surface`'s
+        // `WM_TRANSIENT_FOR` via `is_transient_for()`. The X11 half used
+        // to be unchecked entirely (`.toplevel()` alone, which is always
+        // `None` for an X11-backed window - `X11Surface`'s own accessor
+        // is `.x11_surface()`, a different method), so every XWayland
+        // dialog - a GTK "Save As", an app's own "About" box, anything
+        // that sets the ICCCM transient-for hint - always drew with the
+        // full three-button titlebar and traffic-light colours, the
+        // native-Wayland-only case this whole feature was built for.
+        // Reported live: "dialog windows... should never have traffic
+        // light, should just be x" - true for native Wayland dialogs
+        // already, not for XWayland ones.
+        let is_dialog = self.id_to_window.get(&id).is_some_and(|dw| {
+            dw.toplevel().is_some_and(|t| t.parent().is_some()) || dw.x11_surface().is_some_and(|x| x.is_transient_for().is_some())
+        });
         if let Some(win) = self.wm.borrow_mut().window_mut(id) {
             win.is_dialog = is_dialog;
         }
