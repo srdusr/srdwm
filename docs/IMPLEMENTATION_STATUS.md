@@ -152,7 +152,17 @@ once, so splitting it across three files would have hidden it.
   GBM/EGL/`DrmCompositor`-based hardware acceleration: that path needs a
   GPU with working KMS+3D driver support that a low-spec machine's VM isn't
   guaranteed to have, while dumb buffers work on essentially any DRM
-  driver. `WaylandPlatform::connect` (winit) picks this backend
+  driver. A real GBM+EGL+`DrmCompositor` GPU path now exists
+  (`crates/wayland/src/udev/gpu.rs`), opt-in via `general.gpu` in config
+  or the lower-level `SRDWM_GPU=1` env var (both `false`/unset by
+  default - this backend stays 100% software unless explicitly asked
+  otherwise), falling back to the software path unchanged on any
+  failure at any step. Every connected head it successfully initializes
+  gets driven through it, VT-switch pause/activate is wired, and the
+  real cursor renders on top of its own clear color - window content
+  and decorations are the remaining gap: a GPU-driven head shows no
+  windows yet, only its clear color and cursor.
+  `WaylandPlatform::connect` (winit) picks this backend
   automatically when no `WAYLAND_DISPLAY`/`DISPLAY` is set, falling back to
   nested winit if udev init fails for any reason.
   **Verified live in an isolated QEMU VM** (see below): started on a bare

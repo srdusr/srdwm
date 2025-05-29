@@ -16,6 +16,7 @@ srd.set("general.resize_margin", 6)                    -- Default: 6px
 srd.set("general.rounded_corners", true)               -- Default: true on GLES/winit, false on udev/Pixman (opt-in there)
 srd.set("general.focus_follows_mouse", false)          -- Default: false - hover a window to focus it, no click needed
 srd.set("general.auto_raise", false)                   -- Default: false - also raise on hover-focus, not just focus
+srd.set("general.gpu", false)                          -- Default: false - udev backend only, see "GPU rendering" below
 ```
 `general.smart_placement`/`general.border_width` are not listed: neither
 is implemented - new-window placement always uses smart placement
@@ -25,6 +26,32 @@ setting is `theme.decorations.border.width` below.
 driven focus change) and `general.auto_focus` (no clear distinct meaning
 found beyond what plain click-to-focus already does) aren't implemented
 either.
+
+#### GPU rendering (`general.gpu`)
+
+Real GBM+EGL+`DrmCompositor` GPU rendering for the udev (real-hardware)
+backend, instead of its default, always-available software (Pixman/
+dumb-buffer) path. Off by default on every platform - unlike
+`general.rounded_corners`, this has one unambiguous default regardless
+of which backend connects, since GPU rendering is udev-only and still
+experimental. Setting it `true` only ever *attempts* GPU rendering: it
+falls back to the software path with no user action needed on any
+failure at any step (no GBM device, no atomic-modesetting support, a
+software-only EGL renderer), so it is safe to enable on a machine or
+VM that turns out not to support it - one harmless log line is the
+only cost.
+
+Read once at startup, not live-settable via `srd set` - the render
+backend is wired into the DRM pipeline when the compositor connects to
+its GPU, not something that can be swapped while running.
+
+Still missing real window content and decorations as of this writing:
+a GPU-driven head renders its own clear color and the real cursor, not
+yet any windows - see `crates/wayland/src/udev/gpu.rs`'s own module
+doc comment for the current state. `SRDWM_GPU=1` (an environment
+variable) remains a separate, lower-level override for testing without
+touching config - either it or `general.gpu` being set is enough to
+attempt GPU rendering.
 
 ### Monitor Settings (`monitor.*`)
 ```lua
@@ -111,41 +138,74 @@ srd.set("workspace.auto_back_and_forth", false)        -- Default: false
 listed here since setting either currently does nothing.)
 
 ### Performance Settings (`performance.*`)
+Not implemented - every key below is seeded and range-validated
+(`window_cache_size`/`max_fps`, per Validation Rules below) but never
+read anywhere past that seed call, confirmed the same way as the
+Layout-Specific section above. Real frame pacing on this compositor
+comes from the display's own hardware vsync (the udev backend's real
+page-flip cadence, or the winit backend's own frame-timing logic --
+see `crates/wayland/src/winit/nested_platform.rs`'s own doc comment),
+not a config knob; `RUST_LOG` (Environment Variables, above) is the
+real logging control.
 ```lua
-srd.set("performance.vsync", true)                     -- Default: true
-srd.set("performance.max_fps", 60)                     -- Default: 60
-srd.set("performance.window_cache_size", 100)          -- Default: 100
-srd.set("performance.event_queue_size", 1000)          -- Default: 1000
-srd.set("performance.layout_timeout", 16)              -- Default: 16ms
-srd.set("performance.enable_caching", true)            -- Default: true
+srd.set("performance.vsync", true)                     -- Stored/validated only, no effect
+srd.set("performance.max_fps", 60)                     -- Stored/validated only, no effect
+srd.set("performance.window_cache_size", 100)          -- Stored/validated only, no effect
+srd.set("performance.event_queue_size", 1000)          -- Stored only, no effect
+srd.set("performance.layout_timeout", 16)              -- Stored only, no effect
+srd.set("performance.enable_caching", true)            -- Stored only, no effect
 ```
 
 ### Debug Settings (`debug.*`)
+Not implemented - every key below is seeded but never read anywhere
+past that seed call. `RUST_LOG` (Environment Variables, above) is the
+real, working logging control.
 ```lua
-srd.set("debug.logging", true)                         -- Default: true
-srd.set("debug.log_level", "info")                     -- Default: "info"
-srd.set("debug.profile", false)                        -- Default: false
-srd.set("debug.trace_events", false)                   -- Default: false
-srd.set("debug.show_layout_bounds", false)             -- Default: false
-srd.set("debug.show_window_geometry", false)           -- Default: false
+srd.set("debug.logging", true)                         -- Stored only, no effect
+srd.set("debug.log_level", "info")                     -- Stored only, no effect
+srd.set("debug.profile", false)                        -- Stored only, no effect
+srd.set("debug.trace_events", false)                   -- Stored only, no effect
+srd.set("debug.show_layout_bounds", false)             -- Stored only, no effect
+srd.set("debug.show_window_geometry", false)           -- Stored only, no effect
 ```
 
 ## Layout-Specific Defaults
 
+`srd.layout.configure(name, table)` (`crates/config/src/engine/layout.rs`)
+stores every key given under `layout.<name>.*` - `srd.get("layout.tiling.
+split_ratio")` genuinely echoes back whatever was last set, and each numeric
+`gaps.inner`/`gaps.outer` is range-validated by `srd.validate_config()` --
+but of everything below, **only `master_ratio` is actually read back and
+applied** to real window geometry (`WindowManager::tiling.master_ratio`,
+which the tiling layout's own split math uses). Every other key in this
+section - `split_ratio`, `auto_swap`, every `behavior.*` table, `layout.
+tiling`/`layout.dynamic`/`layout.floating`'s own `gaps.*`, `snap_threshold`,
+`grid_size`, `cascade_offset`, `smart_placement`, `default_position`,
+`remember_position`, `always_on_top` - is accepted, stored, and
+retrievable, but has no effect on window behavior. Confirmed by grepping
+the whole compositor for a second reader of each key beyond the one seed
+call in `crates/config/src/engine/support.rs`'s `default_config` --
+`master_ratio` is the only one with any other hit.
+
+The real, working gap setting for every layout is `general.window_gap`
+(above) - it drives `WindowManager::tiling.gap_inner`/`gap_outer`
+directly, unconditionally, regardless of what a layout's own `gaps.inner`/
+`gaps.outer` say.
+
 ### Tiling Layout (`layout.tiling.*`)
 ```lua
 srd.layout.configure("tiling", {
-    split_ratio = 0.5,                                 -- Default: 0.5
-    master_ratio = 0.6,                                -- Default: 0.6
-    auto_swap = true,                                  -- Default: true
+    split_ratio = 0.5,                                 -- Stored/validated only, no effect
+    master_ratio = 0.6,                                -- Default: 0.6 - the one real key here
+    auto_swap = true,                                  -- Stored/validated only, no effect
     gaps = {
-        inner = 8,                                      -- Default: 8
-        outer = 16                                      -- Default: 16
+        inner = 8,                                      -- Stored/validated only - see general.window_gap above
+        outer = 16                                      -- Stored/validated only - see general.window_gap above
     },
     behavior = {
-        new_window_master = false,                      -- Default: false
-        auto_balance = true,                            -- Default: true
-        preserve_ratio = true                           -- Default: true
+        new_window_master = false,                      -- Stored only, no effect
+        auto_balance = true,                            -- Stored only, no effect
+        preserve_ratio = true                           -- Stored only, no effect
     }
 })
 ```
@@ -153,18 +213,18 @@ srd.layout.configure("tiling", {
 ### Dynamic Layout (`layout.dynamic.*`)
 ```lua
 srd.layout.configure("dynamic", {
-    snap_threshold = 20,                                -- Default: 20
-    grid_size = 6,                                      -- Default: 6
-    cascade_offset = 30,                                -- Default: 30
-    smart_placement = true,                             -- Default: true
+    snap_threshold = 20,                                -- Stored only, no effect
+    grid_size = 6,                                      -- Stored only, no effect
+    cascade_offset = 30,                                -- Stored only, no effect
+    smart_placement = true,                             -- Stored only, no effect - placement is unconditionally "smart" already, see general.smart_placement above
     gaps = {
-        inner = 8,                                      -- Default: 8
-        outer = 16                                      -- Default: 16
+        inner = 8,                                      -- Stored/validated only - see general.window_gap above
+        outer = 16                                      -- Stored/validated only - see general.window_gap above
     },
     behavior = {
-        remember_positions = true,                      -- Default: true
-        auto_arrange = true,                            -- Default: true
-        overlap_prevention = true                       -- Default: true
+        remember_positions = true,                      -- Stored only, no effect
+        auto_arrange = true,                            -- Stored only, no effect
+        overlap_prevention = true                       -- Stored only, no effect
     }
 })
 ```
@@ -172,17 +232,17 @@ srd.layout.configure("dynamic", {
 ### Floating Layout (`layout.floating.*`)
 ```lua
 srd.layout.configure("floating", {
-    default_position = "center",                        -- Default: "center"
-    remember_position = true,                           -- Default: true
-    always_on_top = false,                             -- Default: false
+    default_position = "center",                        -- Stored only, no effect
+    remember_position = true,                           -- Stored only, no effect
+    always_on_top = false,                             -- Stored only, no effect - see the real per-window `pinned` rule action instead
     gaps = {
-        inner = 0,                                      -- Default: 0
-        outer = 16                                      -- Default: 16
+        inner = 0,                                      -- Stored/validated only - see general.window_gap above
+        outer = 16                                      -- Stored/validated only - see general.window_gap above
     },
     behavior = {
-        allow_resize = true,                            -- Default: true
-        allow_move = true,                              -- Default: true
-        snap_to_edges = true                            -- Default: true
+        allow_resize = true,                            -- Stored only, no effect
+        allow_move = true,                              -- Stored only, no effect
+        snap_to_edges = true                            -- Stored only, no effect
     }
 })
 ```
@@ -190,16 +250,23 @@ srd.layout.configure("floating", {
 ## Theme Defaults
 
 ### Colors (`theme.colors.*`)
+Not implemented - every key below is seeded and hex-color-validated
+(Validation Rules, below) but never read anywhere past that seed call:
+confirmed by grepping the whole compositor for a second reference to
+each `theme.colors.*` key beyond `crates/config/src/engine/support.rs`'s
+own seed/validate calls, none found. `theme.decorations.*` below (border
+colors, titlebar colors) is the real, working theme surface - every
+color a window actually renders comes from there, not here.
 ```lua
 srd.theme.set_colors({
-    background = "#2e3440",                             -- Default: Nord dark
-    foreground = "#eceff4",                             -- Default: Nord light
-    primary = "#88c0d0",                                -- Default: Nord blue
-    secondary = "#81a1c1",                              -- Default: Nord blue-gray
-    accent = "#5e81ac",                                 -- Default: Nord blue
-    error = "#bf616a",                                  -- Default: Nord red
-    warning = "#ebcb8b",                                -- Default: Nord yellow
-    success = "#a3be8c"                                 -- Default: Nord green
+    background = "#2e3440",                             -- Stored/validated only, no effect
+    foreground = "#eceff4",                             -- Stored/validated only, no effect
+    primary = "#88c0d0",                                -- Stored/validated only, no effect
+    secondary = "#81a1c1",                              -- Stored/validated only, no effect
+    accent = "#5e81ac",                                 -- Stored/validated only, no effect
+    error = "#bf616a",                                  -- Stored/validated only, no effect
+    warning = "#ebcb8b",                                -- Stored/validated only, no effect
+    success = "#a3be8c"                                 -- Stored/validated only, no effect
 })
 ```
 
@@ -212,13 +279,13 @@ srd.theme.set_decorations({
         active_color = "#88c0d0",                       -- Default: Nord blue
         inactive_color = "#2e3440",                     -- Accepted, not read: see inactive_dim below
         inactive_dim = 0.35,                            -- Default: 0.35 - unfocused border = active_color scaled by this factor (0 = black, 1 = same as focused). The real unfocused-border knob; inactive_color above is validated but never applied, since an absolute override would erase the dimming scheme instead of participating in it.
-        focused_style = "solid",                        -- Default: "solid"
-        unfocused_style = "solid"                       -- Default: "solid"
+        focused_style = "solid",                        -- Stored only, no effect - solid is the only style this compositor ever draws
+        unfocused_style = "solid"                       -- Stored only, no effect - solid is the only style this compositor ever draws
     },
     title_bar = {
         height = 32,                                    -- Not actually read - see the note below the table
-        show = true,                                    -- Default: true
-        font = "JetBrains Mono 10",                     -- Default: "JetBrains Mono 10"
+        show = true,                                    -- Stored only, no effect - see `theme.decorations.default_mode`/per-window `decorated` rule action instead
+        font = "JetBrains Mono 10",                     -- Stored only, no effect - the titlebar always uses whatever system font `find_system_font` picks
         background = "#2e3440",                         -- Default: Nord dark
         foreground = "#eceff4",                         -- Accepted, not read: see foreground_focused/foreground_unfocused below
         foreground_focused = "#88c0d0",                 -- Default: Nord blue - titlebar text/icon colour on the focused window
@@ -410,34 +477,46 @@ srd.rule({ title = "Picture-in-Picture" }, { floating = true, width = 480, heigh
 
 ## Platform-Specific Defaults
 
+Only `platform.backend`/`platform.os` are real here - both are
+read-only, informational values `crates/srdwm/src/main.rs` overwrites
+with the actually-detected backend/OS at startup (`platform.backend`:
+`"wayland"`/`"x11"`/`"windows"`/`"macos"`; not the string `"auto"` a
+config never actually sets it to), so `init.lua` can branch on which
+platform it's running under (`if srd.get("platform.backend") ==
+"wayland" then ... end`). Every `use_*`/`global_hooks`/
+`accessibility_enabled` flag below is seeded but never read anywhere
+past that seed call - EWMH/NetWM/xdg-shell/layer-shell/DWM/Win32/
+Cocoa/Core Graphics support is simply always compiled in and used
+unconditionally on the relevant platform; none of it is behind a
+toggle.
+
 ### Linux (X11/Wayland)
 ```lua
-- Auto-detect backend
-srd.set("platform.backend", "auto")                    -- Default: "auto"
+srd.get("platform.backend")                             -- Read-only: "wayland" or "x11", whichever actually connected
 
 - X11 specific
-srd.set("platform.x11.use_ewmh", true)                 -- Default: true
-srd.set("platform.x11.use_netwm", true)                -- Default: true
+srd.set("platform.x11.use_ewmh", true)                 -- Stored only, no effect
+srd.set("platform.x11.use_netwm", true)                -- Stored only, no effect
 
 - Wayland specific
-srd.set("platform.wayland.use_xdg_shell", true)        -- Default: true
-srd.set("platform.wayland.use_layer_shell", true)      -- Default: true
+srd.set("platform.wayland.use_xdg_shell", true)        -- Stored only, no effect
+srd.set("platform.wayland.use_layer_shell", true)      -- Stored only, no effect
 ```
 
 ### Windows
 ```lua
 - Windows specific
-srd.set("platform.windows.use_dwm", true)              -- Default: true
-srd.set("platform.windows.use_win32", true)            -- Default: true
-srd.set("platform.windows.global_hooks", true)         -- Default: true
+srd.set("platform.windows.use_dwm", true)              -- Stored only, no effect
+srd.set("platform.windows.use_win32", true)            -- Stored only, no effect
+srd.set("platform.windows.global_hooks", true)         -- Stored only, no effect
 ```
 
 ### macOS
 ```lua
 - macOS specific
-srd.set("platform.macos.use_cocoa", true)              -- Default: true
-srd.set("platform.macos.use_core_graphics", true)      -- Default: true
-srd.set("platform.macos.accessibility_enabled", true)  -- Default: true
+srd.set("platform.macos.use_cocoa", true)              -- Stored only, no effect
+srd.set("platform.macos.use_core_graphics", true)      -- Stored only, no effect
+srd.set("platform.macos.accessibility_enabled", true)  -- Stored only, no effect
 ```
 
 ## Configuration File Locations
@@ -465,23 +544,37 @@ srd.set("platform.macos.accessibility_enabled", true)  -- Default: true
 
 ## Environment Variables
 
+The real, currently-implemented set (checked directly against every
+`std::env::var` call in the compositor's own source, not aspirational --
+`SRDWM_THEME`/`SRDWM_DEBUG_LEVEL`/`SRDWM_PLATFORM`/`SRDWM_MAX_FPS`/
+`SRDWM_VSYNC`, previously listed here, do not exist in the codebase at
+all):
+
 ```bash
-# Configuration path override
+# Configuration directory override - falls back to
+# $XDG_CONFIG_HOME/srd, then ~/.config/srd
 export SRDWM_CONFIG_PATH="/path/to/config"
 
-# Theme override
-export SRDWM_THEME="nord"
+# Monitor-layout state file override - falls back to
+# $XDG_STATE_HOME/srd/monitor-layout.json, then
+# ~/.local/state/srd/monitor-layout.json
+export SRDWM_STATE_PATH="/path/to/monitor-layout.json"
 
-# Debug level
-export SRDWM_DEBUG_LEVEL="debug"
+# Opt into the udev backend's real GBM+EGL GPU render path - the
+# lower-level override alongside general.gpu in config (see that
+# key's own section above); either being set is enough
+export SRDWM_GPU=1
 
-# Platform override
-export SRDWM_PLATFORM="wayland"
-
-# Performance settings
-export SRDWM_MAX_FPS="120"
-export SRDWM_VSYNC="false"
+# Log level/filter - standard env_logger-style directive syntax
+# (e.g. "srdwm=debug,warn"), read by srdwm's own logger setup
+export RUST_LOG="info"
 ```
+
+Two more are read, but are standard desktop-environment conventions
+rather than srdwm-specific settings, so setting them affects any
+Wayland/X11 app, not just this compositor: `XCURSOR_THEME`/
+`XCURSOR_SIZE` (the built-in cursor's theme/size), and `DISPLAY`/
+`WAYLAND_DISPLAY` (which existing session `srd` itself connects to).
 
 ## Reset to Defaults
 
@@ -501,11 +594,20 @@ srd.reset_category("general")
 ## Validation Rules
 
 ### Numeric Values
-- **Gaps**: 0-100 pixels
-- **Border width**: 0-20 pixels
+Enforced by `srd.validate_config()` against a Lua config's own declared
+values (`init.lua`, `srd.set(...)`) - the live `srd set <key> <value>`
+CLI/IPC command does **not** currently run these same checks, only that
+the value parses as the right type (a non-negative integer for
+`border_width`/`corner_radius`, say). A value outside the ranges below
+set live still applies exactly as given, unvalidated.
+- **Gaps** (`general.window_gap`, every layout's `gaps.inner`/`gaps.outer`): 0-100 pixels
+- **Border width** (`theme.decorations.border.width`): 0-20 pixels
+- **Corner radius** (`theme.decorations.border.radius`): 0-100 pixels
+- **Resize margin** (`general.resize_margin`): 1-50 pixels
 - **Animation duration**: 0-1000ms
 - **FPS**: 30-240
 - **Cache size**: 10-10000
+- **Border inactive-window dim** (`theme.decorations.border.inactive_dim`): 0.0-1.0
 
 ### String Values
 - **Layout names**: Must be registered layouts
