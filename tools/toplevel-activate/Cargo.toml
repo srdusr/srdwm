@@ -1,0 +1,17 @@
+[package]
+name = "toplevel-activate-test"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone - deliberately not a member of the main workspace at
+# ../../Cargo.toml, so building/testing srdwm itself never has to build
+# this too. A debug tool, not part of the shipped product.
+[workspace]
+
+[[bin]]
+name = "activate"
+path = "src/main.rs"
+
+[dependencies]
+wayland-client = "=0.31.14"
+wayland-protocols-wlr = { version = "=0.3.12", features = ["client"] }
