@@ -46,22 +46,41 @@ impl CompState {
         // in a more important way - every caller of this function that
         // reads a *bitmap*-backed element (the titlebar, the top/bottom
         // border strip's own rounded-corner bitmap, both built by `redraw_
-        // decoration_buffer`, itself only called on a real client *commit*,
-        // not on every resize step) uses this rect's width/height to size
-        // the `src` crop rectangle it samples that bitmap with. Making this
+        // decoration_buffer`) uses this rect's width/height to size the
+        // `src` crop rectangle it samples that bitmap with. Making this
         // function return the *live* drag target while the underlying
         // bitmap was still sized for whatever the *last commit* actually
-        // was means that crop can end up larger than the real bitmap's own
-        // stored dimensions - `MemoryRenderBufferRenderElement::from_
+        // was meant that crop could end up larger than the real bitmap's
+        // own stored dimensions - `MemoryRenderBufferRenderElement::from_
         // buffer` does not validate `src` against the texture's real size,
         // so an oversized crop reads as an out-of-bounds texture sample
-        // (stretched/repeated/garbage pixels, not a clean error) for as
-        // long as a fast resize keeps outrunning the client's own recommit
-        // rate - a worse, more visibly broken failure mode than the
-        // one-frame-stale lag it replaced. Fixing the lag properly needs
-        // `redraw_decoration_buffer` itself rebuilding on every resize
-        // step, not just on commit, which is real, separate scope - not
-        // yet done.
+        // (stretched/repeated/garbage pixels, not a clean error).
+        //
+        // Now reinstated, safely: this returns the *live* drag target
+        // (`geom`, unmodified) while a resize of this specific window is
+        // active, same as the reverted attempt did - but two things are
+        // different this time, together closing the gap that made it
+        // unsafe rather than just re-taking the risk:
+        // 1. `input::pointer::handle_pointer_position` now calls
+        //    `redraw_decoration_buffer` on every resize motion tick (see
+        //    its own doc comment), not just on a real client commit, so
+        //    the bitmap itself keeps catching up to this same live value
+        //    almost every frame instead of staying pinned to the last
+        //    commit for the resize's whole duration.
+        // 2. Independent of how well-synced that keeps the two, every
+        //    render-loop call site that turns this rect's width/height
+        //    into a `src` crop now clamps it against `decoration_
+        //    signatures`' own recorded `(width, height)` - the bitmap's
+        //    own *actual* last-built size, tracked there already for
+        //    unrelated caching reasons - before handing it to `from_
+        //    buffer`. That clamp is what actually prevents the out-of-
+        //    bounds read now, structurally, regardless of any remaining
+        //    timing gap between this function and the next rebuild; this
+        //    branch existing is what keeps that gap small in practice
+        //    rather than a full commit-cycle wide.
+        if wm.borrow().resizing_window() == Some(id) {
+            return geom;
+        }
         let Some(w) = wm.borrow().window(id).cloned() else { return geom };
         let Some(dwindow) = id_to_window.get(&id) else { return geom };
         // `dwindow.geometry()` - `xdg_surface::set_window_geometry` - is,

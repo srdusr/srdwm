@@ -238,7 +238,13 @@ impl WaylandPlatform {
                 // only once *fully* covered) wasn't enough: a titlebar
                 // only partially covered, the common case for cascaded
                 // windows, still bled through the covered part.
-                let titlebar_rect = srdwm_core::Rect::new(frame.x, frame.y, frame.width, srdwm_core::TITLEBAR_HEIGHT);
+                // Live-resize safety clamp - see the matching clamp in
+                // `udev/render.rs`'s own titlebar push for the full
+                // reasoning: `frame.width` can be the live drag target
+                // (via `effective_frame_of`), ahead of whatever size this
+                // buffer was actually last built at.
+                let titlebar_w = self.state.decoration_signatures.get(&id).map(|s| s.width).unwrap_or(frame.width).min(frame.width);
+                let titlebar_rect = srdwm_core::Rect::new(frame.x, frame.y, titlebar_w, srdwm_core::TITLEBAR_HEIGHT);
                 for fragment in crate::elements::visible_border_fragments(titlebar_rect, &occluders) {
                     let pos = (fragment.x as f64, fragment.y as f64);
                     let src = Rectangle::new(
@@ -285,7 +291,10 @@ impl WaylandPlatform {
                         // away instead of landing on real content.
                         let (row0, rows, shift) = decoration::border_top_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);
                         let pos = (strips[0].x as f64, (strips[0].y + shift as i32) as f64);
-                        let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((strips[0].width as f64, rows as f64))));
+                        // Same live-resize safety clamp as the titlebar push
+                        // above and `udev/render.rs`'s matching top strip.
+                        let crop_w = self.state.decoration_signatures.get(&id).map(|s| s.width + 2 * s.border_width).unwrap_or(strips[0].width).min(strips[0].width);
+                        let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((crop_w as f64, rows as f64))));
                         match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, src, None, Kind::Unspecified) {
                             Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
                             Err(e) => log::warn!("failed to import top border buffer for window {id}: {e}"),
@@ -301,7 +310,10 @@ impl WaylandPlatform {
                         // own doc comment.
                         let (row0, rows, shift) = decoration::border_bottom_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);
                         let pos = (strips[1].x as f64, (strips[1].y - shift as i32) as f64);
-                        let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((strips[1].width as f64, rows as f64))));
+                        // Same live-resize safety clamp as the top strip
+                        // above and `udev/render.rs`'s matching bottom strip.
+                        let crop_w = self.state.decoration_signatures.get(&id).map(|s| s.width + 2 * s.border_width).unwrap_or(strips[1].width).min(strips[1].width);
+                        let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((crop_w as f64, rows as f64))));
                         match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, src, None, Kind::Unspecified) {
                             Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
                             Err(e) => log::warn!("failed to import bottom border buffer for window {id}: {e}"),

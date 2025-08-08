@@ -161,6 +161,7 @@ impl WaylandPlatform {
             border_top_decorations: HashMap::new(),
             border_bottom_decorations: HashMap::new(),
             decoration_signatures: HashMap::new(),
+            resize_redraw_at: None,
             hovered_titlebar_button: None,
             shadow_buffers: HashMap::new(),
             rounded_corners_program,

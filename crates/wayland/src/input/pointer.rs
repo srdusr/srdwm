@@ -16,6 +16,13 @@ use super::keyboard::core_modifiers_from_xkb;
 use super::layers::{background_layer_surface_under, layer_surface_under};
 use super::{notify_idle_activity, DRAG_MODIFIER};
 
+/// Minimum gap between `redraw_decoration_buffer` calls fired from an
+/// active resize drag's own pointer-motion events - see `CompState::
+/// resize_redraw_at`'s doc comment. 60Hz: fast enough that the border
+/// visibly tracks the drag, far below the per-motion-event rate a real
+/// mouse or touchpad can produce.
+pub(crate) const RESIZE_REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000 / 60);
+
 /// `WindowManager::hit_test`, but substituting each window's currently
 /// *animated* rect (if it has one active in `state.window_anims`) for its
 /// final `geometry` - see `hit_test_with`'s own doc comment in
@@ -300,6 +307,11 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
 
     let mut wm = state.wm.borrow_mut();
     let dragging_or_resizing = wm.is_dragging() || wm.is_resizing();
+    // Captured now, while `wm` is already borrowed, and acted on further
+    // down after `drop(wm)` - `redraw_decoration_buffer` needs `&mut
+    // state` as a whole, which can't happen while `state.wm`'s own
+    // `RefMut` is still alive.
+    let resizing_id = wm.resizing_window();
     if wm.is_dragging() {
         wm.update_drag(pos.x as i32, pos.y as i32);
     } else if wm.is_resizing() {
@@ -337,6 +349,25 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
         if let Some(id) = focused {
             state.sync_geometry(id);
         }
+    }
+    // Keeps the border/titlebar bitmap tracking an active resize drag's own
+    // live geometry (see `state::geometry::effective_frame_of`'s doc
+    // comment) instead of only catching up once the drag ends - throttled
+    // against `RESIZE_REDRAW_INTERVAL` since motion events can arrive far
+    // faster than a redraw is worth paying for. Reset to `None` on every
+    // tick that isn't resizing this exact window, so a later resize's first
+    // motion event always redraws immediately rather than inheriting a
+    // stale timestamp from a previous drag (or from dragging, which shares
+    // `dragging_or_resizing` above but never touches `resizing_id`).
+    if let Some(id) = resizing_id {
+        let now = std::time::Instant::now();
+        let due = state.resize_redraw_at.is_none_or(|t| now.duration_since(t) >= RESIZE_REDRAW_INTERVAL);
+        if due {
+            state.redraw_decoration_buffer(id);
+            state.resize_redraw_at = Some(now);
+        }
+    } else {
+        state.resize_redraw_at = None;
     }
 }
 

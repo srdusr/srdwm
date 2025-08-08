@@ -417,6 +417,20 @@ pub(crate) struct CompState {
     /// own blanket call, which never actually checked whether this
     /// specific window was one of the windows that triggered the tick.
     pub(crate) decoration_signatures: HashMap<WindowId, DecorationSignature>,
+    /// When `handle_pointer_position` last called `redraw_decoration_buffer`
+    /// for the window currently being interactively resized - throttles
+    /// that call to once per `RESIZE_REDRAW_INTERVAL` (see `input::pointer`),
+    /// since a pointer
+    /// can emit motion events far faster than a titlebar's text and border
+    /// bitmaps are worth re-rasterizing. Without this the decoration buffer
+    /// only catches up with `effective_frame_of`'s now-live resize geometry
+    /// (see that function's own doc comment) once the drag ends and the
+    /// blanket `sync()` redraw runs - correct, but visibly laggy borders
+    /// for the whole drag. `None` whenever no resize is in progress; reset
+    /// there rather than left stale, so a *new* resize's first motion event
+    /// always redraws immediately instead of inheriting a stale timestamp
+    /// from a previous drag.
+    pub(crate) resize_redraw_at: Option<std::time::Instant>,
     /// Which titlebar button (if any) the pointer is currently over, on
     /// which window, and *when that hover started* - set from `handle_
     /// pointer_position`'s own `hit_test` result, read by `redraw_

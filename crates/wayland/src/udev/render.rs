@@ -527,7 +527,22 @@ impl CompState {
                                 // mask feature.
                                 let (row0, rows, shift) = decoration::border_top_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);
                                 let pos = ((strips[0].x - origin.x) as f64, (strips[0].y - origin.y + shift as i32) as f64);
-                                let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((strips[0].width as f64, rows as f64))));
+                                // Clamped to the buffer's own actual last-
+                                // built width, not trusted at face value --
+                                // see `effective_frame_of`'s own doc comment
+                                // on why: during an active resize `frame`
+                                // (and so `strips[0]`) tracks the *live*
+                                // drag target, which can outrun however far
+                                // `redraw_decoration_buffer` has actually
+                                // gotten rebuilding this same buffer to
+                                // match. An uncrapped `src` wider than the
+                                // real texture is an out-of-bounds sample,
+                                // not a clean error - this is what actually
+                                // prevents that, not just the rebuild-on-
+                                // every-tick call in `input::pointer` trying
+                                // to keep the gap small.
+                                let crop_w = self.decoration_signatures.get(&id).map(|s| s.width + 2 * s.border_width).unwrap_or(strips[0].width).min(strips[0].width);
+                                let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((crop_w as f64, rows as f64))));
                                 match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, src, None, Kind::Unspecified) {
                                     Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
                                     Err(e) => log::warn!("udev: failed to import top border buffer: {e}"),
@@ -548,7 +563,19 @@ impl CompState {
                         // visible fragment can come from the matching
                         // sub-rect of the source image rather than the
                         // whole thing.
-                        let titlebar_rect = srdwm_core::Rect::new(frame.x, frame.y, frame.width, srdwm_core::TITLEBAR_HEIGHT);
+                        // Width clamped to the buffer's own actual last-
+                        // built width - see `effective_frame_of`'s own doc
+                        // comment and the matching clamp on the top border
+                        // strip just above for why: during an active resize
+                        // `frame.width` tracks the *live* drag target, which
+                        // can outrun however far `redraw_decoration_buffer`
+                        // has actually gotten. Clamped here, before
+                        // `visible_border_fragments` runs, so every fragment
+                        // it produces is already within the real texture --
+                        // an unclamped one could ask for a crop past it,
+                        // an out-of-bounds sample rather than a clean error.
+                        let titlebar_w = self.decoration_signatures.get(&id).map(|s| s.width).unwrap_or(frame.width).min(frame.width);
+                        let titlebar_rect = srdwm_core::Rect::new(frame.x, frame.y, titlebar_w, srdwm_core::TITLEBAR_HEIGHT);
                         for fragment in crate::elements::visible_border_fragments(titlebar_rect, &occluders) {
                             let pos = ((fragment.x - origin.x) as f64, (fragment.y - origin.y) as f64);
                             let src = Rectangle::new(
@@ -597,7 +624,12 @@ impl CompState {
                                 // real screenshot, not assumed.
                                 let (row0, rows, shift) = decoration::border_bottom_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);
                                 let pos = ((strips[1].x - origin.x) as f64, (strips[1].y - origin.y - shift as i32) as f64);
-                                let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((strips[1].width as f64, rows as f64))));
+                                // Same live-resize safety clamp as the top
+                                // strip above: bound against the buffer's
+                                // own actual last-built width, not the
+                                // possibly-ahead-of-it live `strips[1].width`.
+                                let crop_w = self.decoration_signatures.get(&id).map(|s| s.width + 2 * s.border_width).unwrap_or(strips[1].width).min(strips[1].width);
+                                let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((crop_w as f64, rows as f64))));
                                 match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, src, None, Kind::Unspecified) {
                                     Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
                                     Err(e) => log::warn!("udev: failed to import bottom border buffer: {e}"),
