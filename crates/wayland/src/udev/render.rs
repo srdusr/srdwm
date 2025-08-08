@@ -232,21 +232,36 @@ impl CompState {
                 // field access, not a method call, even one that (like
                 // this one) only actually touches `self.outputs`.
                 if let Some(gpu_output) = gpu.outputs.iter_mut().find(|(c, _)| *c == head_crtc).map(|(_, o)| o) {
-                    // The one real element this phase pushes: the same
-                    // `cursor::render_elements` the Pixman path already
-                    // uses, generic over the renderer (`R: Renderer +
-                    // ImportAll + ImportMem`), so it works unmodified
-                    // against `gpu.renderer` (`GlesRenderer`) instead of
-                    // `udev.renderer` (`PixmanRenderer`). Window content
-                    // and decorations are real, separate scope past this
-                    // (they need either a GLES-side version of the
-                    // border/titlebar bitmap upload path, or the rounded-
-                    // corner GLES shader `winit/render.rs` already has
-                    // wired for its own single-output case) - not
-                    // attempted here, so a GPU-driven head still shows a
-                    // plain clear color under its own real, moving cursor,
-                    // not yet any windows.
-                    let elements = crate::cursor::render_elements(&cursor_status, &cursor_buffers, &mut gpu.renderer, udev.pointer_pos, origin, udev.heads[index].size);
+                    // Cursor first (topmost - `render_frame` draws
+                    // earliest-pushed on top, same convention the Pixman
+                    // path's own `custom_elements` uses), content after.
+                    // `ids` is already front-to-back (topmost window
+                    // first), and pushing in that same order is what
+                    // makes plain painter's-algorithm draw order occlude
+                    // correctly between windows, same as the Pixman
+                    // path's own `custom_elements` relies on (see its own
+                    // comment on `occluders` above). Plain
+                    // `surface_content_elements` - unrounded, no
+                    // decorations - not the masked/rounded path the
+                    // Pixman branch uses (that's built against
+                    // `PixmanRenderer` specifically) or the GLES shader
+                    // `winit/render.rs` has (real, separate scope to wire
+                    // in here too). A GPU-driven head shows real window
+                    // content now, square corners and no border/titlebar,
+                    // rather than none at all.
+                    let mut elements: Vec<crate::elements::OverlayElement<smithay::backend::renderer::gles::GlesRenderer>> =
+                        crate::cursor::render_elements(&cursor_status, &cursor_buffers, &mut gpu.renderer, udev.pointer_pos, origin, udev.heads[index].size);
+                    for &id in &ids {
+                        let Some(w) = self.wm.borrow().window(id).cloned() else { continue };
+                        let Some(dwindow) = self.id_to_window.get(&id) else { continue };
+                        let Some(surface) = crate::elements::window_wl_surface(dwindow) else { continue };
+                        let geom = self.window_anims.get(&id).map(crate::state::WindowAnim::current_rect).unwrap_or(w.geometry);
+                        let band = if w.decorated { srdwm_core::TITLEBAR_HEIGHT as i32 } else { 0 };
+                        let raw_offset = dwindow.geometry().loc;
+                        let content_offset = Point::<i32, Logical>::from((raw_offset.x.max(0), raw_offset.y.max(0)));
+                        let pos = (geom.x - origin.x - content_offset.x, geom.y + band - origin.y - content_offset.y);
+                        elements.extend(crate::elements::surface_content_elements(&mut gpu.renderer, &surface, pos, w.opacity));
+                    }
                     let clear_color = [0.05, 0.05, 0.08, 1.0];
                     match gpu_output.render_frame(&mut gpu.renderer, &elements, clear_color, smithay::backend::drm::compositor::FrameFlags::DEFAULT) {
                         Ok(res) if !res.is_empty => match gpu_output.queue_frame(None) {

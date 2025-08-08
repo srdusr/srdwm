@@ -159,9 +159,12 @@ once, so splitting it across three files would have hidden it.
   otherwise), falling back to the software path unchanged on any
   failure at any step. Every connected head it successfully initializes
   gets driven through it, VT-switch pause/activate is wired, and the
-  real cursor renders on top of its own clear color - window content
-  and decorations are the remaining gap: a GPU-driven head shows no
-  windows yet, only its clear color and cursor.
+  real cursor and real window content (plain, square-cornered, no
+  border/titlebar yet) both render on top of its own clear color --
+  decorations are the remaining gap. Untested on real GPU-enabled
+  hardware as of this writing - builds and passes the full test suite,
+  but `SRDWM_GPU`/`general.gpu` were both unset on the machine this was
+  built on.
   `WaylandPlatform::connect` (winit) picks this backend
   automatically when no `WAYLAND_DISPLAY`/`DISPLAY` is set, falling back to
   nested winit if udev init fails for any reason.

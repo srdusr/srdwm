@@ -6,10 +6,19 @@
 //! percolating-boole.md`, for that phase's own scoping): every head
 //! `initialize_output` succeeds for gets driven, not just the first
 //! (`GpuContext::outputs`), VT-switch pause/activate is wired
-//! (`udev/session.rs`'s `SessionEvent` handlers), and the real cursor
-//! renders on top of the clear color (`udev/render.rs`'s own GPU branch).
-//! Window content and decorations are the remaining gap - a GPU-driven
-//! head still shows no windows, just its own clear color and cursor.
+//! (`udev/session.rs`'s `SessionEvent` handlers), and the real cursor and
+//! real window content both render on top of the clear color
+//! (`udev/render.rs`'s own GPU branch). Window content is plain
+//! `surface_content_elements` - square corners, no border or titlebar --
+//! not yet the masked/rounded path the Pixman branch uses (built against
+//! `PixmanRenderer` specifically) or the GLES shader `winit/render.rs`
+//! already has for its own single-output case; decorations (border,
+//! titlebar) are the remaining real gap. Untested on real GPU-enabled
+//! hardware as of this writing - `SRDWM_GPU`/`general.gpu` were both
+//! unset on the machine this was built on, so this compiles, passes the
+//! full test suite, and matches the existing Pixman path's own per-
+//! window geometry logic by inspection, but has not been visually
+//! confirmed against a real compositor session with the flag on.
 
 use std::os::fd::{AsFd, OwnedFd};
 

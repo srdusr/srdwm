@@ -45,12 +45,13 @@ Read once at startup, not live-settable via `srd set` - the render
 backend is wired into the DRM pipeline when the compositor connects to
 its GPU, not something that can be swapped while running.
 
-Still missing real window content and decorations as of this writing:
-a GPU-driven head renders its own clear color and the real cursor, not
-yet any windows - see `crates/wayland/src/udev/gpu.rs`'s own module
-doc comment for the current state. `SRDWM_GPU=1` (an environment
-variable) remains a separate, lower-level override for testing without
-touching config - either it or `general.gpu` being set is enough to
+Still missing decorations (border, titlebar) as of this writing: a
+GPU-driven head renders its own clear color, the real cursor, and real
+window content (plain, square-cornered, no border/titlebar) - see
+`crates/wayland/src/udev/gpu.rs`'s own module doc comment for the
+current state. `SRDWM_GPU=1` (an environment variable) remains a
+separate, lower-level override for testing without touching config --
+either it or `general.gpu` being set is enough to
 attempt GPU rendering.
 
 ### Monitor Settings (`monitor.*`)
