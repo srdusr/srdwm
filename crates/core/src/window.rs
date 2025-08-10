@@ -396,7 +396,19 @@ pub const DECORATED_TOP_RESIZE_MARGIN: i32 = RESIZE_MARGIN;
 /// - see `ResizeEdge::resize_edge_at`'s doc comment for why corners need
 /// more room than a straight edge at all, not just a proportionally bigger
 /// dead-simple hit box.
-pub const CORNER_MARGIN: i32 = 3;
+///
+/// Bumped from `3` (18px at the default `RESIZE_MARGIN`) to `5` (30px):
+/// reported live as still too tight to land reliably, and there's real
+/// room to widen it further than a plain edge ever could be - someone
+/// reaching for a straight edge-resize instinctively aims for the middle
+/// of that edge, not its corner, precisely to *avoid* accidentally
+/// grabbing a corner instead. A bigger corner zone doesn't compete with
+/// that instinct the way a bigger `RESIZE_MARGIN` would compete with
+/// ordinary clicks near an edge (`RESIZE_MARGIN`'s own doc comment).
+/// Applies to every corner `resize_edge_at` and the titlebar's own
+/// non-button corner check use - not the button-side corner, which
+/// stays deliberately narrower than this; see its own hit-test comment.
+pub const CORNER_MARGIN: i32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResizeEdge {
@@ -545,6 +557,22 @@ impl ResizeEdge {
                         }
                     }
                 }
+                // `x < left` is the same dead `BUTTON_CLUSTER_MARGIN` strip
+                // excluded above, now put to use: it's already unclaimed by
+                // any button's own hitbox, by construction, so its own top
+                // `DECORATED_TOP_RESIZE_MARGIN` rows are a safe, if
+                // deliberately narrow, diagonal-resize target right at the
+                // button-side corner - narrower than the non-button
+                // corner's own `corner_zone` above on purpose, since this
+                // one has Close sitting immediately next to it and widening
+                // it any further would start eating into that button's own
+                // hitbox instead of just the dead space next to it.
+                // Reported live: this corner had no resize target at all,
+                // "even where decorations are corner i should still be able
+                // to corner resize."
+                if x < left && y <= frame.y + DECORATED_TOP_RESIZE_MARGIN {
+                    return Some(TitlebarHit::Resize(ResizeEdge::TopLeft));
+                }
                 if y <= frame.y + DECORATED_TOP_RESIZE_MARGIN {
                     return Some(TitlebarHit::Resize(ResizeEdge::Top));
                 }
@@ -564,6 +592,11 @@ impl ResizeEdge {
                         });
                     }
                 }
+            }
+            // Mirror of the `buttons_left` branch's own identical check
+            // above - see its comment for the full reasoning.
+            if x > right && y <= frame.y + DECORATED_TOP_RESIZE_MARGIN {
+                return Some(TitlebarHit::Resize(ResizeEdge::TopRight));
             }
             if y <= frame.y + DECORATED_TOP_RESIZE_MARGIN {
                 return Some(TitlebarHit::Resize(ResizeEdge::Top));
@@ -1082,6 +1115,47 @@ mod tests {
         // not Close.
         let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 1, f.y + 1, true, 0, RESIZE_MARGIN, false, None, false);
         assert_eq!(hit, Some(TitlebarHit::Close));
+    }
+
+    #[test]
+    fn button_side_corner_still_resizes_from_its_own_dead_strip() {
+        // Reported live: "even where decorations are corner i should still
+        // be able to corner resize, just its... hitbox... does not get in
+        // the way of the close icon." The raw corner pixel sits in the
+        // `BUTTON_CLUSTER_MARGIN` dead strip outside Close's own hitbox
+        // (see `decorated_window_top_right_corner_still_closes_not_resizes`
+        // just above), which used to fall through to plain `Top`/`Drag`
+        // with no diagonal target at all. Both axes right at the true
+        // corner - well within the dead strip horizontally (`- 1` from the
+        // frame's own edge, nowhere near where Close's hitbox starts) and
+        // within `DECORATED_TOP_RESIZE_MARGIN` vertically.
+        let f = frame();
+        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.y + 1, true, 0, RESIZE_MARGIN, false, None, false);
+        assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::TopRight)));
+    }
+
+    #[test]
+    fn button_side_corner_below_its_own_resize_row_still_drags() {
+        // The dead strip's own top rows are the new corner-resize target
+        // (`button_side_corner_still_resizes_from_its_own_dead_strip`), but
+        // the rest of that same narrow column, below
+        // `DECORATED_TOP_RESIZE_MARGIN`, is still ordinary titlebar drag --
+        // this only ever claims the true corner, not the whole column
+        // beside Close.
+        let f = frame();
+        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.y + DECORATED_TOP_RESIZE_MARGIN + 5, true, 0, RESIZE_MARGIN, false, None, false);
+        assert_eq!(hit, Some(TitlebarHit::Drag));
+    }
+
+    #[test]
+    fn button_side_corner_still_resizes_from_its_own_dead_strip_when_buttons_are_left() {
+        // Mirror of `button_side_corner_still_resizes_from_its_own_dead_
+        // strip` with `buttons_left: true` - Close now owns the top-left
+        // corner, so the dead strip and its own corner-resize target move
+        // to the frame's left edge instead.
+        let f = frame();
+        let hit = ResizeEdge::hit_test(f, f.x + 1, f.y + 1, true, 0, RESIZE_MARGIN, true, None, false);
+        assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::TopLeft)));
     }
 
     #[test]

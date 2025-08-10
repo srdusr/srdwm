@@ -432,13 +432,21 @@
         wm.set_layout(wm.current_workspace(), "tiling"); // keeps add_window from overriding geometry via SmartPlacement
         let id = wm.alloc_window_id();
         let mut w = Window::new(id, "a");
-        w.geometry = Rect::new(100, 100, 400, 300);
+        // Tall enough that `CORNER_MARGIN * resize_margin`'s own widened
+        // corner zone (150px at this override, see `CORNER_MARGIN`'s own
+        // doc comment on why it's deliberately generous) doesn't reach
+        // anywhere near the plain-edge point tested below - a shorter
+        // window here used to work purely because the corner zone was
+        // narrower, not because this test cared about corners at all.
+        w.geometry = Rect::new(100, 100, 400, 800);
         w.resize_margin = Some(30);
         wm.add_window(w);
 
         // 15px in from the left edge: well past the WM-wide default (6px),
-        // but still inside this window's own wider 30px override.
-        let hit = wm.hit_test(115, 250);
+        // but still inside this window's own wider 30px override. Deep in
+        // the window's own vertical middle, well clear of either corner
+        // zone.
+        let hit = wm.hit_test(115, 500);
         assert_eq!(hit.map(|(_, h)| h), Some(TitlebarHit::Resize(ResizeEdge::Left)));
     }
 
