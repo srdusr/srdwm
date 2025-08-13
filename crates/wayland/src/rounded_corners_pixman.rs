@@ -92,6 +92,30 @@ pub(crate) fn masked_content_buffer(renderer: &mut PixmanRenderer, surface: &WlS
     // transparency so the border/desktop already drawn underneath on the
     // real output shows through there, not a solid black patch.
     let elements = render_elements_from_surface_tree::<_, crate::elements::OverlayElement<PixmanRenderer>>(renderer, surface, loc, 1.0, 1.0, Kind::Unspecified);
+    // An empty tree here is not trusted as "this window genuinely has no
+    // content" - it's indistinguishable from a transient race where a
+    // commit has already bumped `content_epoch` (every commit does,
+    // unconditionally) but the surface's own texture import hasn't caught
+    // up yet, real and reachable during a fast resize's rapid-fire commits.
+    // `rounded_content_buffer`'s cache keys purely on `epoch`/`radius`/
+    // `loc`/`size`, not on content, so a blank render returned as `Some`
+    // here would get cached as this window's current, correct content --
+    // and then persist on screen, fully transparent, until the *next*
+    // epoch-bumping commit, which for an idle/settled terminal can be a
+    // long wait. Reported live as a terminal's content disappearing
+    // entirely on some resizes. Returning `None` instead makes the caller
+    // treat this the same as any other failed render: `rounded_content_
+    // buffer` drops any cached entry rather than replacing it with this
+    // blank one, and the render loop falls back to the ordinary unmasked
+    // `surface_content_elements` path for this one frame - which shows
+    // the window's real content (square corners for a frame, not blank),
+    // and naturally retries the masked path again next frame since the
+    // dropped cache entry reads as stale again with nothing to compare
+    // against.
+    if elements.is_empty() {
+        log::debug!("rounded_corners_pixman: masked_content_buffer: surface tree had no drawable elements - giving up unmasked this frame");
+        return None;
+    }
     let mut target = match renderer.create_buffer(Fourcc::Argb8888, (w, h).into()) {
         Ok(t) => t,
         Err(e) => {
