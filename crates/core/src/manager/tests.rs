@@ -123,6 +123,33 @@
     }
 
     #[test]
+    fn dragging_across_a_monitor_boundary_updates_monitor_live_not_just_at_end() {
+        // Reported live: a window dragged onto a second monitor with a
+        // different scale (confirmed live: 1.0 and ~0.84) "looks very
+        // messed up" - `state/geometry.rs::sync_geometry` reads `w.
+        // monitor` on every drag motion tick to pick which scale converts
+        // the client's physical size into the logical points `xdg_
+        // toplevel::configure` sends it, and `w.monitor` used to only get
+        // corrected once, at `end_drag`, leaving every mid-drag configure
+        // computed against the wrong monitor's scale for the drag's whole
+        // remaining duration.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        wm.set_layout(wm.current_workspace(), "tiling");
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.geometry = Rect::new(1000, 100, 200, 150); // fully on monitor 0
+        wm.add_window(w);
+        wm.window_mut(a).unwrap().monitor = 0;
+        wm.start_drag(a, 1010, 110);
+        assert_eq!(wm.window(a).unwrap().monitor, 0);
+        // Dragged fully onto monitor 1 - checked immediately, before
+        // `end_drag` runs at all.
+        wm.update_drag(1600, 110);
+        assert_eq!(wm.window(a).unwrap().monitor, 1, "monitor must update live during the drag, not only once it ends");
+    }
+
+    #[test]
     fn drag_ending_near_edge_snaps_to_half_screen() {
         let mut wm = wm_with_monitor();
         wm.set_layout(wm.current_workspace(), "tiling");
@@ -151,6 +178,32 @@
         assert_eq!(g, Rect::new(100, 100, 350, 240));
         wm.end_resize();
         assert!(!wm.is_resizing());
+    }
+
+    #[test]
+    fn resizing_across_a_monitor_boundary_updates_monitor_live() {
+        // Same fix as `dragging_across_a_monitor_boundary_updates_monitor_
+        // live_not_just_at_end`'s own doc comment - a resize can carry the
+        // edge being dragged onto a different monitor just as easily as a
+        // move can carry the whole window, and `update_resize` never
+        // corrected `w.monitor` at all before this fix, not even at the
+        // end.
+        let mut wm = WindowManager::new();
+        wm.set_monitors(two_monitors());
+        wm.set_layout(wm.current_workspace(), "tiling");
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.geometry = Rect::new(1000, 100, 500, 150); // fully on monitor 0, right edge at 1500
+        wm.add_window(w);
+        wm.window_mut(a).unwrap().monitor = 0;
+        wm.start_resize(a, ResizeEdge::Left, 1050, 100);
+        // Drags the left edge from 1000 to 1290 (right edge anchored at
+        // 1500, final width 210 - comfortably above MIN_WINDOW_WIDTH),
+        // landing the whole window past the 1280 boundary on monitor 1.
+        wm.update_resize(1340, 100);
+        let g = wm.window(a).unwrap().geometry;
+        assert_eq!(g, Rect::new(1290, 100, 210, 150), "sanity: resize must actually have cleared the boundary");
+        assert_eq!(wm.window(a).unwrap().monitor, 1, "monitor must update live during the resize");
     }
 
     #[test]

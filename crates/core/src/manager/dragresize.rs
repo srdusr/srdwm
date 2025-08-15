@@ -43,8 +43,29 @@ impl WindowManager {
             new_geom.y = new_geom.y.clamp(bounds.y, bounds.bottom() - 40);
         }
 
+        // Live, every motion tick - not just once at `end_drag`, which
+        // used to be the only place this got corrected (see its own doc
+        // comment on why `w.monitor` goes stale at all). Between here and
+        // there, `state/geometry.rs::sync_geometry` - called on every one
+        // of these same motion ticks while a drag is active - reads this
+        // exact field to pick which monitor's `scale` converts the
+        // client's real physical size into the logical points `xdg_
+        // toplevel::configure` sends it. Two real monitors at genuinely
+        // different scales (confirmed live: `1.0` and `~0.84`), a window
+        // dragged from one onto the other kept computing every mid-drag
+        // configure against the *origin* monitor's scale for the drag's
+        // entire remaining duration - the client resizing itself to a
+        // logical size that doesn't match the physical footprint the
+        // border/decoration are actually drawing around it, only self-
+        // correcting the instant the button came up. Reported live as a
+        // dragged window "looking very messed up" on the other monitor.
+        let now_on = self.monitors.iter().find(|m| m.geometry.overlaps(&new_geom)).map(|m| m.id);
+
         if let Some(w) = self.windows.get_mut(&drag.window) {
             w.geometry = new_geom;
+            if let Some(now_on_id) = now_on {
+                w.monitor = now_on_id;
+            }
         }
     }
 
@@ -52,17 +73,13 @@ impl WindowManager {
     /// near a monitor edge.
     pub fn end_drag(&mut self) {
         if let Some(drag) = self.drag.take() {
-            // `w.monitor` only ever gets set at window creation (or by
-            // `set_monitors`, reactively, on the *next* hotplug) - a drag
-            // that crossed onto a different monitor leaves it stale
-            // pointing at wherever the window *started*, same gap
-            // `set_monitors`'s own doc comment already documents for the
-            // hotplug-rehoming case. Corrected here, before computing the
-            // snap zone below, not after - using the stale value there
-            // would check the *wrong* monitor's snap zones (e.g. still
-            // snapping against monitor 1's left edge for a window that's
-            // now actually sitting near monitor 2's), the same bug this is
-            // fixing for maximize/fullscreen one level up.
+            // `update_drag` above already keeps `w.monitor` live on every
+            // motion tick now, so this is normally just confirming what's
+            // already current - kept anyway as the final word before
+            // computing the snap zone below (a drag that starts and ends
+            // between two motion ticks, however unlikely, would otherwise
+            // check the *wrong* monitor's snap zones), the same bug this
+            // was originally fixing for maximize/fullscreen one level up.
             if let Some(w) = self.windows.get(&drag.window) {
                 if let Some(now_on) = self.monitors.iter().find(|m| m.geometry.overlaps(&w.geometry)) {
                     let now_on_id = now_on.id;
@@ -95,8 +112,18 @@ impl WindowManager {
         let Some(r) = &self.resize else { return };
         let (dx, dy) = (x - r.start_x, y - r.start_y);
         let new_geom = r.edge.apply_delta(r.orig, dx, dy, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+        // Same live `w.monitor` correction as `update_drag`'s own doc
+        // comment explains - a resize can cross a monitor boundary at
+        // the edge being dragged just as easily as a drag can carry the
+        // whole window across one, and `sync_geometry`'s per-tick scale
+        // lookup doesn't care which kind of geometry change put the
+        // window there.
+        let now_on = self.monitors.iter().find(|m| m.geometry.overlaps(&new_geom)).map(|m| m.id);
         if let Some(w) = self.windows.get_mut(&r.window) {
             w.geometry = new_geom;
+            if let Some(now_on_id) = now_on {
+                w.monitor = now_on_id;
+            }
         }
     }
 
