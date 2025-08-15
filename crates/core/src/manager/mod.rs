@@ -206,6 +206,41 @@ pub struct WindowManager {
     /// without touching config - `udev::platform::connect` attempts the
     /// probe if *either* this or the env var says to.
     pub gpu_enabled: bool,
+    /// Whether srdwm draws real desktop icons (Home/Computer/Trash plus one
+    /// per real `~/Desktop` entry) on the primary output's wallpaper --
+    /// read from `general.desktop_icons`. Unlike `gpu_enabled`, this
+    /// defaults to `true`: a directly user-requested, purely visual
+    /// feature with no hardware-support question to hedge against, not an
+    /// experimental backend path that needs an opt-in safety net.
+    pub desktop_icons_enabled: bool,
+    /// External program desktop icons open into, read from `general.
+    /// file_manager`. Empty (the default) means "shell out to `xdg-open
+    /// <path>`" - the de-facto standard dispatcher to whatever the user's
+    /// own `mimeapps.list` already names, present on essentially every
+    /// Linux/BSD desktop regardless of which file manager is installed.
+    /// Set means "shell out to `<file_manager> <path>` instead", the same
+    /// "user names a program, srdwm shells out to it" shape `general.
+    /// terminal`-style keybindings already use from Lua (`srd.spawn`), just
+    /// read from config instead of a keybinding script since desktop icons
+    /// have no Lua callback of their own to run.
+    pub file_manager: String,
+    /// Whether a single left-click opens a desktop icon instead of the
+    /// classic double-click, read from `general.desktop_icon_single_click`.
+    /// `false` (double-click) by default, matching Windows/macOS/most
+    /// Linux desktops' own default; some environments (older GNOME, some
+    /// file managers) default the other way, hence this being a real
+    /// config option rather than a hardcoded choice.
+    pub desktop_icon_single_click: bool,
+    /// External program a desktop image-file icon's "Set as Wallpaper"
+    /// action shells out to, read from `general.wallpaper_command`. Empty
+    /// (the default) means that action doesn't appear at all - srdwm
+    /// never draws the wallpaper itself (an external layer-shell client's
+    /// job, see `WaylandState`'s own doc comment on viewporter), so unlike
+    /// `file_manager`'s `xdg-open` fallback there is no universal command
+    /// to guess here; the user names their own wallpaper tool (`swww img`,
+    /// `awww img`, ...) or the action stays hidden rather than silently
+    /// doing nothing when clicked.
+    pub wallpaper_command: String,
     /// The whole-screen colour treatment currently active (night light's
     /// warm tint or reading mode's desaturation), live-settable via `srd
     /// set night_light`/`srd set reading_mode` - see [`ColorFilter`]. Off
@@ -367,6 +402,10 @@ impl WindowManager {
             resize_margin: RESIZE_MARGIN,
             rounded_corners_enabled: None,
             gpu_enabled: false,
+            desktop_icons_enabled: true,
+            file_manager: String::new(),
+            desktop_icon_single_click: false,
+            wallpaper_command: String::new(),
             color_filter: ColorFilter::None,
             focus_follows_mouse: false,
             auto_raise: false,

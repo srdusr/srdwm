@@ -228,6 +228,10 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
         return;
     }
 
+    // A no-op whenever no desktop icon is currently being dragged - see
+    // `CompState::update_desktop_icon_drag`'s own doc comment.
+    state.update_desktop_icon_drag((pos.x as i32, pos.y as i32));
+
     // Tells core which monitor the pointer is physically over right now --
     // core has no pointer of its own to know this (see `pointer_monitor`'s
     // own doc comment), and `add_window`'s target-monitor fallback needs
@@ -520,6 +524,17 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
             }
             return;
         }
+        // Same rule again for the desktop-icon/bare-desktop menu.
+        if let Some(menu) = state.desktop_menu.take() {
+            if let Some(row) = menu.row_at(pos.x as i32, pos.y as i32) {
+                let (_, action) = menu.items[row].clone();
+                state.close_desktop_menu();
+                state.run_desktop_menu_action(action);
+            } else {
+                state.close_desktop_menu();
+            }
+            return;
+        }
     }
 
     // Modifier+drag: with the modifier held, dragging *anywhere* in a window
@@ -613,6 +628,27 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
                 if let Some(&id) = dwindow_wl_surface(&window).and_then(|s| state.surface_to_id.get(&s)) {
                     focus_window(state, id);
                 }
+            } else {
+                // Genuinely bare desktop (or below every window, which
+                // only ever means bare desktop - icons render below every
+                // window, see `desktop_icons.rs`'s own module doc
+                // comment): a desktop icon here, single- or double-click
+                // per `general.desktop_icon_single_click`, otherwise clear
+                // whatever was selected.
+                let icon_hit = state.desktop_icons.as_ref().and_then(|icons| icons.icon_at(pos.x as i32, pos.y as i32).map(|i| icons.icons[i].id.clone()));
+                match icon_hit {
+                    Some(id) => {
+                        let single_click_opens = state.wm.borrow().desktop_icon_single_click;
+                        if single_click_opens || state.is_double_click_icon(&id, time) {
+                            state.select_desktop_icon(Some(&id));
+                            state.open_desktop_icon(&id);
+                        } else {
+                            state.select_desktop_icon(Some(&id));
+                            state.start_desktop_icon_drag(&id, (pos.x as i32, pos.y as i32));
+                        }
+                    }
+                    None => state.select_desktop_icon(None),
+                }
             }
         }
     } else if pressed && (button == BTN_RIGHT || button == BTN_MIDDLE) {
@@ -635,9 +671,32 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
             // instead of the window menu - a plain left-click there still
             // just toggles maximize, unchanged.
             (BTN_RIGHT, Some((id, TitlebarHit::Maximize))) => state.open_snap_flyout(id, (pos.x as i32, pos.y as i32)),
+            // Right-click bare desktop (no titlebar/border hit, no window
+            // content, no bar/dock layer surface - same "genuinely bare"
+            // definition the left-click branch above uses): a desktop
+            // icon's own menu if the click landed on one, otherwise the
+            // "New Folder"/"Refresh" desktop menu. Previously a true
+            // no-op, the actual gap this whole feature exists to close --
+            // see this session's own TODO.md entry.
+            (BTN_RIGHT, None)
+                if layer_surface_under(state, pos).is_none() && !state.space.element_under(pos).is_some_and(|(w, _)| dwindow_is_visible(state, w)) =>
+            {
+                let icon_hit = state.desktop_icons.as_ref().and_then(|icons| icons.icon_at(pos.x as i32, pos.y as i32).map(|i| icons.icons[i].id.clone()));
+                match icon_hit {
+                    Some(id) => {
+                        state.select_desktop_icon(Some(&id));
+                        state.open_desktop_icon_menu(&id, (pos.x as i32, pos.y as i32));
+                    }
+                    None => state.open_desktop_menu((pos.x as i32, pos.y as i32)),
+                }
+            }
             _ => {}
         }
     } else if !pressed {
+        // A no-op via `Option::take()` when no icon drag was active --
+        // always checked on release, same as `was_dragging`/`was_resizing`
+        // below, just for a desktop icon instead of a window.
+        state.end_desktop_icon_drag();
         let mut wm = state.wm.borrow_mut();
         let was_dragging = wm.is_dragging();
         let was_resizing = wm.is_resizing();

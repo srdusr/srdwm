@@ -154,6 +154,22 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     // every other ordinary flag rather than left absent for a backend to
     // decide.
     set("general.gpu", Bool(false));
+    // Real desktop icons (Home/Computer/Trash plus `~/Desktop`'s own
+    // contents) on by default - see `WindowManager::desktop_icons_
+    // enabled`'s own doc comment for why this, unlike `general.gpu` just
+    // above, doesn't need an opt-in safety net.
+    set("general.desktop_icons", Bool(true));
+    // Empty by default - see `WindowManager::file_manager`'s own doc
+    // comment: empty means "dispatch via `xdg-open`", not "no file manager
+    // configured, do nothing".
+    set("general.file_manager", String(std::string::String::new()));
+    // Double-click by default - see `WindowManager::desktop_icon_single_
+    // click`'s own doc comment.
+    set("general.desktop_icon_single_click", Bool(false));
+    // Empty by default - see `WindowManager::wallpaper_command`'s own doc
+    // comment: empty means "Set as Wallpaper" doesn't appear at all, not
+    // "configured to do nothing".
+    set("general.wallpaper_command", String(std::string::String::new()));
     // Deliberately *not* seeded here, unlike every other `general.*` key --
     // its actual default differs by backend (GLES/winit: on; udev/Pixman:
     // off, an untested-on-real-hardware CPU cost too real to default to on

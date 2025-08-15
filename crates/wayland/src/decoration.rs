@@ -194,5 +194,188 @@ pub fn render_snap_flyout(columns: u32, cell_width: u32, cell_height: u32, label
     buf
 }
 
+/// One desktop icon's cell: a hand-drawn glyph (no icon-theme artwork
+/// exists anywhere in this workspace - see `desktop_icons.rs`'s own doc
+/// comment) plus a centred label underneath, on an otherwise fully
+/// transparent `width`x`height` canvas so the wallpaper shows through
+/// everywhere the glyph/label don't draw. Same "deliberately plain, no
+/// icon-theme fidelity" first-pass philosophy as `render_context_menu`.
+///
+/// `selected` draws an opaque highlight box behind the label only (not the
+/// glyph) - matching the classic file-manager convention that the label,
+/// not the whole cell, is what visibly marks a selection - rather than a
+/// translucent overlay across the glyph, which would need premultiplied-
+/// alpha blending this function has no other reason to do (every other
+/// pixel here is drawn fully opaque or left fully transparent).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_desktop_icon(width: u32, height: u32, kind: crate::desktop_icons::IconKind, label: &str, selected: bool, icon_color: (u8, u8, u8), label_color: (u8, u8, u8), selected_bg: (u8, u8, u8)) -> Vec<u8> {
+    use crate::desktop_icons::IconKind;
+    let (width, height) = (width.max(1) as usize, height.max(1) as usize);
+    let mut buf = vec![0u8; width * height * 4];
+
+    let glyph_box = ((width as i32 - 40) / 2, 8, (width as i32 + 40) / 2, 44);
+    let border = color::darken(icon_color);
+    match kind {
+        IconKind::Home => draw_home_glyph(&mut buf, width, height, glyph_box, icon_color, border),
+        IconKind::Computer => draw_computer_glyph(&mut buf, width, height, glyph_box, icon_color, border),
+        IconKind::Trash => draw_trash_glyph(&mut buf, width, height, glyph_box, icon_color, border),
+        IconKind::Folder => draw_folder_glyph(&mut buf, width, height, glyph_box, icon_color, border),
+        IconKind::File => draw_file_glyph(&mut buf, width, height, glyph_box, icon_color, border),
+    }
+
+    let label_top = 50i32;
+    if selected {
+        fill_rect(&mut buf, width, height, 2, label_top, width as i32 - 2, height as i32 - 2, selected_bg, 255);
+    }
+    if let Some(font) = find_system_font() {
+        let baseline = label_top as f32 + 14.0;
+        let mut widths = Vec::new();
+        let mut total = 0.0f32;
+        for ch in label.chars() {
+            let (m, _) = font.rasterize(ch, FONT_PIXELS);
+            widths.push(m.advance_width);
+            total += m.advance_width;
+        }
+        let mut pen_x = ((width as f32 - total) / 2.0).max(2.0);
+        for (ch, adv) in label.chars().zip(widths) {
+            if ch.is_control() {
+                pen_x += adv;
+                continue;
+            }
+            let (metrics, coverage) = font.rasterize(ch, FONT_PIXELS);
+            if metrics.width > 0 && metrics.height > 0 {
+                let glyph_x = pen_x + metrics.xmin as f32;
+                let glyph_y = baseline - metrics.height as f32 - metrics.ymin as f32;
+                blit_glyph_on_transparent(&mut buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, label_color);
+            }
+            pen_x += adv;
+            if pen_x as usize >= width {
+                break;
+            }
+        }
+    }
+    buf
+}
+
+/// Fills a straight-alpha `color` at `alpha` into every pixel of the given
+/// rect, clamped to the canvas - the one primitive every glyph below is
+/// built from. `alpha` is only ever `255` from any call site in this file
+/// (every icon glyph is drawn fully opaque against an otherwise-transparent
+/// canvas), so there's no premultiplication to get right here - straight
+/// and premultiplied colour are identical at full opacity.
+#[allow(clippy::too_many_arguments)]
+fn fill_rect(buf: &mut [u8], width: usize, height: usize, x0: i32, y0: i32, x1: i32, y1: i32, color: (u8, u8, u8), alpha: u8) {
+    let px = rgb_to_bgra(color, alpha);
+    for y in y0.max(0)..y1.min(height as i32) {
+        for x in x0.max(0)..x1.min(width as i32) {
+            let idx = (y as usize * width + x as usize) * 4;
+            buf[idx..idx + 4].copy_from_slice(&px);
+        }
+    }
+}
+
+/// Same job as `font::blit_glyph`, but for a canvas that starts fully
+/// transparent rather than a known solid `background` colour to blend
+/// toward - `blit_glyph` always writes full alpha, blended toward that
+/// assumed background, which is wrong here: a partially-covered edge pixel
+/// needs to stay partially *transparent*, not opaque-and-blended. Written
+/// as real premultiplied-alpha BGRA (`rgb * alpha / 255`, matching alpha)
+/// rather than straight colour at a partial alpha - see this session's own
+/// `rounded_corners_pixman.rs` doc comments for why an un-premultiplied
+/// partial-alpha pixel is a real, previously-hit correctness bug here, not
+/// a style choice.
+#[allow(clippy::too_many_arguments)]
+fn blit_glyph_on_transparent(buf: &mut [u8], width: usize, height: usize, glyph_x: i32, glyph_y: i32, metrics: &fontdue::Metrics, coverage: &[u8], color: (u8, u8, u8)) {
+    for row in 0..metrics.height {
+        let y = glyph_y + row as i32;
+        if y < 0 || y as usize >= height {
+            continue;
+        }
+        for col in 0..metrics.width {
+            let x = glyph_x + col as i32;
+            if x < 0 || x as usize >= width {
+                continue;
+            }
+            let alpha = coverage[row * metrics.width + col];
+            if alpha == 0 {
+                continue;
+            }
+            let premul = |c: u8| ((c as u32 * alpha as u32 + 127) / 255) as u8;
+            let idx = (y as usize * width + x as usize) * 4;
+            buf[idx..idx + 4].copy_from_slice(&rgb_to_bgra((premul(color.0), premul(color.1), premul(color.2)), alpha));
+        }
+    }
+}
+
+fn draw_folder_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), fill: (u8, u8, u8), border: (u8, u8, u8)) {
+    let (x0, y0, x1, y1) = b;
+    let tab_w = (x1 - x0) * 2 / 5;
+    let tab_h = 5;
+    fill_rect(buf, width, height, x0, y0, x0 + tab_w, y0 + tab_h, fill, 255);
+    fill_rect(buf, width, height, x0, y0 + tab_h, x1, y1, fill, 255);
+    fill_rect(buf, width, height, x0, y0 + tab_h, x1, y0 + tab_h + 2, border, 255);
+}
+
+fn draw_computer_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), fill: (u8, u8, u8), border: (u8, u8, u8)) {
+    let (x0, y0, x1, y1) = b;
+    let screen_bottom = y0 + (y1 - y0) * 3 / 4;
+    fill_rect(buf, width, height, x0, y0, x1, screen_bottom, border, 255);
+    fill_rect(buf, width, height, x0 + 2, y0 + 2, x1 - 2, screen_bottom - 2, fill, 255);
+    let stand_w = (x1 - x0) / 4;
+    let stand_x0 = x0 + (x1 - x0 - stand_w) / 2;
+    fill_rect(buf, width, height, stand_x0, screen_bottom, stand_x0 + stand_w, y1 - 2, border, 255);
+    fill_rect(buf, width, height, x0 + 2, y1 - 2, x1 - 2, y1, border, 255);
+}
+
+fn draw_trash_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), fill: (u8, u8, u8), border: (u8, u8, u8)) {
+    let (x0, y0, x1, y1) = b;
+    let lid_h = 4;
+    fill_rect(buf, width, height, x0, y0, x1, y0 + lid_h, border, 255);
+    let handle_w = (x1 - x0) / 3;
+    let handle_x0 = x0 + (x1 - x0 - handle_w) / 2;
+    fill_rect(buf, width, height, handle_x0, y0 - 3, handle_x0 + handle_w, y0, border, 255);
+    let body_x0 = x0 + 2;
+    let body_x1 = x1 - 2;
+    fill_rect(buf, width, height, body_x0, y0 + lid_h, body_x1, y1, fill, 255);
+    // Three vertical ridge lines, the classic trash-can silhouette detail.
+    let ridge_w = 2;
+    for i in 0..3 {
+        let rx = body_x0 + (body_x1 - body_x0) * (i * 2 + 1) / 6;
+        fill_rect(buf, width, height, rx, y0 + lid_h + 3, rx + ridge_w, y1 - 3, border, 255);
+    }
+}
+
+fn draw_file_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), fill: (u8, u8, u8), border: (u8, u8, u8)) {
+    let (x0, y0, x1, y1) = b;
+    fill_rect(buf, width, height, x0, y0, x1, y1, border, 255);
+    fill_rect(buf, width, height, x0 + 2, y0 + 2, x1 - 2, y1 - 2, fill, 255);
+    // A header strip near the top, the same "document" cue `draw_folder_
+    // glyph`'s tab gives a folder - deliberately no folded-corner detail,
+    // which would need a diagonal (not axis-aligned) fill this file's other
+    // glyphs never need.
+    fill_rect(buf, width, height, x0 + 4, y0 + 5, x1 - 4, y0 + 8, border, 255);
+}
+
+fn draw_home_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), fill: (u8, u8, u8), border: (u8, u8, u8)) {
+    let (x0, y0, x1, y1) = b;
+    let mid_x = (x0 + x1) / 2;
+    let roof_y = y0 + (y1 - y0) / 3;
+    // A simple triangular roof built from shrinking horizontal strips
+    // (this file's only axis-aligned primitive is a filled rect) rather
+    // than a real diagonal line - coarse at this size, but reads clearly
+    // as a roof over the body rect below it.
+    let steps = (roof_y - y0).max(1);
+    for i in 0..steps {
+        let y = y0 + i;
+        let inset = (i * (mid_x - x0)) / steps;
+        fill_rect(buf, width, height, mid_x - inset - 1, y, mid_x + inset + 1, y + 1, border, 255);
+    }
+    fill_rect(buf, width, height, x0 + 2, roof_y, x1 - 2, y1, fill, 255);
+    fill_rect(buf, width, height, x0 + 2, roof_y, x1 - 2, roof_y + 2, border, 255);
+    let door_w = (x1 - x0) / 4;
+    let door_x0 = mid_x - door_w / 2;
+    fill_rect(buf, width, height, door_x0, y1 - 10, door_x0 + door_w, y1, border, 255);
+}
+
 #[cfg(test)]
 mod tests;

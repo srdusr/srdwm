@@ -17,6 +17,10 @@ srd.set("general.rounded_corners", true)               -- Default: true on GLES/
 srd.set("general.focus_follows_mouse", false)          -- Default: false - hover a window to focus it, no click needed
 srd.set("general.auto_raise", false)                   -- Default: false - also raise on hover-focus, not just focus
 srd.set("general.gpu", false)                          -- Default: false - udev backend only, see "GPU rendering" below
+srd.set("general.desktop_icons", true)                 -- Default: true - see "Desktop icons" below
+srd.set("general.file_manager", "")                    -- Default: "" - empty means dispatch via `xdg-open`
+srd.set("general.desktop_icon_single_click", false)    -- Default: false - double-click opens an icon
+srd.set("general.wallpaper_command", "")               -- Default: "" - empty hides "Set as Wallpaper" entirely
 ```
 `general.smart_placement`/`general.border_width` are not listed: neither
 is implemented - new-window placement always uses smart placement
@@ -53,6 +57,45 @@ current state. `SRDWM_GPU=1` (an environment variable) remains a
 separate, lower-level override for testing without touching config --
 either it or `general.gpu` being set is enough to
 attempt GPU rendering.
+
+#### Desktop icons (`general.desktop_icons`)
+
+Real, individually-draggable desktop icons rendered above the wallpaper
+and below every window, on the primary monitor only: fixed **Home**
+(`$HOME`), **Computer** (`/`), and **Trash** (`~/.local/share/Trash/files`,
+or `$XDG_DATA_HOME/Trash/files` if set) icons, plus one per real,
+non-hidden entry of `~/Desktop` (created if it doesn't exist yet). On by
+default - unlike `general.gpu`, this is a purely visual, directly
+requested feature with no hardware-support question to hedge against.
+
+Hand-drawn glyphs, not real icon-theme artwork - no PNG/SVG decoding
+capability exists anywhere in this codebase, so folder/computer/trash/file
+icons are simple flat shapes, the same technique the titlebar's own
+buttons use.
+
+Double-click (or a single click when `general.desktop_icon_single_click`
+is `true`) opens an icon: `$general.file_manager <path>` if that key is
+set, otherwise `xdg-open <path>`. Dragging an icon snaps it to the nearest
+free grid cell on release and persists that cell to
+`$XDG_STATE_HOME/srd/desktop-icons.json` (else `~/.local/state/srd/...`) --
+only icons the user has actually moved get an entry there; everything
+else keeps recomputing its default slot on every rescan.
+
+Right-click an icon: "Open", plus "Set as Wallpaper" when it's an image
+file (`.png`/`.jpg`/`.jpeg`/`.webp`/`.bmp`/`.gif`) and `general.
+wallpaper_command` is set - shells out to `<wallpaper_command> <path>`.
+srdwm never draws the wallpaper itself (an external layer-shell client's
+job - `swww`, `awww`, or similar), so there is no universal default to
+guess here the way `xdg-open` covers `file_manager`; this action simply
+doesn't appear when the key is empty. Right-click bare desktop: "New
+Folder" (creates `~/Desktop/New Folder`, de-duplicated as `New Folder
+(2)`, `(3)`, ...) and "Refresh" (re-scans `~/Desktop`).
+
+Not implemented in this first pass, deliberately: moving a file to trash,
+emptying the trash, filesystem watching (a file added to `~/Desktop` by
+another program needs "Refresh" or a restart to appear), multi-select,
+and per-mimetype icon art. The first two are destructive/hard-to-reverse
+actions with no confirmation-dialog primitive to gate them on yet.
 
 ### Monitor Settings (`monitor.*`)
 ```lua

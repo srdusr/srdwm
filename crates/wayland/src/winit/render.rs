@@ -56,6 +56,8 @@ impl WaylandPlatform {
         // trade against silently wrong pixels persisting on screen.
         let age = 0;
         let (renderer, mut framebuffer) = self.backend.bind().map_err(err)?;
+        self.state.ensure_desktop_icons();
+        let desktop_icon_render_list = self.state.desktop_icon_render_list();
 
         // Locked: srdwm's own native lock UI, or an external locker's
         // surface, over an opaque black clear - nothing else, no windows,
@@ -127,6 +129,15 @@ impl WaylandPlatform {
             match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, None, None, Kind::Unspecified) {
                 Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
                 Err(e) => log::warn!("failed to import snap flyout buffer: {e}"),
+            }
+        }
+        // The desktop-icon/bare-desktop right-click menu, if open - same
+        // topmost placement.
+        if let (Some(menu), Some(buffer)) = (self.state.desktop_menu.as_ref(), self.state.desktop_menu_buffer.as_ref()) {
+            let pos = (menu.pos.0 as f64, menu.pos.1 as f64);
+            match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, None, None, Kind::Unspecified) {
+                Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
+                Err(e) => log::warn!("failed to import desktop menu buffer: {e}"),
             }
         }
         // Content now renders here too, one window at a time, not through
@@ -440,6 +451,17 @@ impl WaylandPlatform {
                 }
             }
             occluders.push(frame);
+        }
+        // Real desktop icons - above the wallpaper, below every window.
+        // See `udev/render.rs`'s matching push site for the full ordering
+        // reasoning; `desktop_icon_render_list` was already captured
+        // right after `self.backend.bind()`, well before this point.
+        for (pos, buffer) in &desktop_icon_render_list {
+            let pos = (pos.0 as f64, pos.1 as f64);
+            match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, None, None, Kind::Unspecified) {
+                Ok(elem) => custom_elements.push(crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Memory(elem))),
+                Err(e) => log::warn!("failed to import desktop icon buffer: {e}"),
+            }
         }
         // Background/bottom layer-shell (wallpaper engines) last --
         // bottommost, matching smithay's own `space_render_elements`

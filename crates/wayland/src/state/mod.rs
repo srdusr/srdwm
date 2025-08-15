@@ -340,6 +340,38 @@ pub(crate) struct CompState {
     /// Rasterised pixels for the currently-open `snap_flyout`, same
     /// build-once-on-open pattern as `context_menu_buffer`.
     pub(crate) snap_flyout_buffer: Option<MemoryRenderBuffer>,
+    /// The real desktop icons (Home/Computer/Trash plus `~/Desktop`'s own
+    /// contents) - see `desktop_icons.rs`. `None` until the first render
+    /// pass populates it (lazily, once the primary monitor's own geometry
+    /// is actually known - see `state/desktop_icons.rs::ensure_desktop_
+    /// icons`), and permanently `None` when `general.desktop_icons` is off.
+    pub(crate) desktop_icons: Option<crate::desktop_icons::DesktopIcons>,
+    /// Rasterised pixels per icon, keyed by `DesktopIcon::id` - rebuilt
+    /// only for the one icon whose selection/drag state actually changed,
+    /// same cached-until-dirty convention as every other decoration
+    /// buffer in this codebase.
+    pub(crate) desktop_icon_buffers: HashMap<String, MemoryRenderBuffer>,
+    /// An in-progress icon drag: the icon's own id, the pointer's grab
+    /// offset from that icon's cell origin at the moment the drag started
+    /// (so the icon tracks the pointer smoothly rather than snapping its
+    /// top-left corner straight to the cursor), and the icon's own live
+    /// top-left position this frame - updated on every pointer-motion
+    /// event by `update_desktop_icon_drag`, read straight back by
+    /// `desktop_icon_render_list` with no separate "current pointer
+    /// position" field needed anywhere on `CompState`. `None` whenever no
+    /// drag is active.
+    #[allow(clippy::type_complexity)]
+    pub(crate) desktop_icon_drag: Option<(String, (i32, i32), (i32, i32))>,
+    /// The right-click desktop-icon/bare-desktop menu, if one is currently
+    /// open - see `desktop_menu.rs`. Same lifecycle/mutual-exclusion
+    /// story as `context_menu`/`snap_flyout` above.
+    pub(crate) desktop_menu: Option<crate::desktop_menu::DesktopMenu>,
+    /// Same build-once-on-open pattern as `context_menu_buffer`.
+    pub(crate) desktop_menu_buffer: Option<MemoryRenderBuffer>,
+    /// Same double-click bookkeeping as `last_titlebar_click`, keyed by
+    /// `DesktopIcon::id` instead of `WindowId` since a desktop icon isn't
+    /// a window - see `CompState::is_double_click`'s own doc comment.
+    pub(crate) last_icon_click: Option<(String, u32)>,
     pub(crate) wm: Rc<RefCell<WindowManager>>,
     pub(crate) surface_to_id: HashMap<WlSurface, WindowId>,
     pub(crate) id_to_window: HashMap<WindowId, DWindow>,
@@ -822,6 +854,7 @@ impl CompState {
 }
 
 
+mod desktop_icons;
 mod focus;
 mod geometry;
 mod layers;

@@ -21,6 +21,12 @@ impl CompState {
         // Same reason again: a native lock's capture step (below) needs
         // this, and `self.wm` can't be borrowed once `self.udev` is.
         let lock_blur_radius = self.wm.borrow().lock.blur_radius;
+        // Same "capture before `self.udev`'s borrow starts" reason as
+        // `cursor_status`/`cursor_buffers` above: global-space, so computed
+        // once here rather than per head, each head's own per-frame push
+        // below just re-offsets these same positions by its own `origin`.
+        self.ensure_desktop_icons();
+        let desktop_icon_render_list = self.desktop_icon_render_list();
         // Captured-and-blurred backgrounds collected during the per-head
         // loop below, applied via `self.capture_output` only after it
         // ends - `self.udev`'s mutable borrow is held for the whole loop
@@ -321,6 +327,15 @@ impl CompState {
                     match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, None, None, Kind::Unspecified) {
                         Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
                         Err(e) => log::warn!("udev: failed to import snap flyout buffer: {e}"),
+                    }
+                }
+                // The desktop-icon/bare-desktop right-click menu, if open --
+                // same "topmost but never hides the cursor" placement.
+                if let (Some(menu), Some(buffer)) = (self.desktop_menu.as_ref(), self.desktop_menu_buffer.as_ref()) {
+                    let pos = ((menu.pos.0 - origin.x) as f64, (menu.pos.1 - origin.y) as f64);
+                    match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, None, None, Kind::Unspecified) {
+                        Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                        Err(e) => log::warn!("udev: failed to import desktop menu buffer: {e}"),
                     }
                 }
                 // Popups next: always above every window's own content,
@@ -902,6 +917,19 @@ impl CompState {
                         }
                     }
                     occluders.push(frame);
+                }
+                // Real desktop icons - above the wallpaper, below every
+                // window: pushed after the windows loop above (so nothing
+                // here can occlude a real window) but before the
+                // background-layer push just below (so the wallpaper still
+                // shows through everywhere an icon doesn't draw). See
+                // `desktop_icons.rs`'s own module doc comment.
+                for (pos, buffer) in &desktop_icon_render_list {
+                    let pos = ((pos.0 - origin.x) as f64, (pos.1 - origin.y) as f64);
+                    match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, None, None, Kind::Unspecified) {
+                        Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                        Err(e) => log::warn!("udev: failed to import desktop icon buffer: {e}"),
+                    }
                 }
                 // Background/bottom layer-shell (wallpaper engines) last --
                 // bottommost, matching smithay's own `space_render_elements`

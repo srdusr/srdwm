@@ -13,6 +13,36 @@ that has the full story. Keep this list current as items close or open;
 update the source doc's own entry too, don't let this drift into a
 second stale copy the way `PANEL_SUPPORT_TODO.md` did.
 
+## Feature, implemented: real desktop icons plus the right-click desktop/icon menus (2026-08-25)
+
+Closes the "Right-click on bare desktop" item that used to sit under
+"Explicitly requested, not yet started" - previously a true no-op
+(`_ => {}` in `input/pointer.rs`'s button handler), nothing rendered above
+the wallpaper at all. Follow-up request, asked directly: real desktop
+icons "just like windows does" - Home/Computer/Trash plus one per real
+`~/Desktop` entry, draggable, right-click menus, a New Folder action, and
+(a later addition to the same round) a "Set as Wallpaper" action for
+image files.
+
+Built as the sibling of the existing `context_menu.rs`/`snap_flyout.rs`
+"compositor-owned floating UI" pattern - see `desktop_icons.rs`'s and
+`desktop_menu.rs`'s own module doc comments for the full architecture.
+Four new config keys (`general.desktop_icons`, default `true`;
+`general.file_manager`, `general.desktop_icon_single_click`, `general.
+wallpaper_command`, all default off/empty) - see DEFAULTS.md's own
+"Desktop icons" section for the complete behavior writeup.
+
+Deliberately cut from this pass, stated up front rather than discovered
+later: no move-to-trash and no "Empty Trash" (both destructive/hard-to-
+reverse with no confirmation-dialog primitive to gate them on yet), no
+filesystem watching (manual "Refresh" or a restart picks up an externally
+added file), no multi-select, no per-mimetype icon art, icons on the
+primary monitor only.
+
+Built, `cargo test --workspace` (124 wayland-crate tests, up from 106) and
+`cargo clippy --workspace --all-targets` clean; installed, pending a live
+restart to confirm.
+
 ## Real bug, root-caused and fixed: a resize's own rapid-fire commits could get a window's rounded-corner content mask cached as blank, hiding real content until the next real content change (2026-08-25)
 
 Reported live: "terminal output/everything disappears when i sometimes resize terminal." `general.rounded_corners = true` in this machine's own live config, so the udev/Pixman content-masking path (`rounded_corners_pixman.rs`) is what's actually in play, not just a rarely-hit opt-in.
@@ -1527,8 +1557,6 @@ persists.
       environment to confirm live. Needs an actual physical click test.
 
 ## Explicitly requested, not yet started
-- [ ] **Right-click on bare desktop** - no handler exists at all
-      currently; requested, scope/design never discussed.
 - [ ] **Window-management-policy comparison vs. GlazeWM, Awesome,
       Openbox, RagnarWM** - all four cloned to `~/reference-wms/` and
       ready; the *rendering* comparison used niri and mutter (the only
