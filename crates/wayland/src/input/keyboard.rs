@@ -65,6 +65,25 @@ pub(crate) fn handle_keyboard_key_event<B: smithay::backend::input::InputBackend
         return;
     }
 
+    // An in-progress desktop-icon rename claims every keystroke the same
+    // way the native lock's password entry does just above - see
+    // `CompState::renaming_icon`'s own doc comment. Not gated by `state.
+    // lock.locked` (already excluded, since that branch already returned)
+    // - this only ever runs during ordinary, unlocked interactive use.
+    if state.renaming_icon.is_some() {
+        if key_state == BackendKeyState::Pressed {
+            keyboard.input::<(), _>(state, keycode, key_state, serial, time, |data, _mods, handle| {
+                let utf8 = xkbcommon::xkb::keysym_to_utf8(handle.modified_sym());
+                let name = keysym_name_for(handle).unwrap_or_default();
+                data.desktop_icon_rename_key(&name, &utf8);
+                FilterResult::Intercept(())
+            });
+        } else {
+            keyboard.input::<(), _>(state, keycode, key_state, serial, time, |_, _, _| FilterResult::Intercept(()));
+        }
+        return;
+    }
+
     let bound_keys = state.bound_keys.clone();
     let matched: Option<(String, Modifiers)> =
         keyboard.input(state, keycode, key_state, serial, time, move |data, mods, handle| {

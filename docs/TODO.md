@@ -13,35 +13,87 @@ that has the full story. Keep this list current as items close or open;
 update the source doc's own entry too, don't let this drift into a
 second stale copy the way `PANEL_SUPPORT_TODO.md` did.
 
-## Feature, implemented: real desktop icons plus the right-click desktop/icon menus (2026-08-25)
+## Feature, implemented, v2: real desktop icons plus proper right-click desktop/icon menus (2026-08-25/26)
 
 Closes the "Right-click on bare desktop" item that used to sit under
 "Explicitly requested, not yet started" - previously a true no-op
 (`_ => {}` in `input/pointer.rs`'s button handler), nothing rendered above
 the wallpaper at all. Follow-up request, asked directly: real desktop
-icons "just like windows does" - Home/Computer/Trash plus one per real
-`~/Desktop` entry, draggable, right-click menus, a New Folder action, and
-(a later addition to the same round) a "Set as Wallpaper" action for
-image files.
+icons "just like windows does".
 
 Built as the sibling of the existing `context_menu.rs`/`snap_flyout.rs`
 "compositor-owned floating UI" pattern - see `desktop_icons.rs`'s and
 `desktop_menu.rs`'s own module doc comments for the full architecture.
-Four new config keys (`general.desktop_icons`, default `true`;
-`general.file_manager`, `general.desktop_icon_single_click`, `general.
-wallpaper_command`, all default off/empty) - see DEFAULTS.md's own
-"Desktop icons" section for the complete behavior writeup.
+Config keys: `general.desktop_icons` (default `true`), `general.
+file_manager`, `general.desktop_icon_single_click`, `general.terminal` --
+see DEFAULTS.md's own "Desktop icons" section for the complete behavior
+writeup.
 
-Deliberately cut from this pass, stated up front rather than discovered
-later: no move-to-trash and no "Empty Trash" (both destructive/hard-to-
-reverse with no confirmation-dialog primitive to gate them on yet), no
-filesystem watching (manual "Refresh" or a restart picks up an externally
-added file), no multi-select, no per-mimetype icon art, icons on the
-primary monitor only.
+**v1 (2026-08-25) live-tested and found genuinely broken in three ways,
+fixed in v2 (2026-08-26):**
 
-Built, `cargo test --workspace` (124 wayland-crate tests, up from 106) and
-`cargo clippy --workspace --all-targets` clean; installed, pending a live
-restart to confirm.
+1. **Icons weren't rendering at all, only sometimes.** Root cause:
+   `ensure_desktop_icons` computed the grid's `origin` exactly once, on
+   whichever render pass happened to be first - and AGS's own top bar
+   registers its exclusive zone only once that separate client connects
+   and commits, reliably *after* this compositor's first render pass.
+   Confirmed via a temporary diagnostic log: origin baked in at `(1936,
+   16)` (bar not yet registered) and never moved again even once `srd
+   monitors` reported the bar's real reservation moments later --
+   reported live as "Home is still being overlapped by AGS's top bar."
+   Fixed by re-deriving `origin` from the primary monitor's *current*
+   geometry on every call (cheap: one tuple comparison, no rescan), not
+   just the first.
+2. **Fixed icons (Home/Computer/Trash) always sorted before real files.**
+   Confirmed via direct question this was wrong: the whole list - fixed
+   icons included - now sorts alphabetically by label, case-insensitive,
+   in one pass.
+3. **"Set as Wallpaper" was the wrong feature to build.** The user wants
+   that handled by their real file manager (Nemo) once opened, not
+   reimplemented here - removed entirely (`DesktopMenuAction::
+   SetWallpaper`, `general.wallpaper_command`, `is_image_path`).
+
+**Also added in v2, since "where are all the options" was the direct
+complaint about v1's too-thin menu:** a real file/folder icon's menu
+gained **Rename** (inline text edit - new `CompState::renaming_icon`
+field and keyboard-redirect, mirroring `NativeLock::password`'s own
+existing precedent for routing raw keystrokes into a plain string buffer
+instead of the focused client) and **Delete** (moves to `~/.local/share/
+Trash` per the freedesktop.org Trash spec - new `trash.rs` module,
+same-filesystem case only, no confirmation prompt: this is the
+reversible move-to-trash, not a permanent delete, the same convention
+every mainstream file manager uses - v1's caution here conflated
+"destructive" with "irreversible"). The Trash icon's own menu gained
+**Empty Trash** (same reversibility framing). The bare-desktop menu
+gained **Open Terminal Here** (new `general.terminal` config key, falls
+back to the first of a short common-terminal list found on `$PATH`) and
+**Open in File Manager** (opens `~/Desktop` itself - the concrete path
+to Nemo's own richer menu, directly supporting "let Nemo handle it"
+rather than reimplementing Cut/Copy/Paste/Properties here).
+
+Still deliberately cut, stated up front: Cut/Copy/Paste (real interop
+needs the Wayland `wl_data_device`/`text/uri-list` clipboard protocol, a
+separate substantial feature - an srdwm-only internal clipboard
+wouldn't achieve real interop with Nemo anyway), filesystem watching,
+multi-select, View/Sort submenus (no nested-menu UI exists), icons on
+any monitor but the primary one (requested as an "optional" follow-up,
+not yet built - real per-monitor grids need `desktop_icons` to become
+`Vec<DesktopIcons>` plus monitor-scoped persistence keys, a genuine
+structural change deferred to its own round rather than rushed alongside
+everything else here).
+
+Built, `cargo test --workspace` (133 wayland-crate tests, up from 106)
+and `cargo clippy --workspace --all-targets` clean; installed, pending a
+live restart to confirm.
+
+Separately, while investigating: `~/.local/state/srd/monitor-layout.json`
+was found with both `eDP-1` and `HDMI-A-1` persisted at the identical
+position `(1920, 0)` - clearly wrong (would stack them). The live
+arrangement is currently correct (`eDP-1` at `1920,0`, `HDMI-A-1` at
+`0,0` - genuine extend-left), so this stale file isn't actually being
+trusted/applied at startup right now, but the corruption itself isn't
+root-caused yet - not investigated further this round, flagged for
+follow-up.
 
 ## Real bug, root-caused and fixed: a resize's own rapid-fire commits could get a window's rounded-corner content mask cached as blank, hiding real content until the next real content change (2026-08-25)
 

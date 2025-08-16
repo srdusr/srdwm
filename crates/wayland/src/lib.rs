@@ -66,6 +66,7 @@ mod rounded_corners;
 mod rounded_corners_pixman;
 mod screencopy;
 mod state;
+mod trash;
 mod udev;
 mod winit;
 mod workspace;

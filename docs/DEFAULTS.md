@@ -20,7 +20,7 @@ srd.set("general.gpu", false)                          -- Default: false - udev 
 srd.set("general.desktop_icons", true)                 -- Default: true - see "Desktop icons" below
 srd.set("general.file_manager", "")                    -- Default: "" - empty means dispatch via `xdg-open`
 srd.set("general.desktop_icon_single_click", false)    -- Default: false - double-click opens an icon
-srd.set("general.wallpaper_command", "")               -- Default: "" - empty hides "Set as Wallpaper" entirely
+srd.set("general.terminal", "")                        -- Default: "" - empty tries a common terminal on $PATH
 ```
 `general.smart_placement`/`general.border_width` are not listed: neither
 is implemented - new-window placement always uses smart placement
@@ -73,29 +73,51 @@ capability exists anywhere in this codebase, so folder/computer/trash/file
 icons are simple flat shapes, the same technique the titlebar's own
 buttons use.
 
+Icons sort into one alphabetical list by label, case-insensitive - the
+three fixed shortcuts interleave with real filenames rather than always
+coming first, e.g. "Computer" and "Documents" and "Home" and "Trash" sort
+exactly where their names put them.
+
 Double-click (or a single click when `general.desktop_icon_single_click`
-is `true`) opens an icon: `$general.file_manager <path>` if that key is
+is `true`) opens an icon: `general.file_manager <path>` if that key is
 set, otherwise `xdg-open <path>`. Dragging an icon snaps it to the nearest
 free grid cell on release and persists that cell to
 `$XDG_STATE_HOME/srd/desktop-icons.json` (else `~/.local/state/srd/...`) --
 only icons the user has actually moved get an entry there; everything
-else keeps recomputing its default slot on every rescan.
+else keeps recomputing its default slot on every rescan. The grid's own
+origin is re-derived from the primary monitor's current usable geometry
+every frame, so it always sits clear of a bar/dock's reserved strip on
+whichever edge it's anchored to, even if that reservation only appears
+after srdwm's first render (a real startup race with panels like AGS
+that connect and register their own exclusive zone after the compositor
+is already up).
 
-Right-click an icon: "Open", plus "Set as Wallpaper" when it's an image
-file (`.png`/`.jpg`/`.jpeg`/`.webp`/`.bmp`/`.gif`) and `general.
-wallpaper_command` is set - shells out to `<wallpaper_command> <path>`.
-srdwm never draws the wallpaper itself (an external layer-shell client's
-job - `swww`, `awww`, or similar), so there is no universal default to
-guess here the way `xdg-open` covers `file_manager`; this action simply
-doesn't appear when the key is empty. Right-click bare desktop: "New
-Folder" (creates `~/Desktop/New Folder`, de-duplicated as `New Folder
-(2)`, `(3)`, ...) and "Refresh" (re-scans `~/Desktop`).
+Right-click an icon: a real file or folder gets **Open**, **Rename**
+(inline, Enter to commit/Escape to cancel), and **Delete** (moves it to
+`~/.local/share/Trash` per the freedesktop.org Trash spec, same-filesystem
+case only - no confirmation prompt, since this is the reversible move-to-
+trash, not a permanent delete, the same convention every mainstream file
+manager uses). **Home**/**Computer** get **Open** only - they're
+shortcuts, not real files, so rename/delete don't apply. **Trash** gets
+**Open** and **Empty Trash** (also no prompt, same reversibility
+framing - this is the intentional final step, not a slip). Right-click
+bare desktop: **New Folder** (creates `~/Desktop/New Folder`, de-
+duplicated as `New Folder (2)`, `(3)`, ...), **Open Terminal Here**
+(`general.terminal`, or the first of alacritty/kitty/wezterm/foot/gnome-
+terminal/konsole/xterm found on `$PATH`, with `~/Desktop` as its working
+directory), **Open in File Manager** (opens `~/Desktop` itself in
+`general.file_manager`/`xdg-open` - the concrete path to a real file
+manager's own richer menu: cut/copy/paste, properties, set-as-wallpaper,
+deliberately not reimplemented here), and **Refresh** (re-scans
+`~/Desktop`).
 
-Not implemented in this first pass, deliberately: moving a file to trash,
-emptying the trash, filesystem watching (a file added to `~/Desktop` by
-another program needs "Refresh" or a restart to appear), multi-select,
-and per-mimetype icon art. The first two are destructive/hard-to-reverse
-actions with no confirmation-dialog primitive to gate them on yet.
+Not implemented, deliberately: Cut/Copy/Paste (real interop with a file
+manager needs the Wayland `wl_data_device`/`text/uri-list` clipboard
+protocol, a separate substantial feature - an srdwm-only internal
+clipboard wouldn't achieve real interop anyway), filesystem watching (a
+file added to `~/Desktop` by another program needs "Refresh" or a restart
+to appear), multi-select, View/Sort submenus (no nested-menu UI exists),
+and icons on any monitor but the primary one.
 
 ### Monitor Settings (`monitor.*`)
 ```lua

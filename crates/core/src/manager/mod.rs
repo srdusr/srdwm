@@ -231,16 +231,12 @@ pub struct WindowManager {
     /// file managers) default the other way, hence this being a real
     /// config option rather than a hardcoded choice.
     pub desktop_icon_single_click: bool,
-    /// External program a desktop image-file icon's "Set as Wallpaper"
-    /// action shells out to, read from `general.wallpaper_command`. Empty
-    /// (the default) means that action doesn't appear at all - srdwm
-    /// never draws the wallpaper itself (an external layer-shell client's
-    /// job, see `WaylandState`'s own doc comment on viewporter), so unlike
-    /// `file_manager`'s `xdg-open` fallback there is no universal command
-    /// to guess here; the user names their own wallpaper tool (`swww img`,
-    /// `awww img`, ...) or the action stays hidden rather than silently
-    /// doing nothing when clicked.
-    pub wallpaper_command: String,
+    /// External program the bare-desktop menu's "Open Terminal Here"
+    /// action shells out to (with `~/Desktop` as its working directory),
+    /// read from `general.terminal`. Empty (the default) tries a short
+    /// list of common terminals on `$PATH` - there's no `xdg-open`-
+    /// equivalent for "a shell", unlike `file_manager`.
+    pub terminal: String,
     /// The whole-screen colour treatment currently active (night light's
     /// warm tint or reading mode's desaturation), live-settable via `srd
     /// set night_light`/`srd set reading_mode` - see [`ColorFilter`]. Off
@@ -405,7 +401,7 @@ impl WindowManager {
             desktop_icons_enabled: true,
             file_manager: String::new(),
             desktop_icon_single_click: false,
-            wallpaper_command: String::new(),
+            terminal: String::new(),
             color_filter: ColorFilter::None,
             focus_follows_mouse: false,
             auto_raise: false,

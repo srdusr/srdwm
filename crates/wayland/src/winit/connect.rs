@@ -157,6 +157,7 @@ impl WaylandPlatform {
             desktop_menu: None,
             desktop_menu_buffer: None,
             last_icon_click: None,
+            renaming_icon: None,
             wm: wm.clone(),
             surface_to_id: HashMap::new(),
             id_to_window: HashMap::new(),

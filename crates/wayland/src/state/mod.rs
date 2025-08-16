@@ -372,6 +372,14 @@ pub(crate) struct CompState {
     /// `DesktopIcon::id` instead of `WindowId` since a desktop icon isn't
     /// a window - see `CompState::is_double_click`'s own doc comment.
     pub(crate) last_icon_click: Option<(String, u32)>,
+    /// An in-progress inline rename: the icon's own id, and the live-
+    /// edited name buffer - same shape as `NativeLock::password`
+    /// (`native_lock.rs`), the existing precedent for redirecting real
+    /// keyboard input into a plain string buffer instead of the normally-
+    /// focused client. `None` whenever no rename is in progress; the
+    /// keyboard handler checks this the same way it already checks
+    /// `state.lock.locked`.
+    pub(crate) renaming_icon: Option<(String, String)>,
     pub(crate) wm: Rc<RefCell<WindowManager>>,
     pub(crate) surface_to_id: HashMap<WlSurface, WindowId>,
     pub(crate) id_to_window: HashMap<WindowId, DWindow>,

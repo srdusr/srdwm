@@ -925,8 +925,8 @@ impl CompState {
                 // shows through everywhere an icon doesn't draw). See
                 // `desktop_icons.rs`'s own module doc comment.
                 for (pos, buffer) in &desktop_icon_render_list {
-                    let pos = ((pos.0 - origin.x) as f64, (pos.1 - origin.y) as f64);
-                    match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, buffer, None, None, None, Kind::Unspecified) {
+                    let local_pos = ((pos.0 - origin.x) as f64, (pos.1 - origin.y) as f64);
+                    match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, local_pos, buffer, None, None, None, Kind::Unspecified) {
                         Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
                         Err(e) => log::warn!("udev: failed to import desktop icon buffer: {e}"),
                     }

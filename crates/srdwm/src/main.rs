@@ -175,7 +175,7 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     let desktop_icons = engine.get_bool("general.desktop_icons", true);
     let file_manager = engine.get_string("general.file_manager", "");
     let desktop_icon_single_click = engine.get_bool("general.desktop_icon_single_click", false);
-    let wallpaper_command = engine.get_string("general.wallpaper_command", "");
+    let terminal = engine.get_string("general.terminal", "");
     let focus_follows_mouse = engine.get_bool("general.focus_follows_mouse", false);
     let auto_raise = engine.get_bool("general.auto_raise", false);
 
@@ -304,7 +304,7 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     wm.desktop_icons_enabled = desktop_icons;
     wm.file_manager = file_manager;
     wm.desktop_icon_single_click = desktop_icon_single_click;
-    wm.wallpaper_command = wallpaper_command;
+    wm.terminal = terminal;
     wm.focus_follows_mouse = focus_follows_mouse;
     wm.auto_raise = auto_raise;
     wm.theme = theme;

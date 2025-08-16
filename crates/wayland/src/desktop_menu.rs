@@ -9,12 +9,24 @@ use crate::desktop_icons::{DesktopIcon, IconKind};
 pub(crate) enum DesktopMenuAction {
     /// Open the icon with this id - same action a double-click runs.
     OpenIcon(String),
-    /// Shell out to `general.wallpaper_command` with this icon's path --
-    /// only ever offered for an image-file icon, and only when that
-    /// config key is actually set (see `WindowManager::wallpaper_command`'s
-    /// own doc comment).
-    SetWallpaper(String),
+    /// Enter inline rename mode for this real file/folder icon - see
+    /// `CompState::renaming_icon`'s own doc comment.
+    Rename(String),
+    /// Move this real file/folder into `~/.local/share/Trash` - no
+    /// confirmation, same as every mainstream file manager: this is the
+    /// reversible move-to-trash, not a permanent delete.
+    Delete(String),
+    /// Empties `~/.local/share/Trash` entirely - same no-confirmation
+    /// convention as `Delete`.
+    EmptyTrash,
     NewFolder,
+    /// Spawns a terminal with `~/Desktop` as its working directory --
+    /// `general.terminal`, or a common-binary fallback list if unset.
+    OpenTerminalHere,
+    /// Opens `~/Desktop` itself in `general.file_manager`/`xdg-open` - the
+    /// concrete path to a real file manager's own richer menu (cut/copy/
+    /// paste, properties, ...), deliberately not reimplemented here.
+    OpenInFileManager,
     Refresh,
 }
 
@@ -28,33 +40,36 @@ pub(crate) struct DesktopMenu {
 const MENU_WIDTH: u32 = 170;
 const ROW_HEIGHT: u32 = 28;
 
-/// Extensions `render_desktop_icon`'s `IconKind::File` icons treat as an
-/// image for "Set as Wallpaper" purposes - not a real mimetype sniff (no
-/// such capability exists anywhere in this workspace, see `desktop_icons.
-/// rs`'s own doc comment on why icon art itself is hand-drawn, not
-/// decoded), just the common raster formats a wallpaper tool actually
-/// accepts.
-const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
-
-fn is_image_path(path: &std::path::Path) -> bool {
-    path.extension().and_then(|e| e.to_str()).map(|e| IMAGE_EXTENSIONS.iter().any(|ext| e.eq_ignore_ascii_case(ext))).unwrap_or(false)
-}
-
 impl DesktopMenu {
-    /// Right-click on `icon` itself: "Open" always, plus "Set as Wallpaper"
-    /// when `icon` is an image file and `wallpaper_command` is non-empty.
-    pub(crate) fn open_for_icon(icon: &DesktopIcon, pos: (i32, i32), wallpaper_command: &str) -> Self {
-        let mut items = vec![("Open", DesktopMenuAction::OpenIcon(icon.id.clone()))];
-        if icon.kind == IconKind::File && !wallpaper_command.is_empty() && is_image_path(&icon.target) {
-            items.push(("Set as Wallpaper", DesktopMenuAction::SetWallpaper(icon.id.clone())));
-        }
+    /// Right-click on `icon` itself - the action set depends on what kind
+    /// of icon it is, not one fixed list: a real file/folder gets Open/
+    /// Rename/Delete (real filesystem operations); Home/Computer (fixed
+    /// shortcuts to somewhere, not real files of their own) get Open only,
+    /// since renaming or deleting the shortcut itself isn't a meaningful
+    /// action; Trash gets Open/Empty Trash instead of Rename/Delete, since
+    /// "delete the trash" and "rename the trash" aren't real trash
+    /// operations the way "empty it" is.
+    pub(crate) fn open_for_icon(icon: &DesktopIcon, pos: (i32, i32)) -> Self {
+        let items = match icon.kind {
+            IconKind::Trash => vec![("Open", DesktopMenuAction::OpenIcon(icon.id.clone())), ("Empty Trash", DesktopMenuAction::EmptyTrash)],
+            IconKind::Home | IconKind::Computer => vec![("Open", DesktopMenuAction::OpenIcon(icon.id.clone()))],
+            IconKind::Folder | IconKind::File => vec![
+                ("Open", DesktopMenuAction::OpenIcon(icon.id.clone())),
+                ("Rename", DesktopMenuAction::Rename(icon.id.clone())),
+                ("Delete", DesktopMenuAction::Delete(icon.id.clone())),
+            ],
+        };
         Self { pos, width: MENU_WIDTH, row_height: ROW_HEIGHT, items }
     }
 
-    /// Right-click on bare desktop (no icon under the pointer): "New
-    /// Folder" and "Refresh".
+    /// Right-click on bare desktop (no icon under the pointer).
     pub(crate) fn open_for_desktop(pos: (i32, i32)) -> Self {
-        let items = vec![("New Folder", DesktopMenuAction::NewFolder), ("Refresh", DesktopMenuAction::Refresh)];
+        let items = vec![
+            ("New Folder", DesktopMenuAction::NewFolder),
+            ("Open Terminal Here", DesktopMenuAction::OpenTerminalHere),
+            ("Open in File Manager", DesktopMenuAction::OpenInFileManager),
+            ("Refresh", DesktopMenuAction::Refresh),
+        ];
         Self { pos, width: MENU_WIDTH, row_height: ROW_HEIGHT, items }
     }
 
@@ -80,40 +95,45 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn icon(kind: IconKind, target: &str) -> DesktopIcon {
-        DesktopIcon { id: "x".into(), label: "x".into(), kind, target: PathBuf::from(target), cell: (0, 0), selected: false }
+    fn icon(kind: IconKind) -> DesktopIcon {
+        DesktopIcon { id: "x".into(), label: "x".into(), kind, target: PathBuf::new(), cell: (0, 0), selected: false }
     }
 
     #[test]
-    fn image_file_with_a_configured_command_gets_the_wallpaper_row() {
-        let menu = DesktopMenu::open_for_icon(&icon(IconKind::File, "pic.png"), (0, 0), "swww img");
-        assert_eq!(menu.items.len(), 2);
-        assert_eq!(menu.items[1].0, "Set as Wallpaper");
+    fn a_real_file_gets_open_rename_and_delete() {
+        let menu = DesktopMenu::open_for_icon(&icon(IconKind::File), (0, 0));
+        let labels: Vec<&str> = menu.items.iter().map(|(l, _)| *l).collect();
+        assert_eq!(labels, vec!["Open", "Rename", "Delete"]);
     }
 
     #[test]
-    fn image_file_with_no_configured_command_has_no_wallpaper_row() {
-        let menu = DesktopMenu::open_for_icon(&icon(IconKind::File, "pic.png"), (0, 0), "");
-        assert_eq!(menu.items.len(), 1, "Open only");
+    fn a_real_folder_gets_open_rename_and_delete_too() {
+        let menu = DesktopMenu::open_for_icon(&icon(IconKind::Folder), (0, 0));
+        let labels: Vec<&str> = menu.items.iter().map(|(l, _)| *l).collect();
+        assert_eq!(labels, vec!["Open", "Rename", "Delete"]);
     }
 
     #[test]
-    fn non_image_file_has_no_wallpaper_row_even_with_a_command_configured() {
-        let menu = DesktopMenu::open_for_icon(&icon(IconKind::File, "notes.txt"), (0, 0), "swww img");
-        assert_eq!(menu.items.len(), 1, "Open only");
+    fn home_and_computer_get_open_only() {
+        for kind in [IconKind::Home, IconKind::Computer] {
+            let menu = DesktopMenu::open_for_icon(&icon(kind), (0, 0));
+            let labels: Vec<&str> = menu.items.iter().map(|(l, _)| *l).collect();
+            assert_eq!(labels, vec!["Open"], "shortcuts aren't real files - no rename/delete");
+        }
     }
 
     #[test]
-    fn a_folder_never_gets_the_wallpaper_row() {
-        let menu = DesktopMenu::open_for_icon(&icon(IconKind::Folder, "pic.png"), (0, 0), "swww img");
-        assert_eq!(menu.items.len(), 1, "a directory named like an image is still not a file");
+    fn trash_gets_open_and_empty_trash_not_rename_or_delete() {
+        let menu = DesktopMenu::open_for_icon(&icon(IconKind::Trash), (0, 0));
+        let labels: Vec<&str> = menu.items.iter().map(|(l, _)| *l).collect();
+        assert_eq!(labels, vec!["Open", "Empty Trash"]);
     }
 
     #[test]
-    fn desktop_menu_offers_new_folder_and_refresh() {
+    fn desktop_menu_offers_the_full_set() {
         let menu = DesktopMenu::open_for_desktop((10, 10));
-        assert_eq!(menu.items[0].0, "New Folder");
-        assert_eq!(menu.items[1].0, "Refresh");
+        let labels: Vec<&str> = menu.items.iter().map(|(l, _)| *l).collect();
+        assert_eq!(labels, vec!["New Folder", "Open Terminal Here", "Open in File Manager", "Refresh"]);
     }
 
     #[test]

@@ -3,24 +3,49 @@
 //! shape as `state/menu.rs`'s `ContextMenu`/`SnapFlyout` glue.
 
 use super::*;
-use crate::desktop_icons::{DesktopIcons, CELL_HEIGHT, CELL_WIDTH, GRID_MARGIN};
+use crate::desktop_icons::{DesktopIcons, IconKind, CELL_HEIGHT, CELL_WIDTH, GRID_MARGIN};
 use crate::desktop_menu::{DesktopMenu, DesktopMenuAction};
 
+/// Common terminal binaries tried, in order, when `general.terminal` is
+/// unset - first one actually found on `$PATH` wins. There's no `xdg-
+/// open`-equivalent dispatcher for "a shell" the way there is for a file,
+/// so unlike `file_manager`'s empty-means-`xdg-open` fallback, this needs
+/// a real candidate list.
+const TERMINAL_CANDIDATES: &[&str] = &["alacritty", "kitty", "wezterm", "foot", "gnome-terminal", "konsole", "xterm"];
+
 impl CompState {
-    /// Populates `self.desktop_icons` on first call (or after `general.
-    /// desktop_icons` was off and just turned on), once the primary
-    /// monitor's own geometry is actually known - a no-op every other
-    /// call, cheap enough to check unconditionally at the top of a render
-    /// pass. Does nothing at all when the config flag is off.
+    /// Populates `self.desktop_icons` on first call, then keeps its
+    /// `origin` continuously re-anchored to the primary monitor's own
+    /// *current* usable geometry on every later call - cheap enough
+    /// (one tuple comparison) to run unconditionally at the top of every
+    /// render pass. Does nothing at all when the config flag is off.
+    ///
+    /// The re-anchoring is the fix for a real, reported bug: this used to
+    /// return immediately once `self.desktop_icons` was `Some`, computing
+    /// `origin` exactly once, on whichever render pass happened to be
+    /// first. AGS's own top bar registers its exclusive zone (`general.
+    /// desktop_icons`' fix's own PR: `srd monitors`, `Monitor::geometry`
+    /// already excludes it) only once that separate client has connected
+    /// and committed - reliably *after* this compositor's own first
+    /// render pass, confirmed live via a temporary diagnostic log: origin
+    /// baked in at `(1936, 16)` (bar not yet registered, `geometry.y` was
+    /// still `0`) and never moved again even once `srd monitors` reported
+    /// the bar's real 34-40px reservation moments later - reported live
+    /// as "Home is still being overlapped by AGS's top bar." Re-deriving
+    /// `origin` every call (not rebuilding the icon list - render
+    /// position reads `origin` fresh at push time, never baked into a
+    /// cached glyph buffer) closes this permanently, for the bar, a dock
+    /// on any edge, or any later exclusive-zone change alike.
     pub(crate) fn ensure_desktop_icons(&mut self) {
         if !self.wm.borrow().desktop_icons_enabled {
             return;
         }
-        if self.desktop_icons.is_some() {
-            return;
-        }
         let Some(monitor) = self.wm.borrow().monitors().iter().find(|m| m.primary).cloned() else { return };
         let origin = (monitor.geometry.x + GRID_MARGIN, monitor.geometry.y + GRID_MARGIN);
+        if let Some(icons) = &mut self.desktop_icons {
+            icons.origin = origin;
+            return;
+        }
         let rows = ((monitor.geometry.height as i32 - 2 * GRID_MARGIN) / CELL_HEIGHT).max(1);
         let saved = crate::desktop_icons_state::load();
         let icons = crate::desktop_icons::rescan(&saved, rows);
@@ -55,11 +80,19 @@ impl CompState {
         let Some(icon) = icons.icons.iter().find(|i| i.id == id) else { return };
         let theme = self.wm.borrow().theme;
         let label_color = (240, 240, 240);
+        // While this exact icon is mid-rename, show the live-edited buffer
+        // (with a trailing caret) instead of its real, on-disk label - so
+        // typing is visible without touching the filesystem until Enter
+        // actually commits it (`desktop_icon_rename_key`).
+        let label: std::borrow::Cow<str> = match &self.renaming_icon {
+            Some((rid, buf)) if rid == id => format!("{buf}_").into(),
+            _ => icon.label.as_str().into(),
+        };
         let data = decoration::render_desktop_icon(
             CELL_WIDTH as u32,
             CELL_HEIGHT as u32,
             icon.kind,
-            &icon.label,
+            &label,
             icon.selected,
             theme.titlebar_fg_focused,
             label_color,
@@ -184,15 +217,120 @@ impl CompState {
         }
     }
 
-    pub(crate) fn set_desktop_icon_as_wallpaper(&mut self, id: &str) {
+    /// Enters inline rename mode for `id`, pre-filled with its current
+    /// label - only ever called for a real file/folder icon (`desktop_
+    /// menu.rs`'s own `open_for_icon` never offers Rename for anything
+    /// else), but harmless if that assumption is ever wrong: `commit_
+    /// icon_rename` re-checks the icon's kind before touching the
+    /// filesystem.
+    pub(crate) fn start_rename_icon(&mut self, id: &str) {
         let Some(icons) = &self.desktop_icons else { return };
         let Some(icon) = icons.icons.iter().find(|i| i.id == id) else { return };
-        let target = icon.target.display().to_string();
-        let command = self.wm.borrow().wallpaper_command.clone();
-        if command.is_empty() {
+        self.renaming_icon = Some((id.to_string(), icon.label.clone()));
+        self.rebuild_icon_buffer(id);
+    }
+
+    /// Routes one keystroke into the in-progress rename buffer - same
+    /// shape as `native_lock_key`'s own `BackSpace`/`Return`/`Escape`/
+    /// printable-character handling.
+    pub(crate) fn desktop_icon_rename_key(&mut self, name: &str, utf8: &str) {
+        let Some((id, mut buffer)) = self.renaming_icon.take() else { return };
+        match name {
+            "BackSpace" => {
+                buffer.pop();
+                self.renaming_icon = Some((id.clone(), buffer));
+                self.rebuild_icon_buffer(&id);
+            }
+            "Return" | "KP_Enter" => self.commit_icon_rename(&id, &buffer),
+            "Escape" => self.rebuild_icon_buffer(&id),
+            _ => {
+                if !utf8.is_empty() && utf8.chars().all(|c| !c.is_control()) {
+                    buffer.push_str(utf8);
+                }
+                self.renaming_icon = Some((id.clone(), buffer));
+                self.rebuild_icon_buffer(&id);
+            }
+        }
+    }
+
+    /// Renames the real file/folder on disk and carries its saved grid
+    /// cell forward under the new name, so a rename doesn't also bump the
+    /// icon to a fresh default position. A blank name, or renaming
+    /// anything other than a real file/folder (shouldn't happen - see
+    /// `start_rename_icon`'s own doc comment), just cancels with no
+    /// filesystem change.
+    fn commit_icon_rename(&mut self, id: &str, new_name: &str) {
+        let new_name = new_name.trim();
+        let Some(icons) = &self.desktop_icons else { return };
+        let Some(icon) = icons.icons.iter().find(|i| i.id == id) else { return };
+        if new_name.is_empty() || !matches!(icon.kind, IconKind::Folder | IconKind::File) {
+            self.rebuild_icon_buffer(id);
             return;
         }
-        spawn_shell(&format!("{command} {}", shell_quote(&target)));
+        let Some(parent) = icon.target.parent() else {
+            self.rebuild_icon_buffer(id);
+            return;
+        };
+        let new_path = parent.join(new_name);
+        if let Err(e) = std::fs::rename(&icon.target, &new_path) {
+            log::warn!("desktop_icons: couldn't rename {:?} to {new_name:?}: {e}", icon.target);
+            self.rebuild_icon_buffer(id);
+            return;
+        }
+        let cell = icon.cell;
+        crate::desktop_icons_state::save_icon(new_name, cell);
+        self.desktop_icon_buffers.remove(id);
+        self.refresh_desktop_icons();
+    }
+
+    /// Moves the real file/folder into `~/.local/share/Trash` - see
+    /// `trash.rs`'s own module doc comment for why this needs no
+    /// confirmation.
+    pub(crate) fn delete_desktop_icon(&mut self, id: &str) {
+        let Some(icons) = &self.desktop_icons else { return };
+        let Some(icon) = icons.icons.iter().find(|i| i.id == id) else { return };
+        if let Err(e) = crate::trash::move_to_trash(&icon.target) {
+            log::warn!("desktop_icons: couldn't move {:?} to trash: {e}", icon.target);
+            return;
+        }
+        self.desktop_icon_buffers.remove(id);
+        self.refresh_desktop_icons();
+    }
+
+    pub(crate) fn empty_trash(&mut self) {
+        let Ok(home) = std::env::var("HOME").map(std::path::PathBuf::from) else { return };
+        crate::trash::empty(&home);
+        self.desktop_icon_buffers.remove("trash");
+    }
+
+    /// Spawns `general.terminal` (or the first of `TERMINAL_CANDIDATES`
+    /// found on `$PATH`) with `~/Desktop` as its working directory.
+    pub(crate) fn open_terminal_here(&mut self) {
+        let Ok(home) = std::env::var("HOME") else { return };
+        let desktop = format!("{home}/Desktop");
+        let configured = self.wm.borrow().terminal.clone();
+        let command = if !configured.is_empty() {
+            Some(configured)
+        } else {
+            TERMINAL_CANDIDATES.iter().find(|bin| on_path(bin)).map(|s| s.to_string())
+        };
+        match command {
+            Some(command) => spawn_shell_in_dir(&command, &desktop),
+            None => log::warn!("desktop_icons: no terminal found on $PATH and general.terminal is unset"),
+        }
+    }
+
+    /// Opens `~/Desktop` itself via `file_manager`/`xdg-open` - the
+    /// concrete path to a real file manager's own richer menu.
+    pub(crate) fn open_desktop_in_file_manager(&mut self) {
+        let Ok(home) = std::env::var("HOME") else { return };
+        let desktop = format!("{home}/Desktop");
+        let file_manager = self.wm.borrow().file_manager.clone();
+        if file_manager.is_empty() {
+            spawn_shell(&format!("xdg-open {}", shell_quote(&desktop)));
+        } else {
+            spawn_shell(&format!("{file_manager} {}", shell_quote(&desktop)));
+        }
     }
 
     /// Creates `~/Desktop/New Folder`, de-duplicated as `New Folder (2)`,
@@ -217,8 +355,7 @@ impl CompState {
     pub(crate) fn open_desktop_icon_menu(&mut self, icon_id: &str, pos: (i32, i32)) {
         let Some(icons) = &self.desktop_icons else { return };
         let Some(icon) = icons.icons.iter().find(|i| i.id == icon_id) else { return };
-        let wallpaper_command = self.wm.borrow().wallpaper_command.clone();
-        let menu = DesktopMenu::open_for_icon(icon, pos, &wallpaper_command);
+        let menu = DesktopMenu::open_for_icon(icon, pos);
         self.build_desktop_menu_buffer(menu);
     }
 
@@ -244,8 +381,12 @@ impl CompState {
     pub(crate) fn run_desktop_menu_action(&mut self, action: DesktopMenuAction) {
         match action {
             DesktopMenuAction::OpenIcon(id) => self.open_desktop_icon(&id),
-            DesktopMenuAction::SetWallpaper(id) => self.set_desktop_icon_as_wallpaper(&id),
+            DesktopMenuAction::Rename(id) => self.start_rename_icon(&id),
+            DesktopMenuAction::Delete(id) => self.delete_desktop_icon(&id),
+            DesktopMenuAction::EmptyTrash => self.empty_trash(),
             DesktopMenuAction::NewFolder => self.new_desktop_folder(),
+            DesktopMenuAction::OpenTerminalHere => self.open_terminal_here(),
+            DesktopMenuAction::OpenInFileManager => self.open_desktop_in_file_manager(),
             DesktopMenuAction::Refresh => self.refresh_desktop_icons(),
         }
     }
@@ -300,6 +441,29 @@ fn spawn_shell(command: &str) {
     if let Err(e) = result {
         log::warn!("desktop_icons: spawn '{command}' failed: {e}");
     }
+}
+
+/// Same fire-and-forget shell spawn as `spawn_shell`, but with a working
+/// directory - `open_terminal_here`'s own reason to exist as a separate
+/// function rather than reusing `spawn_shell` with a `cd` prefix, which
+/// would need its own quoting for `dir`.
+fn spawn_shell_in_dir(command: &str, dir: &str) {
+    #[cfg(unix)]
+    let result = std::process::Command::new("sh").arg("-c").arg(command).current_dir(dir).spawn();
+    #[cfg(windows)]
+    let result = std::process::Command::new("cmd").arg("/C").arg(command).current_dir(dir).spawn();
+    if let Err(e) = result {
+        log::warn!("desktop_icons: spawn '{command}' in {dir:?} failed: {e}");
+    }
+}
+
+/// Whether `bin` resolves to a real, regular file somewhere on `$PATH` --
+/// enough to pick a terminal candidate without a full `which`-equivalent
+/// (no executable-bit/`PATHEXT` check on Windows; this whole feature is
+/// Linux/BSD-desktop-shaped already, see `TERMINAL_CANDIDATES`' own
+/// entries).
+fn on_path(bin: &str) -> bool {
+    std::env::var_os("PATH").map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file())).unwrap_or(false)
 }
 
 #[cfg(test)]

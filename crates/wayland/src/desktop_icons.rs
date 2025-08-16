@@ -85,17 +85,6 @@ fn desktop_dir(home: &Path) -> PathBuf {
     home.join("Desktop")
 }
 
-/// `$XDG_DATA_HOME/Trash/files`, else `~/.local/share/Trash/files` - the
-/// freedesktop.org Trash spec's home-filesystem trash directory. Only the
-/// same-filesystem case is handled anywhere in this codebase (see this
-/// feature's own plan doc for why the per-mountpoint `.Trash-$uid`
-/// fallback is out of scope for now); this is purely where the Trash
-/// desktop icon opens to, nothing currently moves a file into it.
-fn trash_files_dir(home: &Path) -> PathBuf {
-    let data_home = std::env::var("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|_| home.join(".local/share"));
-    data_home.join("Trash/files")
-}
-
 /// Rebuilds the full icon list from the real filesystem: the three fixed
 /// icons first, then one per direct, non-hidden entry of `~/Desktop`
 /// (creating that directory if it doesn't exist yet, matching how a real
@@ -132,7 +121,7 @@ pub(crate) fn rescan(saved: &HashMap<String, (i32, i32)>, rows_per_column: i32) 
             id: "trash".to_string(),
             label: "Trash".to_string(),
             kind: IconKind::Trash,
-            target: home_dir().map(|h| trash_files_dir(&h)).unwrap_or_else(|| PathBuf::from("/")),
+            target: home_dir().map(|h| crate::trash::files_dir(&h)).unwrap_or_else(|| PathBuf::from("/")),
             cell: (0, 0),
             selected: false,
         },
@@ -141,7 +130,7 @@ pub(crate) fn rescan(saved: &HashMap<String, (i32, i32)>, rows_per_column: i32) 
         let desktop = desktop_dir(&home);
         if std::fs::create_dir_all(&desktop).is_ok() {
             if let Ok(entries) = std::fs::read_dir(&desktop) {
-                let mut files: Vec<(String, bool)> = entries
+                let files: Vec<(String, bool)> = entries
                     .filter_map(|e| e.ok())
                     .filter_map(|e| {
                         let name = e.file_name().to_string_lossy().into_owned();
@@ -152,7 +141,6 @@ pub(crate) fn rescan(saved: &HashMap<String, (i32, i32)>, rows_per_column: i32) 
                         Some((name, is_dir))
                     })
                     .collect();
-                files.sort_by(|a, b| a.0.cmp(&b.0));
                 for (name, is_dir) in files {
                     let target = desktop.join(&name);
                     icons.push(DesktopIcon {
@@ -167,6 +155,14 @@ pub(crate) fn rescan(saved: &HashMap<String, (i32, i32)>, rows_per_column: i32) 
             }
         }
     }
+    // One alphabetical list, fixed icons included - not fixed-three-then-
+    // files. Confirmed directly: the fixed shortcuts shouldn't always come
+    // first just because they're synthetic rather than real files.
+    // Case-insensitive so "computer"/"Computer" and a real lowercase
+    // filename interleave the way a user actually expects, not by raw
+    // byte value (which would put every uppercase name before any
+    // lowercase one).
+    icons.sort_by_key(|a| a.label.to_lowercase());
     assign_cells(&mut icons, saved, rows_per_column);
     icons
 }
@@ -212,12 +208,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixed_icons_always_come_first_in_a_stable_order() {
+    fn the_three_fixed_icons_sort_alphabetically_among_themselves() {
+        // Reported live, confirmed via direct question: fixed icons must
+        // NOT always come before real files just because they're
+        // synthetic - the whole list sorts by label together. This
+        // checks that sort using only the three fixed icons (present on
+        // any machine, unlike a specific `~/Desktop` file), whose labels
+        // - "Computer", "Home", "Trash" - already happen to be in
+        // alphabetical order, so a correct sort leaves them exactly
+        // where `rescan` built them.
         let icons = rescan(&HashMap::new(), 10);
-        assert!(icons.len() >= 3, "at least the three fixed icons");
-        assert_eq!(icons[0].id, "home");
-        assert_eq!(icons[1].id, "computer");
-        assert_eq!(icons[2].id, "trash");
+        let fixed: Vec<&str> = icons.iter().filter(|i| matches!(i.kind, IconKind::Home | IconKind::Computer | IconKind::Trash)).map(|i| i.label.as_str()).collect();
+        assert_eq!(fixed, vec!["Computer", "Home", "Trash"]);
+    }
+
+    #[test]
+    fn sorting_is_case_insensitive_and_covers_the_whole_list() {
+        let mut icons = [
+            DesktopIcon { id: "zebra".into(), label: "zebra".into(), kind: IconKind::File, target: PathBuf::new(), cell: (0, 0), selected: false },
+            DesktopIcon { id: "Home".into(), label: "Home".into(), kind: IconKind::Home, target: PathBuf::new(), cell: (0, 0), selected: false },
+            DesktopIcon { id: "apple".into(), label: "apple".into(), kind: IconKind::File, target: PathBuf::new(), cell: (0, 0), selected: false },
+        ];
+        icons.sort_by_key(|a| a.label.to_lowercase());
+        let labels: Vec<&str> = icons.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, vec!["apple", "Home", "zebra"], "a fixed icon's label interleaves with real filenames, not always first");
     }
 
     #[test]
