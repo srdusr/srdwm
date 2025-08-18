@@ -256,6 +256,22 @@ where
     R: Renderer + ImportAll + ImportMem,
     R::TextureId: Clone + Send + 'static,
 {
+    // `LayerMap::layer_geometry` is logical (confirmed against smithay
+    // 0.7.0's own source, `desktop/wayland/layer.rs::arrange`: it divides
+    // the output's physical mode by its own scale before arranging), while
+    // every position this function's own caller pushes an element at is
+    // physical - this compositor's convention throughout. Left
+    // unconverted, a layer surface on any output with a non-1.0 scale
+    // renders at the wrong physical position; for a bottom/right-anchored
+    // one on a *sub*-1.0 scale (this output shrinks logical space *larger*
+    // than physical, so a position derived from it overshoots), that was
+    // enough to push it fully past the real framebuffer edge - confirmed
+    // live (independently measured by a peer session) as a bottom-anchored
+    // dock never painted at all on a 0.843-scale output, while a
+    // top-anchored bar on the same output still rendered (it starts at
+    // logical/physical `0` either way) but with its own far edge
+    // increasingly wrong the further right it drew.
+    let scale = output.current_scale().fractional_scale();
     let map = layer_map_for_output(output);
     let mut elements = Vec::new();
     for layer in map.layers().rev() {
@@ -263,7 +279,8 @@ where
             continue;
         }
         let Some(geo) = map.layer_geometry(layer) else { continue };
-        elements.extend(surface_content_elements(renderer, layer.wl_surface(), (geo.loc.x, geo.loc.y), 1.0));
+        let pos = ((geo.loc.x as f64 * scale).round() as i32, (geo.loc.y as f64 * scale).round() as i32);
+        elements.extend(surface_content_elements(renderer, layer.wl_surface(), pos, 1.0));
     }
     elements
 }

@@ -13,6 +13,21 @@ that has the full story. Keep this list current as items close or open;
 update the source doc's own entry too, don't let this drift into a
 second stale copy the way `PANEL_SUPPORT_TODO.md` did.
 
+## Real bug, root-caused and fixed, jointly with a peer session (dotfiles-16): layer-shell surfaces on a fractionally-scaled output were unclickable and, for a bottom/right-anchored one, never painted at all (2026-08-26)
+
+Reported live in stages: "AGS isn't even working fast/seems weird now on this monitor even", "dock and AGS buttons aren't working in the other monitor". The peer session independently instrumented AGS itself (both bar and dock report `win_visible=true realized=true reveal=true overlapped=false` on the affected output - the client is asking for the right thing) and srdwm's own `layer_hit_test` log, and found the dock received zero hits across ~40 minutes while the same output's wallpaper and bar took hundreds - full findings in their own `docs/PANEL_SUPPORT_TODO.md`/`SESSION_HANDOFF.md` in the `rust-rewrite` worktree.
+
+Root cause, confirmed against smithay 0.7.0's own source (`desktop/wayland/layer.rs::arrange`): `LayerMap::arrange()` divides the output's *physical* mode size by its own scale before arranging layers, so `LayerMap::layer_geometry()` - and `LayerSurface::surface_under`'s own coordinate space - is genuinely logical, not physical. Two call sites used it as if it were physical, this compositor's own convention everywhere else:
+
+- `input/layers.rs::layer_surface_under_layers` compared the physical pointer position directly against logical layer geometry with no conversion. On a sub-1.0 scale (this machine's `HDMI-A-1`, ~0.843), logical space is *larger* than physical, so a bottom-anchored dock's logical rect sat entirely past the physical pointer's own reachable range - permanently unclickable. A top-anchored bar on the same output only lost its own right-hand end (it starts at `0` in both spaces either way), which is what made this look like "the dock is broken" rather than a scale bug affecting every layer surface on that output.
+- `elements.rs::output_layer_elements` pushed each layer's render position straight from that same logical geometry into the physical framebuffer - for the dock, past the bottom edge entirely, painting nothing.
+
+Both fixed the same way `udev/platform.rs::monitors()` and `udev/outputs.rs`'s own `non_exclusive_zone()` handling already fix the identical unit mismatch for usable-area computation (confirmed working precedent already in this codebase, not a new technique): multiply the logical value by `output.current_scale().fractional_scale()`, rounding to the nearest physical pixel, before using it as a physical position.
+
+Separately, while investigating: a temporary per-pointer-motion-event diagnostic log in `layer_hit_test` (querying compositor cached state and formatting/writing a log line on every single pixel of every mouse move) was still live from an earlier debugging session, explicitly marked "Temporary... remove once a restart confirms" but never removed. Real, measurable cost on the hot input path - removed; likely the direct cause of the separately reported "seems weird/slow" on top of the click-dead dock.
+
+Built, full workspace test suite and clippy clean; installed, pending a live restart to confirm both the dock/bar's full click area and general input responsiveness on the scaled output.
+
 ## Feature, implemented, v2: real desktop icons plus proper right-click desktop/icon menus (2026-08-25/26)
 
 Closes the "Right-click on bare desktop" item that used to sit under

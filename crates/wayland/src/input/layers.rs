@@ -5,7 +5,6 @@
 use smithay::desktop::{layer_map_for_output, WindowSurfaceType};
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::Resource as _;
 use smithay::utils::{Logical, Point};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::wlr_layer::{Anchor, ExclusiveZone, Layer, LayerSurfaceCachedState};
@@ -41,7 +40,26 @@ use crate::state::CompState;
 pub(super) fn layer_surface_under_layers(state: &CompState, pos: Point<f64, Logical>, layers: [Layer; 2]) -> Option<(WlSurface, Point<i32, Logical>)> {
     let entry = state.output_at(pos)?;
     let origin = entry.location;
-    let local = pos - origin.to_f64();
+    // `pos`/`origin` are physical (this compositor's own convention
+    // throughout, including `OutputEntry::location`'s own `Logical`-typed-
+    // but-physical-valued field - see its own doc comment), but `LayerMap
+    // ::layer_geometry` below is not: confirmed against smithay 0.7.0's
+    // own source (`desktop/wayland/layer.rs::arrange`), it divides the
+    // output's physical mode by its own scale before arranging layers, so
+    // it - and `LayerSurface::surface_under`'s own coordinate space,
+    // which reads surface-local points in that same system - is genuinely
+    // logical. Comparing a physical point against that without converting
+    // silently clips off however much a non-1.0 scale shrinks the surface
+    // by: confirmed live (with a peer session's own independent
+    // measurement) on a 0.843-scale output, a bottom-anchored dock sits
+    // entirely past the physical pointer's own reachable range - always
+    // unclickable, not just at the edges - while a top-anchored bar on
+    // the same output only loses its own right-hand end, which is what
+    // made this look like "the dock is broken" rather than a scale bug
+    // affecting every layer surface on that output.
+    let scale = entry.output.current_scale().fractional_scale();
+    let local_physical = pos - origin.to_f64();
+    let local: Point<f64, Logical> = (local_physical.x / scale, local_physical.y / scale).into();
     let map = layer_map_for_output(&entry.output);
     for layer_kind in layers {
         // Not `map.layer_under(layer_kind, local)` - that hands back only
@@ -66,33 +84,26 @@ pub(super) fn layer_surface_under_layers(state: &CompState, pos: Point<f64, Logi
             if !geo.to_f64().contains(local) {
                 continue;
             }
-            // Temporary: verifying the `layer_surfaces_shown_once` fix
-            // (state/layers.rs) actually stops a reused `wl_surface`'s
-            // stale layer-shell entry from outliving its role destroy --
-            // live-reproduced this session as a full-monitor click-catcher
-            // popup whose hit-tested geometry came back wider than the
-            // real output after several open/close cycles. Remove once a
-            // restart confirms the geometry stays sane across repeated
-            // popup toggles.
-            let local_in_surface = local - geo.loc.to_f64();
-            // `None` here means "no region ever committed" - per-protocol
-            // that means the *whole* surface is input-sensitive, not that
-            // nothing is, so it is its own distinct, meaningful answer from
-            // `Some([])` (a region was committed and it is empty).
-            let region_dump = with_states(layer.wl_surface(), |states| {
-                states.cached_state.get::<smithay::wayland::compositor::SurfaceAttributes>().current().input_region.as_ref().map(|r| r.rects.clone())
-            });
-            log::info!(
-                "layer_hit_test: layer={:?} namespace={:?} surface={:?} geo={:?} local_in_surface={:?} input_region={:?}",
-                layer_kind,
-                layer.namespace(),
-                layer.wl_surface().id(),
-                geo,
-                local_in_surface,
-                region_dump
-            );
+            // The `layer_surfaces_shown_once` fix (state/layers.rs) stops a
+            // reused `wl_surface`'s stale layer-shell entry from outliving
+            // its role destroy - previously live-reproduced as a full-
+            // monitor click-catcher popup whose hit-tested geometry came
+            // back wider than the real output after several open/close
+            // cycles. A per-motion-event diagnostic log verifying this
+            // used to sit here; removed after it was found to be a real,
+            // significant cost on the hot pointer-motion path (querying
+            // compositor cached state and formatting/writing a log line
+            // on every single pixel of every mouse move), reported live as
+            // general input sluggishness, not just log noise.
             if let Some((surface, surface_loc)) = layer.surface_under(local - geo.loc.to_f64(), WindowSurfaceType::ALL) {
-                return Some((surface, origin + geo.loc + surface_loc));
+                // `geo.loc + surface_loc` is still logical (same space as
+                // `local` above) - scaled back to physical here so the
+                // returned point matches every caller's own expected space
+                // (`pos`'s own convention, and `origin`'s, already
+                // physical).
+                let logical = geo.loc + surface_loc;
+                let physical: Point<i32, Logical> = ((logical.x as f64 * scale).round() as i32, (logical.y as f64 * scale).round() as i32).into();
+                return Some((surface, origin + physical));
             }
         }
     }
