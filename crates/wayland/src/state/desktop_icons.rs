@@ -13,6 +13,18 @@ use crate::desktop_menu::{DesktopMenu, DesktopMenuAction};
 /// a real candidate list.
 const TERMINAL_CANDIDATES: &[&str] = &["alacritty", "kitty", "wezterm", "foot", "gnome-terminal", "konsole", "xterm"];
 
+/// The hand-drawn glyphs' base colour - a dedicated, deliberately blue
+/// tone, not read from `theme.titlebar_fg_focused` (that field is
+/// whatever the user's own titlebar accent happens to be, which could be
+/// any colour at all depending on their config; these glyphs want a
+/// consistent, recognisable icon palette of their own, matching the
+/// "slightly blue, polished look" requested directly, independent of
+/// theme). `decoration::render_desktop_icon` derives a lighter top tone
+/// and a darker outline/detail tone from this one value via `color::
+/// brighten`/`darken`, the same directional-shading helpers the titlebar
+/// buttons already use.
+const ICON_COLOR: (u8, u8, u8) = (74, 144, 226);
+
 impl CompState {
     /// Populates `self.desktop_icons` on first call, then keeps its
     /// `origin` continuously re-anchored to the primary monitor's own
@@ -94,7 +106,7 @@ impl CompState {
             icon.kind,
             &label,
             icon.selected,
-            theme.titlebar_fg_focused,
+            ICON_COLOR,
             label_color,
             theme.default_border_color,
         );

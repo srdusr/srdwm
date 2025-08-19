@@ -214,13 +214,21 @@ pub(crate) fn render_desktop_icon(width: u32, height: u32, kind: crate::desktop_
     let mut buf = vec![0u8; width * height * 4];
 
     let glyph_box = ((width as i32 - 40) / 2, 8, (width as i32 + 40) / 2, 44);
+    // A top-lighter/bottom-`icon_color` vertical gradient, not one flat
+    // fill - the same subtle top-to-bottom light-source cue `buttons.rs`'s
+    // own `glossy_shade` uses for the titlebar dots, applied here as a
+    // plain linear gradient (`fill_rounded_rect`'s own job) rather than a
+    // radial highlight, which reads just as "polished" at this icon size
+    // for a lot less code. `border` (outline/detail colour) stays a flat
+    // darken of the base, unchanged.
+    let top = color::brighten(icon_color);
     let border = color::darken(icon_color);
     match kind {
-        IconKind::Home => draw_home_glyph(&mut buf, width, height, glyph_box, icon_color, border),
-        IconKind::Computer => draw_computer_glyph(&mut buf, width, height, glyph_box, icon_color, border),
-        IconKind::Trash => draw_trash_glyph(&mut buf, width, height, glyph_box, icon_color, border),
-        IconKind::Folder => draw_folder_glyph(&mut buf, width, height, glyph_box, icon_color, border),
-        IconKind::File => draw_file_glyph(&mut buf, width, height, glyph_box, icon_color, border),
+        IconKind::Home => draw_home_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
+        IconKind::Computer => draw_computer_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
+        IconKind::Trash => draw_trash_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
+        IconKind::Folder => draw_folder_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
+        IconKind::File => draw_file_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
     }
 
     let label_top = 50i32;
@@ -307,36 +315,78 @@ fn blit_glyph_on_transparent(buf: &mut [u8], width: usize, height: usize, glyph_
     }
 }
 
-fn draw_folder_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), fill: (u8, u8, u8), border: (u8, u8, u8)) {
-    let (x0, y0, x1, y1) = b;
-    let tab_w = (x1 - x0) * 2 / 5;
-    let tab_h = 5;
-    fill_rect(buf, width, height, x0, y0, x0 + tab_w, y0 + tab_h, fill, 255);
-    fill_rect(buf, width, height, x0, y0 + tab_h, x1, y1, fill, 255);
-    fill_rect(buf, width, height, x0, y0 + tab_h, x1, y0 + tab_h + 2, border, 255);
+/// Same job as `fill_rect`, but with softly rounded corners (the same
+/// clamp-then-distance smoothstep construction `rounded_corners_pixman::
+/// apply_corner_mask` already established for real content masking, not a
+/// new technique) and a vertical `top`-to-`bottom` gradient instead of one
+/// flat colour - together, what actually takes a shape from "programmer
+/// art" to reading as a small polished icon glyph rather than a coloured
+/// rectangle.
+#[allow(clippy::too_many_arguments)]
+fn fill_rounded_rect(buf: &mut [u8], width: usize, height: usize, x0: i32, y0: i32, x1: i32, y1: i32, radius: f32, top: (u8, u8, u8), bottom: (u8, u8, u8)) {
+    let (w, h) = (width as i32, height as i32);
+    let radius = radius.min((x1 - x0) as f32 / 2.0).min((y1 - y0) as f32 / 2.0).max(0.0);
+    let rect_h = (y1 - y0).max(1) as f32;
+    for y in y0.max(0)..y1.min(h) {
+        let t = ((y - y0) as f32 / rect_h).clamp(0.0, 1.0);
+        let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+        let color = (lerp(top.0, bottom.0), lerp(top.1, bottom.1), lerp(top.2, bottom.2));
+        for x in x0.max(0)..x1.min(w) {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let cx = px.clamp(x0 as f32 + radius, x1 as f32 - radius);
+            let cy = py.clamp(y0 as f32 + radius, y1 as f32 - radius);
+            let dist = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() - radius;
+            if dist >= 1.0 {
+                continue;
+            }
+            let idx = (y as usize * width + x as usize) * 4;
+            if dist <= -1.0 {
+                buf[idx..idx + 4].copy_from_slice(&rgb_to_bgra(color, 255));
+            } else {
+                let alpha = (255.0 * (1.0 - smoothstep(-1.0, 1.0, dist))).round() as u8;
+                let premul = |c: u8| ((c as u32 * alpha as u32 + 127) / 255) as u8;
+                buf[idx..idx + 4].copy_from_slice(&rgb_to_bgra((premul(color.0), premul(color.1), premul(color.2)), alpha));
+            }
+        }
+    }
 }
 
-fn draw_computer_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), fill: (u8, u8, u8), border: (u8, u8, u8)) {
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn draw_folder_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), top: (u8, u8, u8), bottom: (u8, u8, u8), border: (u8, u8, u8)) {
+    let (x0, y0, x1, y1) = b;
+    let tab_w = (x1 - x0) * 2 / 5;
+    let tab_h = 6;
+    fill_rounded_rect(buf, width, height, x0, y0, x0 + tab_w, y0 + tab_h + 2, 2.0, top, bottom);
+    fill_rounded_rect(buf, width, height, x0, y0 + tab_h, x1, y1, 4.0, top, bottom);
+    fill_rect(buf, width, height, x0 + 1, y0 + tab_h, x1 - 1, y0 + tab_h + 1, border, 255);
+}
+
+fn draw_computer_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), top: (u8, u8, u8), bottom: (u8, u8, u8), border: (u8, u8, u8)) {
     let (x0, y0, x1, y1) = b;
     let screen_bottom = y0 + (y1 - y0) * 3 / 4;
-    fill_rect(buf, width, height, x0, y0, x1, screen_bottom, border, 255);
-    fill_rect(buf, width, height, x0 + 2, y0 + 2, x1 - 2, screen_bottom - 2, fill, 255);
+    fill_rounded_rect(buf, width, height, x0, y0, x1, screen_bottom, 3.0, border, border);
+    fill_rounded_rect(buf, width, height, x0 + 2, y0 + 2, x1 - 2, screen_bottom - 2, 1.5, top, bottom);
     let stand_w = (x1 - x0) / 4;
     let stand_x0 = x0 + (x1 - x0 - stand_w) / 2;
     fill_rect(buf, width, height, stand_x0, screen_bottom, stand_x0 + stand_w, y1 - 2, border, 255);
-    fill_rect(buf, width, height, x0 + 2, y1 - 2, x1 - 2, y1, border, 255);
+    fill_rounded_rect(buf, width, height, x0 + 2, y1 - 3, x1 - 2, y1, 1.5, border, border);
 }
 
-fn draw_trash_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), fill: (u8, u8, u8), border: (u8, u8, u8)) {
+fn draw_trash_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), top: (u8, u8, u8), bottom: (u8, u8, u8), border: (u8, u8, u8)) {
     let (x0, y0, x1, y1) = b;
     let lid_h = 4;
-    fill_rect(buf, width, height, x0, y0, x1, y0 + lid_h, border, 255);
+    fill_rounded_rect(buf, width, height, x0, y0, x1, y0 + lid_h, 1.5, border, border);
     let handle_w = (x1 - x0) / 3;
     let handle_x0 = x0 + (x1 - x0 - handle_w) / 2;
     fill_rect(buf, width, height, handle_x0, y0 - 3, handle_x0 + handle_w, y0, border, 255);
     let body_x0 = x0 + 2;
     let body_x1 = x1 - 2;
-    fill_rect(buf, width, height, body_x0, y0 + lid_h, body_x1, y1, fill, 255);
+    fill_rounded_rect(buf, width, height, body_x0, y0 + lid_h, body_x1, y1, 3.0, top, bottom);
     // Three vertical ridge lines, the classic trash-can silhouette detail.
     let ridge_w = 2;
     for i in 0..3 {
@@ -345,10 +395,10 @@ fn draw_trash_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i
     }
 }
 
-fn draw_file_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), fill: (u8, u8, u8), border: (u8, u8, u8)) {
+fn draw_file_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), top: (u8, u8, u8), bottom: (u8, u8, u8), border: (u8, u8, u8)) {
     let (x0, y0, x1, y1) = b;
-    fill_rect(buf, width, height, x0, y0, x1, y1, border, 255);
-    fill_rect(buf, width, height, x0 + 2, y0 + 2, x1 - 2, y1 - 2, fill, 255);
+    fill_rounded_rect(buf, width, height, x0, y0, x1, y1, 3.0, border, border);
+    fill_rounded_rect(buf, width, height, x0 + 2, y0 + 2, x1 - 2, y1 - 2, 2.0, top, bottom);
     // A header strip near the top, the same "document" cue `draw_folder_
     // glyph`'s tab gives a folder - deliberately no folded-corner detail,
     // which would need a diagonal (not axis-aligned) fill this file's other
@@ -356,12 +406,12 @@ fn draw_file_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i3
     fill_rect(buf, width, height, x0 + 4, y0 + 5, x1 - 4, y0 + 8, border, 255);
 }
 
-fn draw_home_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), fill: (u8, u8, u8), border: (u8, u8, u8)) {
+fn draw_home_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i32, i32), top: (u8, u8, u8), bottom: (u8, u8, u8), border: (u8, u8, u8)) {
     let (x0, y0, x1, y1) = b;
     let mid_x = (x0 + x1) / 2;
     let roof_y = y0 + (y1 - y0) / 3;
     // A simple triangular roof built from shrinking horizontal strips
-    // (this file's only axis-aligned primitive is a filled rect) rather
+    // (this file's only axis-aligned primitives are filled rects) rather
     // than a real diagonal line - coarse at this size, but reads clearly
     // as a roof over the body rect below it.
     let steps = (roof_y - y0).max(1);
@@ -370,11 +420,11 @@ fn draw_home_glyph(buf: &mut [u8], width: usize, height: usize, b: (i32, i32, i3
         let inset = (i * (mid_x - x0)) / steps;
         fill_rect(buf, width, height, mid_x - inset - 1, y, mid_x + inset + 1, y + 1, border, 255);
     }
-    fill_rect(buf, width, height, x0 + 2, roof_y, x1 - 2, y1, fill, 255);
+    fill_rounded_rect(buf, width, height, x0 + 2, roof_y, x1 - 2, y1, 2.0, top, bottom);
     fill_rect(buf, width, height, x0 + 2, roof_y, x1 - 2, roof_y + 2, border, 255);
     let door_w = (x1 - x0) / 4;
     let door_x0 = mid_x - door_w / 2;
-    fill_rect(buf, width, height, door_x0, y1 - 10, door_x0 + door_w, y1, border, 255);
+    fill_rounded_rect(buf, width, height, door_x0, y1 - 10, door_x0 + door_w, y1, 1.5, border, border);
 }
 
 #[cfg(test)]
