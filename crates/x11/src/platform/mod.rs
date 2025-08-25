@@ -198,6 +198,12 @@ pub struct X11Platform {
     /// window) - so this can't be folded into the existing managed-
     /// window bookkeeping.
     struts: HashMap<XWindow, Strut>,
+    /// The currently-open right-click titlebar window menu, if any --
+    /// the built row set/geometry alongside the override-redirect popup
+    /// window it's drawn into. See `context_menu.rs`'s module doc comment
+    /// for why X11 needs its own popup window and pointer grab where the
+    /// Wayland backend just reads a compositor-space struct.
+    context_menu: Option<(srdwm_core::context_menu::ContextMenu, XWindow)>,
 }
 
 
@@ -215,6 +221,7 @@ impl ClonedForRender for Option<&CoreWindow> {
 
 mod actions;
 mod connect;
+mod context_menu;
 mod events;
 mod global_menu;
 mod struts;

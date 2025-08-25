@@ -1,3 +1,4 @@
+pub mod context_menu;
 pub mod event;
 pub mod geometry;
 pub mod keysyms;
@@ -11,6 +12,7 @@ pub mod theme;
 pub mod window;
 pub mod workspace;
 
+pub use context_menu::{ContextMenu, MenuAction};
 pub use event::{canonicalize_key_combo, key_combo_string, parse_key_combo, Event, MouseButton, Modifiers};
 pub use geometry::Rect;
 pub use layout::{Layout, MasterStackLayout, NoOpLayout, TilingConfig};

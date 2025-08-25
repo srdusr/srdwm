@@ -98,6 +98,7 @@ impl X11Platform {
             ipc,
             appmenu_registrar: Some(srdwm_platform::AppmenuRegistrarState::new()),
             struts: HashMap::new(),
+            context_menu: None,
         })
     }
 

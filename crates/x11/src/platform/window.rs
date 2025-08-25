@@ -156,6 +156,13 @@ impl X11Platform {
         if let Some(frame) = self.frames.remove(&id) {
             let _ = self.conn.destroy_window(frame.frame);
         }
+        // A closed window's own context menu (opened right before, say, a
+        // client that immediately quits) would otherwise dangle - its
+        // `MenuAction::Close`/etc. would target a `WindowId` `remove_
+        // window` below has already forgotten.
+        if self.context_menu.as_ref().is_some_and(|(menu, _)| menu.window == id) {
+            let _ = self.close_context_menu();
+        }
         self.wm.borrow_mut().remove_window(id);
         let _ = self.conn.flush();
         Some(Event::WindowDestroyed(id))

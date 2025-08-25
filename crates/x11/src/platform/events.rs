@@ -70,30 +70,70 @@ impl X11Platform {
             }
             XEvent::ButtonPress(ev) => {
                 let (x, y) = (ev.root_x as i32, ev.root_y as i32);
+                let button = match ev.detail {
+                    1 => MouseButton::Left,
+                    2 => MouseButton::Middle,
+                    3 => MouseButton::Right,
+                    other => MouseButton::Other(other),
+                };
+
+                // The context menu, if open, captures every press: a click
+                // inside resolves whichever row it landed on, a click
+                // anywhere else just dismisses it - same "one click, one
+                // action" rule the Wayland backend's own input/pointer.rs
+                // follows, and why `open_context_menu` grabs the pointer
+                // (see that method's own doc comment for why X11 needs to).
+                if self.context_menu.is_some() {
+                    let (row_action, menu_window) = {
+                        let (menu, _) = self.context_menu.as_ref().unwrap();
+                        (menu.row_at(x, y).map(|r| menu.items[r].1), menu.window)
+                    };
+                    match row_action {
+                        Some(srdwm_core::context_menu::MenuAction::Separator) => {}
+                        Some(action) => {
+                            self.close_context_menu()?;
+                            self.run_context_menu_action(menu_window, action)?;
+                        }
+                        None => self.close_context_menu()?,
+                    }
+                    return Ok(Some(Event::MouseButtonPress { button, x, y }));
+                }
+
                 let hit = self.wm.borrow().hit_test(x, y);
                 if let Some((id, hit)) = hit {
                     self.raise_and_focus(id)?;
-                    match hit {
-                        TitlebarHit::Drag => self.wm.borrow_mut().start_drag(id, x, y),
-                        TitlebarHit::Close => self.request_close(id)?,
-                        TitlebarHit::Maximize => {
+                    match (button, hit) {
+                        (MouseButton::Left, TitlebarHit::Drag) => self.wm.borrow_mut().start_drag(id, x, y),
+                        (MouseButton::Left, TitlebarHit::Close) => self.request_close(id)?,
+                        (MouseButton::Left, TitlebarHit::Maximize) => {
                             self.wm.borrow_mut().toggle_maximize(id);
                             self.sync_geometry(id)?;
                         }
-                        TitlebarHit::Minimize => {
+                        (MouseButton::Left, TitlebarHit::Minimize) => {
                             self.wm.borrow_mut().minimize_window(id);
                             if let Some(frame) = self.frame_for(id) {
                                 self.conn.unmap_window(frame).map_err(err)?;
                             }
                         }
-                        TitlebarHit::Resize(edge) => self.wm.borrow_mut().start_resize(id, edge, x, y),
+                        (MouseButton::Left, TitlebarHit::Resize(edge)) => self.wm.borrow_mut().start_resize(id, edge, x, y),
+                        // Right-click on the titlebar's own drag area: the
+                        // window menu (minimize/maximize/fullscreen/
+                        // floating/always-on-top/move-to-workspace/close).
+                        // Any other button/hit combination - right-click
+                        // on a button, middle-click anywhere - just
+                        // raises/focuses (already done above) and does
+                        // nothing further, matching real desktops (a
+                        // right-click on a titlebar button is not itself
+                        // a button action).
+                        (MouseButton::Right, TitlebarHit::Drag) => self.open_context_menu(id, (x, y))?,
+                        _ => {}
                     }
                     self.conn.flush().map_err(err)?;
                 }
                 // Let the click through to the client (we grabbed it SYNC).
                 self.conn.allow_events(x11rb::protocol::xproto::Allow::REPLAY_POINTER, ev.time).map_err(err)?;
                 self.conn.flush().map_err(err)?;
-                Ok(Some(Event::MouseButtonPress { button: MouseButton::Left, x, y }))
+                Ok(Some(Event::MouseButtonPress { button, x, y }))
             }
             XEvent::ButtonRelease(ev) => {
                 let mut wm = self.wm.borrow_mut();
@@ -141,6 +181,13 @@ impl X11Platform {
                 Ok(Some(Event::KeyRelease { key_name, modifiers: Self::modifiers_from_state(ev.state.into()) }))
             }
             XEvent::Expose(ev) => {
+                // The popup has no backing store, unlike the compositor-
+                // side Wayland menu - anything that uncovers it needs a
+                // real repaint.
+                if self.context_menu.as_ref().is_some_and(|(_, popup)| *popup == ev.window) {
+                    let _ = self.redraw_context_menu();
+                    return Ok(None);
+                }
                 let target = self.frames.iter().find(|(_, f)| f.frame == ev.window).map(|(&id, _)| id);
                 if let Some(id) = target {
                     let w = self.wm.borrow().window(id).cloned_for_render();
