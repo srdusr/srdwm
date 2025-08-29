@@ -74,6 +74,13 @@ pub struct WindowManager {
     /// backend's next monitor query, same as any other hotplug/reconfigure.
     output_position_requests: Vec<(MonitorId, i32, i32)>,
     /// Same cross-boundary-request pattern as `output_position_requests`
+    /// just above, for Phase 2 of the multi-cursor plan - pinning a
+    /// virtual pointer object (identified by the owning client's pid, not
+    /// an opaque per-object id nothing outside the Wayland backend could
+    /// ever learn) to a specific window. See `input_pin.rs`'s own doc
+    /// comment.
+    pin_input_requests: Vec<(i32, Option<WindowId>)>,
+    /// Same cross-boundary-request pattern as `output_position_requests`
     /// just above, for enable/disable - see `request_output_enabled`'s
     /// own doc comment for why this is keyed by name, not `MonitorId`.
     output_enable_requests: Vec<(String, bool)>,
@@ -206,6 +213,24 @@ pub struct WindowManager {
     /// without touching config - `udev::platform::connect` attempts the
     /// probe if *either* this or the env var says to.
     pub gpu_enabled: bool,
+    /// Read from `general.phone_mode` - `false` by default. Optional
+    /// single-app-at-a-time placement policy for a phone-shaped display:
+    /// see `add_window`'s own use of this (a new window defaults to
+    /// maximized instead of floating/tiled small, unless a rule says
+    /// otherwise) for the concrete effect. Deliberately just a placement
+    /// default, not a distinct "mode" this crate tracks any other state
+    /// for - toggling it live via `srd set phone_mode <bool>` only
+    /// changes how the *next* new window opens, same as any other
+    /// default-policy config value (`general.animations`, `general.
+    /// shadows`) already behaves, not a live re-layout of every window
+    /// already open. Also exposed read-only via `srd settings` so a shell
+    /// panel (AGS, concretely) can adapt its own chrome to the same
+    /// signal without needing a second, separate way to ask "is this a
+    /// phone-shaped session" - the actual "optional phone mode for AGS"
+    /// half of this ask is real work in *that* project, not this one;
+    /// this is the one thing srdwm itself needed to add so AGS has
+    /// something real to read.
+    pub phone_mode: bool,
     /// Whether srdwm draws real desktop icons (Home/Computer/Trash plus one
     /// per real `~/Desktop` entry) on the primary output's wallpaper --
     /// read from `general.desktop_icons`. Unlike `gpu_enabled`, this
@@ -213,6 +238,44 @@ pub struct WindowManager {
     /// feature with no hardware-support question to hedge against, not an
     /// experimental backend path that needs an opt-in safety net.
     pub desktop_icons_enabled: bool,
+    /// Whether desktop icons are mirrored onto every enabled monitor's own
+    /// corner, or only drawn on the primary monitor - read from `general.
+    /// desktop_icons_all_monitors`. Defaults to `true`, matching real macOS
+    /// convention (each display gets its own Desktop icons view) rather
+    /// than the older Windows-style "icons live on monitor 1 only" - a
+    /// directly reported gap ("in other monitor it's not showing the
+    /// desktop icons"), not a hardware question to hedge on like `gpu_
+    /// enabled`. The same underlying icon set/cells are shared across every
+    /// mirror: dragging a copy on one monitor moves the one real icon,
+    /// which then shows in its new cell on every monitor it's mirrored to.
+    pub desktop_icons_all_monitors: bool,
+    /// Static minimum space reserved on each edge of every monitor,
+    /// logical pixels, read from `general.reserve_top`/`_bottom`/`_left`/
+    /// `_right` - `0` (no static reservation) by default. Exists for the
+    /// gap between "the compositor starts rendering/placing things" and
+    /// "the bar/dock has actually connected and called `set_exclusive_
+    /// zone`": a layer-shell client's own reserved strip only exists once
+    /// that client has mapped a real surface, which is reliably *after*
+    /// this compositor's own first render pass and first-window placement
+    /// decisions (autostart spawns the compositor's own children, which
+    /// then have to connect, negotiate, and commit before their zone is
+    /// real). Desktop icons already re-derive their own origin every frame
+    /// so they self-correct once the real zone lands (see `ensure_desktop_
+    /// icons`'s own doc comment) - but a *window* placed in that gap gets
+    /// a one-time placement decision, not a continuously-corrected one, so
+    /// it can end up spawned under where the bar will render, with nothing
+    /// to nudge it out afterward. Set this to the bar/dock's own known
+    /// height/width (whatever `~/.config/ags` or another panel actually
+    /// reserves) so every usable-area computation (`Platform::monitors()`)
+    /// already accounts for it from the very first call, before any real
+    /// client has connected at all. Takes the *larger* of this and
+    /// whatever real exclusive zone currently exists per edge, never the
+    /// smaller - so a real, larger bar still wins once it registers, and
+    /// this is a floor, not a competing claim.
+    pub reserve_top: u32,
+    pub reserve_bottom: u32,
+    pub reserve_left: u32,
+    pub reserve_right: u32,
     /// External program desktop icons open into, read from `general.
     /// file_manager`. Empty (the default) means "shell out to `xdg-open
     /// <path>`" - the de-facto standard dispatcher to whatever the user's
@@ -265,23 +328,27 @@ pub struct WindowManager {
     drag: Option<DragState>,
     resize: Option<ResizeState>,
     rules: Vec<WindowRule>,
-    /// Last floating size a user interactively resized each `app_id` to,
-    /// applied to that app's *next* new window instead of the fixed
-    /// 800x600 every backend otherwise hardcodes - see `end_resize` (where
-    /// this is recorded) and `add_window` (where it's read). Keyed by
-    /// `app_id` alone, not per-window: the ask is "my terminal should open
-    /// at the size I last used a terminal at", not per-window-instance
-    /// memory. Only an interactive drag-resize (`end_resize`) updates this
-    /// - not a maximize/fullscreen toggle (that's a separate, temporary
-    /// state with its own `restore_geometry`, not a new "size I want to
-    /// keep using") and not a drag-to-edge snap (a deliberate one-off
-    /// snap to a half/quarter of the screen isn't "the size I'll want my
-    /// next terminal to open at" either). Session-lifetime only, not
-    /// persisted to disk - a real per-app-size-memory feature that
-    /// survives a restart would need a config-file-backed store, which is
-    /// meaningfully more machinery than "remember it while running" asks
-    /// for.
-    remembered_sizes: HashMap<String, (u32, u32)>,
+    /// Last floating position+size a user interactively moved/resized each
+    /// `app_id` to, applied to that app's *next* new window instead of the
+    /// fixed 800x600-near-centre every backend otherwise hardcodes - see
+    /// `end_resize`/`end_drag` (where this is recorded) and `add_window`
+    /// (where it's read). Keyed by `app_id` alone, not per-window: the ask
+    /// is "my terminal should open where/how big I last left one", not
+    /// per-window-instance memory. Only an interactive drag/resize updates
+    /// this - not a maximize/fullscreen toggle (that's a separate,
+    /// temporary state with its own `restore_geometry`, not a new
+    /// "position/size I want to keep using") and not a drag-to-edge snap (a
+    /// deliberate one-off snap to a half/quarter of the screen isn't "where
+    /// I'll want my next terminal to open" either).
+    ///
+    /// In-memory here (this struct has no file I/O of its own - see
+    /// `srdwm_core`'s own module doc comment on why core stays pure logic);
+    /// `crates/wayland/src/window_memory.rs` is what actually persists this
+    /// to `$XDG_STATE_HOME/srd/window-memory.json` and re-seeds it via
+    /// `set_remembered_geometry` at startup, the same load/save-at-the-
+    /// platform-layer split `monitor_layout.rs`/`desktop_icons_state.rs`
+    /// already use for their own per-feature state.
+    remembered_geometry: HashMap<String, (i32, i32, u32, u32)>,
     /// Windows a client-close was requested for, drained once per tick by
     /// `main.rs`'s event loop and forwarded to `Platform::close`. Needed
     /// because `WindowManager` is platform-agnostic and has no way to send
@@ -342,6 +409,7 @@ impl WindowManager {
             focused: None,
             monitors: Vec::new(),
             output_position_requests: Vec::new(),
+            pin_input_requests: Vec::new(),
             output_enable_requests: Vec::new(),
             disabled_monitors: HashMap::new(),
             monitor_splits: HashMap::new(),
@@ -398,7 +466,13 @@ impl WindowManager {
             resize_margin: RESIZE_MARGIN,
             rounded_corners_enabled: None,
             gpu_enabled: false,
+            phone_mode: false,
             desktop_icons_enabled: true,
+            desktop_icons_all_monitors: true,
+            reserve_top: 0,
+            reserve_bottom: 0,
+            reserve_left: 0,
+            reserve_right: 0,
             file_manager: String::new(),
             desktop_icon_single_click: false,
             terminal: String::new(),
@@ -410,7 +484,7 @@ impl WindowManager {
             drag: None,
             resize: None,
             rules: Vec::new(),
-            remembered_sizes: HashMap::new(),
+            remembered_geometry: HashMap::new(),
             close_requests: Vec::new(),
             keyboard_layout: String::new(),
             keyboard_layout_cycle_requests: 0,
@@ -438,6 +512,7 @@ mod capture;
 mod dragresize;
 mod focus;
 mod hittest;
+mod input_pin;
 mod layout;
 mod lock;
 mod monitors;

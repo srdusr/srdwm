@@ -94,6 +94,12 @@ pub struct WindowRuleActions {
     /// Per-window resize-grab-margin override, in logical pixels
     /// (Hyprland's per-window `extend_border_grab_area`).
     pub resize_margin: Option<i32>,
+    /// `(width, height)` ratio to hold while resizing - see `Window::
+    /// aspect_ratio`'s own doc comment for the "phone monitor" use case
+    /// this exists for. Parsed from a `"9:16"`-shaped string by the Lua
+    /// binding (`crates/config`), not here - this crate has no config
+    /// engine of its own to own that parsing.
+    pub aspect_ratio: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, Default)]

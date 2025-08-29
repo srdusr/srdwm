@@ -206,6 +206,20 @@ pub struct Window {
     /// (a `windowrule`); this is the equivalent, set via a rule's
     /// `resize_margin` action or `srd.window.set_resize_margin()`.
     pub resize_margin: Option<i32>,
+    /// `(width, height)` ratio to hold while floating and being
+    /// interactively resized (`ResizeEdge::apply_aspect_ratio`), `None` to
+    /// resize freely. Set via a rule's `aspect_ratio` action (`"9:16"`) --
+    /// the "phone monitor / special workspace" ask's own real, scoped
+    /// answer: a VM/emulator/`scrcpy` window tagged this way keeps a
+    /// phone-shaped frame through a drag, without srdwm needing to know
+    /// anything about the specific app driving it (matches by `app_id`,
+    /// the same rule mechanism `decorated`/`floating`/`pinned` already
+    /// use - this is not Android-specific in any way). A real, if
+    /// narrower, precedent for this already exists outside this project:
+    /// ICCCM's `WM_NORMAL_HINTS` min/max aspect, which some X11 clients
+    /// set themselves - this is the compositor-rule equivalent for
+    /// clients (most Wayland ones, concretely) that don't.
+    pub aspect_ratio: Option<(u32, u32)>,
     pub workspace: usize,
     pub monitor: u32,
     /// Whether `WindowManager`'s class/title-matched rules have already
@@ -255,6 +269,7 @@ impl Window {
             corner_radius: 6,
             opacity: 1.0,
             resize_margin: None,
+            aspect_ratio: None,
             // Always overwritten by `WindowManager::add_window` before this
             // is ever read for real (to the current workspace, or a rule's
             // own `workspace` action) - `1`, not `0`, only because
@@ -686,6 +701,45 @@ impl ResizeEdge {
                 r.height = (original.height as i32 + dy).max(min_h) as u32;
             }
             _ => {}
+        }
+        r
+    }
+
+    /// Re-derives one dimension of `delta_applied` (the result of
+    /// `apply_delta`, already reflecting this drag's pointer motion) so
+    /// the rect holds `ratio` (`width, height`) - `Window::aspect_ratio`'s
+    /// own doc comment explains why this exists at all.
+    ///
+    /// A pure vertical edge (`Top`/`Bottom`) derives *width* from the new
+    /// height: that is the one dimension the user is actually dragging on
+    /// that edge, so deriving it back from a width that never changed
+    /// would leave the edge under the cursor not tracking the cursor.
+    /// Every other edge (a horizontal edge or a corner) derives *height*
+    /// from width instead, for the mirrored reason - `Left`/`Right` only
+    /// ever change width in `apply_delta` to begin with, and a corner's
+    /// own diagonal drag has no single "the" dimension, so width (the
+    /// axis every non-vertical-only edge here actually touches) is the
+    /// one reasonable, consistent choice.
+    ///
+    /// `TopLeft`/`TopRight` additionally re-anchor `y` the same way
+    /// `apply_delta` itself anchors height for those two edges (keep the
+    /// *bottom* edge fixed) - otherwise a locked-ratio window dragged
+    /// from its top would grow downward instead of upward, the one
+    /// direction that edge is actually supposed to move.
+    pub fn apply_aspect_ratio(self, delta_applied: Rect, ratio: (u32, u32), min_w: u32, min_h: u32) -> Rect {
+        if ratio.0 == 0 || ratio.1 == 0 {
+            return delta_applied;
+        }
+        let mut r = delta_applied;
+        if matches!(self, ResizeEdge::Top | ResizeEdge::Bottom) {
+            let new_w = ((r.height as u64 * ratio.0 as u64) / ratio.1 as u64).max(min_w as u64) as u32;
+            r.width = new_w;
+        } else {
+            let new_h = ((r.width as u64 * ratio.1 as u64) / ratio.0 as u64).max(min_h as u64) as u32;
+            if matches!(self, ResizeEdge::TopLeft | ResizeEdge::TopRight) {
+                r.y = delta_applied.bottom() - new_h as i32;
+            }
+            r.height = new_h;
         }
         r
     }
@@ -1218,5 +1272,61 @@ mod tests {
         let r = Rect::new(0, 0, 100, 100);
         let out = ResizeEdge::Right.apply_delta(r, -500, 0, 50, 50);
         assert_eq!(out.width, 50);
+    }
+
+    #[test]
+    fn aspect_ratio_derives_height_from_width_on_a_horizontal_edge() {
+        let r = Rect::new(0, 0, 900, 300);
+        let out = ResizeEdge::Right.apply_aspect_ratio(r, (9, 16), 1, 1);
+        assert_eq!(out, Rect::new(0, 0, 900, 1600));
+    }
+
+    #[test]
+    fn aspect_ratio_derives_width_from_height_on_a_pure_vertical_edge() {
+        // Bottom only ever changes height in `apply_delta` - deriving
+        // width back from a height that never changed would leave the
+        // edge under the cursor not tracking the cursor, the actual bug
+        // this split exists to avoid.
+        let r = Rect::new(0, 0, 300, 1600);
+        let out = ResizeEdge::Bottom.apply_aspect_ratio(r, (9, 16), 1, 1);
+        assert_eq!(out, Rect::new(0, 0, 900, 1600));
+    }
+
+    #[test]
+    fn aspect_ratio_on_top_left_keeps_the_bottom_right_corner_fixed() {
+        // TopLeft's own `apply_delta` anchor is the bottom-right corner
+        // (dragging up-left grows the window while its bottom-right stays
+        // put); the aspect-ratio pass must keep that same corner fixed
+        // when it re-derives height, or a locked-ratio window dragged
+        // from its top would visibly grow the wrong way.
+        //
+        // Simulates a diagonal drag already processed by `apply_delta`:
+        // dragged left by 100 (width 400 -> 500, x 0 -> -100) and up by
+        // 300 (height 900 -> 1200, y 0 -> -300).
+        let delta_applied = Rect::new(-100, -300, 500, 1200);
+        let out = ResizeEdge::TopLeft.apply_aspect_ratio(delta_applied, (9, 16), 1, 1);
+        // height is derived from the (unchanged-by-this-pass) width: 500 * 16 / 9 = 888 (floor).
+        assert_eq!(out.height, 888);
+        // The bottom-right corner - not `y` itself - is what must be
+        // preserved, and matches the *original* rect's own bottom (900)
+        // too, since `apply_delta`'s own TopLeft anchor already keeps
+        // bottom fixed at 900 before this pass ever runs.
+        assert_eq!(out.y + out.height as i32, delta_applied.bottom());
+        assert_eq!(delta_applied.bottom(), 900);
+        assert_eq!(out.bottom(), 900);
+    }
+
+    #[test]
+    fn aspect_ratio_never_shrinks_below_the_given_minimum() {
+        let r = Rect::new(0, 0, 10, 10);
+        let out = ResizeEdge::Right.apply_aspect_ratio(r, (9, 16), 50, 50);
+        assert!(out.height >= 50);
+    }
+
+    #[test]
+    fn a_zero_component_ratio_is_a_no_op_not_a_division_by_zero() {
+        let r = Rect::new(0, 0, 300, 900);
+        assert_eq!(ResizeEdge::Right.apply_aspect_ratio(r, (0, 16), 1, 1), r);
+        assert_eq!(ResizeEdge::Right.apply_aspect_ratio(r, (9, 0), 1, 1), r);
     }
 }

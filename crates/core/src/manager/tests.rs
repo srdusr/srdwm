@@ -32,6 +32,54 @@
     }
 
     #[test]
+    fn phone_mode_maximizes_a_new_window_by_default() {
+        let mut wm = wm_with_monitor();
+        wm.phone_mode = true;
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "a"));
+        assert!(wm.window(id).unwrap().maximized);
+    }
+
+    #[test]
+    fn phone_mode_does_not_maximize_a_window_a_rule_floats() {
+        let mut wm = wm_with_monitor();
+        wm.phone_mode = true;
+        wm.add_rule(WindowRule {
+            matcher: crate::rules::WindowMatch { class: Some("popup".into()), ..Default::default() },
+            actions: crate::rules::WindowRuleActions { floating: Some(true), ..Default::default() },
+        });
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "a");
+        w.app_id = "popup".into();
+        wm.add_window(w);
+        assert!(!wm.window(id).unwrap().maximized, "a window a rule explicitly floats is meant to stay small, phone mode or not");
+    }
+
+    #[test]
+    fn a_rules_explicit_maximized_false_still_wins_in_phone_mode() {
+        let mut wm = wm_with_monitor();
+        wm.phone_mode = true;
+        wm.add_rule(WindowRule {
+            matcher: crate::rules::WindowMatch { class: Some("widget".into()), ..Default::default() },
+            actions: crate::rules::WindowRuleActions { maximized: Some(false), ..Default::default() },
+        });
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "a");
+        w.app_id = "widget".into();
+        wm.add_window(w);
+        assert!(!wm.window(id).unwrap().maximized, "an explicit rule action must win over phone mode's own default");
+    }
+
+    #[test]
+    fn phone_mode_off_leaves_ordinary_placement_unaffected() {
+        let mut wm = wm_with_monitor();
+        assert!(!wm.phone_mode, "sanity: default is off");
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "a"));
+        assert!(!wm.window(id).unwrap().maximized);
+    }
+
+    #[test]
     fn a_rules_decorated_action_still_overrides_the_theme_default() {
         let mut wm = wm_with_monitor();
         wm.theme.default_decorated = false;
@@ -44,6 +92,36 @@
         w.app_id = "nemo".into();
         wm.add_window(w);
         assert!(wm.window(id).unwrap().decorated, "an explicit rule must still win over the theme-wide default");
+    }
+
+    #[test]
+    fn a_decorated_false_rule_applies_once_app_id_becomes_known_after_creation() {
+        // The real native-Wayland scenario `Window::rules_applied`'s own
+        // doc comment describes: `add_window` sees an empty title/app_id
+        // (xdg_toplevel's own set_app_id/set_title requests land on a
+        // later commit, not at surface creation), so the real rule match
+        // has to wait for `reapply_rules_if_pending` - this is the one
+        // path `a_rules_decorated_action_still_overrides_the_theme_default`
+        // above does NOT cover, since that test sets `app_id` before ever
+        // calling `add_window` at all.
+        let mut wm = wm_with_monitor();
+        wm.add_rule(WindowRule {
+            matcher: crate::rules::WindowMatch { class: Some("firefox".into()), ..Default::default() },
+            actions: crate::rules::WindowRuleActions { decorated: Some(false), ..Default::default() },
+        });
+        let id = wm.alloc_window_id();
+        let w = Window::new(id, "");
+        wm.add_window(w);
+        assert!(wm.window(id).unwrap().decorated, "nothing could have matched yet with an empty app_id - still the theme default (true)");
+        assert!(!wm.window(id).unwrap().rules_applied, "must stay pending, not falsely marked settled");
+
+        if let Some(win) = wm.window_mut(id) {
+            win.app_id = "firefox".into();
+            win.title = "Mozilla Firefox".into();
+        }
+        let reapplied = wm.reapply_rules_if_pending(id);
+        assert!(reapplied, "the now-real app_id should let the firefox rule match");
+        assert!(!wm.window(id).unwrap().decorated, "the rule's decorated=false must actually take effect");
     }
 
     #[test]
@@ -256,6 +334,55 @@
         wm.add_window(w2);
         let placed = wm.window(b).unwrap().geometry;
         assert_eq!((placed.width, placed.height), (800, 600), "a different app's default size must be untouched by alacritty's remembered size");
+    }
+
+    #[test]
+    fn a_dragged_window_remembers_its_new_position_for_the_next_same_app_window() {
+        let mut wm = wm_with_monitor();
+        wm.set_layout(wm.current_workspace(), "tiling");
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.app_id = "alacritty".into();
+        w.geometry = Rect::new(100, 100, 300, 200);
+        wm.add_window(w);
+        wm.start_drag(a, 150, 150);
+        wm.update_drag(650, 550);
+        wm.end_drag();
+        let dragged_to = wm.window(a).unwrap().geometry;
+
+        let b = wm.alloc_window_id();
+        let mut w2 = Window::new(b, "b");
+        w2.app_id = "alacritty".into();
+        w2.geometry = Rect::new(0, 0, 800, 600);
+        wm.add_window(w2);
+        let placed = wm.window(b).unwrap().geometry;
+        assert_eq!((placed.x, placed.y), (dragged_to.x, dragged_to.y), "the second alacritty window must open where the first was dragged to");
+    }
+
+    #[test]
+    fn a_remembered_position_on_a_monitor_that_no_longer_exists_falls_back_to_placement() {
+        let mut wm = wm_with_monitor();
+        wm.set_layout(wm.current_workspace(), "dynamic");
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.app_id = "alacritty".into();
+        w.geometry = Rect::new(100, 100, 300, 200);
+        wm.add_window(w);
+        wm.start_drag(a, 150, 150);
+        wm.update_drag(150, 150);
+        wm.end_drag();
+        // Simulate the monitor that position was remembered on being gone
+        // (e.g. an external display unplugged since the last session) --
+        // the only monitor left doesn't cover the remembered point at all.
+        wm.set_monitors(vec![Monitor::new(1, "different", Rect::new(5000, 5000, 1920, 1080))]);
+
+        let b = wm.alloc_window_id();
+        let mut w2 = Window::new(b, "b");
+        w2.app_id = "alacritty".into();
+        w2.geometry = Rect::new(0, 0, 800, 600);
+        wm.add_window(w2);
+        let placed = wm.window(b).unwrap().geometry;
+        assert!(placed.x >= 5000, "an invalid remembered position must fall back to placement on a real, currently-connected monitor, not be reused blindly");
     }
 
     #[test]
@@ -1178,12 +1305,20 @@
     }
 
     #[test]
-    fn a_focused_window_still_wins_over_the_pointers_monitor() {
-        // The pointer is only a fallback for when nothing is focused --
-        // see `add_window`'s own doc comment for why focus stays the
-        // primary signal (matches every mainstream desktop's "new window
-        // opens where you're working" convention, which is about the
-        // focused context, not incidental cursor position).
+    fn the_pointers_monitor_wins_over_a_stale_focused_window() {
+        // Real bug, reported live: with a window focused on the first
+        // monitor but the pointer now over the *second* monitor's bare
+        // desktop (an empty workspace, or hovering a panel/dock that isn't
+        // a core-tracked window - neither ever changes `self.focused`), a
+        // freshly launched app still landed on the first monitor, where
+        // the stale focus pointed, not the second monitor the user was
+        // demonstrably at. `self.focused` only updates when a real window
+        // is actually focused, so it can't tell "still working over there"
+        // apart from "attention moved elsewhere, nothing there has been
+        // focused yet" - `pointer_monitor` can, since it updates on every
+        // motion event, so it wins first. See `add_window`'s own doc
+        // comment for the full reasoning and the comparable-compositor
+        // precedent (Hyprland, Mutter, sway's `focus_follows_mouse`).
         let mut wm = WindowManager::new();
         wm.set_monitors(two_monitors());
 
@@ -1193,8 +1328,8 @@
         wm.set_pointer_monitor(Some(1));
 
         let second = wm.alloc_window_id();
-        wm.add_window(Window::new(second, "should-still-follow-focus"));
-        assert_eq!(wm.window(second).unwrap().monitor, 0, "a focused window's monitor must win over the pointer's");
+        wm.add_window(Window::new(second, "should-follow-the-pointer"));
+        assert_eq!(wm.window(second).unwrap().monitor, 1, "the pointer's monitor must win over a stale focused window's");
     }
 
     // ---- Fullscreen ------------------------------------------------------

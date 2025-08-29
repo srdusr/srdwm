@@ -94,6 +94,17 @@ impl WindowManager {
             if let (Some(zone), Some(w)) = (snapped, self.windows.get_mut(&drag.window)) {
                 w.geometry = zone;
             }
+            // Remembers this app's new position (not just `end_resize`'s
+            // size) for its *next* window - see `remembered_geometry`'s
+            // own doc comment. Deliberately reads geometry *after* the
+            // snap-zone check just above: a drag that ends in a snap
+            // remembers the snapped position/size, matching what the user
+            // actually sees settle, not the raw pre-snap drop point.
+            if let Some(w) = self.windows.get(&drag.window) {
+                if !w.app_id.is_empty() {
+                    self.remembered_geometry.insert(w.app_id.clone(), (w.geometry.x, w.geometry.y, w.geometry.width, w.geometry.height));
+                }
+            }
         }
     }
 
@@ -111,7 +122,14 @@ impl WindowManager {
     pub fn update_resize(&mut self, x: i32, y: i32) {
         let Some(r) = &self.resize else { return };
         let (dx, dy) = (x - r.start_x, y - r.start_y);
-        let new_geom = r.edge.apply_delta(r.orig, dx, dy, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+        let mut new_geom = r.edge.apply_delta(r.orig, dx, dy, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+        // `Window::aspect_ratio`'s own doc comment: a locked-ratio window
+        // (the "phone monitor" case, concretely) re-derives one dimension
+        // from the other here, on top of the ordinary delta above, rather
+        // than needing a second, separate resize code path.
+        if let Some(ratio) = self.windows.get(&r.window).and_then(|w| w.aspect_ratio) {
+            new_geom = r.edge.apply_aspect_ratio(new_geom, ratio, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+        }
         // Same live `w.monitor` correction as `update_drag`'s own doc
         // comment explains - a resize can cross a monitor boundary at
         // the edge being dragged just as easily as a drag can carry the
@@ -138,11 +156,36 @@ impl WindowManager {
         if let Some(r) = &self.resize {
             if let Some(w) = self.windows.get(&r.window) {
                 if !w.app_id.is_empty() {
-                    self.remembered_sizes.insert(w.app_id.clone(), (w.geometry.width, w.geometry.height));
+                    self.remembered_geometry.insert(w.app_id.clone(), (w.geometry.x, w.geometry.y, w.geometry.width, w.geometry.height));
                 }
             }
         }
         self.resize = None;
+    }
+
+    /// The remembered position+size for `app_id`, if any - read by
+    /// `add_window` when placing a fresh window, and by `crates/wayland/
+    /// src/window_memory.rs` to decide what still needs persisting after a
+    /// live update. See `remembered_geometry`'s own doc comment.
+    pub fn remembered_geometry(&self, app_id: &str) -> Option<(i32, i32, u32, u32)> {
+        self.remembered_geometry.get(app_id).copied()
+    }
+
+    /// Seeds (or overwrites) the remembered position+size for `app_id`
+    /// directly, bypassing the normal "only an interactive drag/resize
+    /// updates this" rule - the one legitimate reason to do that is
+    /// `crates/wayland/src/window_memory.rs` restoring what was persisted
+    /// from a *previous* session at startup, before any real drag/resize
+    /// has happened this run.
+    pub fn set_remembered_geometry(&mut self, app_id: String, geometry: (i32, i32, u32, u32)) {
+        self.remembered_geometry.insert(app_id, geometry);
+    }
+
+    /// Every remembered `app_id` and its geometry - what `window_memory.rs`
+    /// iterates to persist the full table (e.g. on a clean shutdown), not
+    /// just whatever changed most recently.
+    pub fn all_remembered_geometry(&self) -> impl Iterator<Item = (&str, (i32, i32, u32, u32))> {
+        self.remembered_geometry.iter().map(|(k, &v)| (k.as_str(), v))
     }
 
     pub fn is_resizing(&self) -> bool {
