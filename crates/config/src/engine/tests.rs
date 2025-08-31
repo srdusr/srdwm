@@ -197,6 +197,32 @@
     }
 
     #[test]
+    fn srd_rule_aspect_ratio_applies_a_parsed_w_h_pair_on_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        engine.lua.load(r#"srd.rule({ class = "scrcpy" }, { aspect_ratio = "9:16" })"#).exec().unwrap();
+        let id = {
+            let mut wm = wm.borrow_mut();
+            let id = wm.alloc_window_id();
+            let mut w = srdwm_core::Window::new(id, "phone");
+            w.app_id = "scrcpy".into();
+            wm.add_window(w);
+            id
+        };
+        assert_eq!(wm.borrow().window(id).unwrap().aspect_ratio, Some((9, 16)));
+    }
+
+    #[test]
+    fn srd_rule_rejects_a_malformed_aspect_ratio() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        let err = engine.lua.load(r#"srd.rule({ class = "x" }, { aspect_ratio = "sixteen by nine" })"#).exec();
+        assert!(err.is_err());
+    }
+
+    #[test]
     fn srd_monitor_split_stores_a_split_request_by_connector_name() {
         let dir = tempfile::tempdir().unwrap();
         let wm = Rc::new(RefCell::new(WindowManager::new()));

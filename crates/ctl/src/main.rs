@@ -178,14 +178,14 @@ fn build_request(args: &[String]) -> Result<String, String> {
         // as booleans at all, not a string it then has to reject.
         Some("set") => {
             let key = args.get(1).ok_or(
-                "set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/shadows/rounded_corners/animations/night_light/reading_mode/decoration_mode)",
+                "set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/shadows/rounded_corners/animations/night_light/reading_mode/phone_mode/decoration_mode)",
             )?;
             let raw = args.get(2).ok_or("set needs a value")?;
             let value = match key.as_str() {
                 "border_width" | "corner_radius" | "gap_inner" | "gap_outer" => {
                     raw.parse::<u64>().map_err(|_| format!("{key} needs a numeric value"))?.to_string()
                 }
-                "shadows" | "rounded_corners" | "animations" | "night_light" | "reading_mode" => match raw.as_str() {
+                "shadows" | "rounded_corners" | "animations" | "night_light" | "reading_mode" | "phone_mode" => match raw.as_str() {
                     "true" | "false" => raw.clone(),
                     _ => return Err(format!("{key} needs 'true' or 'false'")),
                 },
@@ -225,7 +225,7 @@ fn build_request(args: &[String]) -> Result<String, String> {
 fn build_dispatch(args: &[String]) -> Result<String, String> {
     let verb = args.first().ok_or("dispatch needs an action, e.g. 'focus', 'close', 'toggle maximize', 'move window'")?;
     let usage_hint =
-        "expected one of: focus, close, lock, toggle visibility/maximize/fullscreen/floating/pinned, move window/workspace, activate workspace, cycle keyboard layout";
+        "expected one of: focus, close, lock, toggle visibility/maximize/fullscreen/floating/pinned, move window/workspace, activate workspace, cycle keyboard layout, pin input, unpin input";
     match verb.as_str() {
         "focus" | "close" => {
             let id: u64 = args.get(1).ok_or("dispatch needs an id")?.parse().map_err(|_| "id must be a number".to_string())?;
@@ -321,6 +321,23 @@ fn build_dispatch(args: &[String]) -> Result<String, String> {
                 _ => Err(format!("unknown 'set output' target '{noun}' - {usage_hint}")),
             }
         }
+        // `srd dispatch pin input <pid> <window-id>` / `srd dispatch
+        // unpin input <pid>` - the CLI surface for `pin_input`, Phase 2
+        // of the multi-cursor plan (`docs/TODO.md`). `<pid>` is the
+        // controlling tool's own process id (`std::process::id()` from
+        // whichever program created the `zwlr_virtual_pointer_unstable_v1`
+        // object to be pinned), not a window or workspace id.
+        "pin" | "unpin" => {
+            if args.get(1).map(String::as_str) != Some("input") {
+                return Err(format!("'{verb}' only supports 'input' - {usage_hint}"));
+            }
+            let pid: i64 = args.get(2).ok_or("dispatch needs a pid")?.parse().map_err(|_| "pid must be a number".to_string())?;
+            if verb == "unpin" {
+                return Ok(format!(r#"{{"cmd":"pin_input","pid":{pid}}}"#));
+            }
+            let id: u64 = args.get(3).ok_or("'pin input' needs a window id")?.parse().map_err(|_| "window id must be a number".to_string())?;
+            Ok(format!(r#"{{"cmd":"pin_input","pid":{pid},"id":{id}}}"#))
+        }
         _ => Err(format!("unknown dispatch action '{verb}' - {usage_hint}")),
     }
 }
@@ -347,6 +364,8 @@ fn print_usage() {
     eprintln!("  srd dispatch cycle keyboard layout");
     eprintln!("  srd dispatch set output position <name|id> <x> <y>");
     eprintln!("  srd dispatch set output enabled <name|id> <true|false>");
+    eprintln!("  srd dispatch pin input <pid> <window-id>");
+    eprintln!("  srd dispatch unpin input <pid>");
     eprintln!("  srd capture workspace <id> <path> [<width>x<height>]");
     eprintln!("  srd set border_width <n>");
     eprintln!("  srd set border_color <#hex>");
@@ -358,6 +377,7 @@ fn print_usage() {
     eprintln!("  srd set animations <true|false>");
     eprintln!("  srd set night_light <true|false>");
     eprintln!("  srd set reading_mode <true|false>");
+    eprintln!("  srd set phone_mode <true|false>");
     eprintln!("  srd set decoration_mode <server|client>");
 }
 
@@ -436,12 +456,45 @@ mod tests {
     }
 
     #[test]
+    fn set_phone_mode_accepts_only_true_or_false() {
+        assert_eq!(build_request(&args(&["set", "phone_mode", "true"])).unwrap(), r#"{"cmd":"set","key":"phone_mode","value":true}"#);
+        assert_eq!(build_request(&args(&["set", "phone_mode", "false"])).unwrap(), r#"{"cmd":"set","key":"phone_mode","value":false}"#);
+        assert!(build_request(&args(&["set", "phone_mode", "maybe"])).is_err());
+    }
+
+    #[test]
     fn set_output_enabled_accepts_a_numeric_id_and_a_name() {
         assert_eq!(build_request(&args(&["dispatch", "set", "output", "enabled", "1", "false"])).unwrap(), r#"{"cmd":"set_output_enabled","id":1,"enabled":false}"#);
         assert_eq!(
             build_request(&args(&["dispatch", "set", "output", "enabled", "HDMI-A-1", "true"])).unwrap(),
             r#"{"cmd":"set_output_enabled","name":"HDMI-A-1","enabled":true}"#
         );
+    }
+
+    #[test]
+    fn pin_input_builds_a_request_with_pid_and_window_id() {
+        assert_eq!(build_request(&args(&["dispatch", "pin", "input", "12345", "7"])).unwrap(), r#"{"cmd":"pin_input","pid":12345,"id":7}"#);
+    }
+
+    #[test]
+    fn unpin_input_builds_a_request_with_no_window_id() {
+        assert_eq!(build_request(&args(&["dispatch", "unpin", "input", "12345"])).unwrap(), r#"{"cmd":"pin_input","pid":12345}"#);
+    }
+
+    #[test]
+    fn pin_input_requires_the_literal_noun_input() {
+        assert!(build_request(&args(&["dispatch", "pin", "output", "12345", "7"])).is_err());
+    }
+
+    #[test]
+    fn pin_input_requires_a_window_id_but_unpin_does_not() {
+        assert!(build_request(&args(&["dispatch", "pin", "input", "12345"])).is_err(), "'pin input' needs a window id");
+        assert!(build_request(&args(&["dispatch", "unpin", "input", "12345", "7"])).is_ok(), "'unpin input' ignores a trailing window id rather than erroring");
+    }
+
+    #[test]
+    fn pin_input_rejects_a_non_numeric_pid() {
+        assert!(build_request(&args(&["dispatch", "pin", "input", "not-a-number", "7"])).is_err());
     }
 
     #[test]

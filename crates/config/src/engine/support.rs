@@ -154,11 +154,25 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     // every other ordinary flag rather than left absent for a backend to
     // decide.
     set("general.gpu", Bool(false));
+    // `false`: opt-in single-app-at-a-time placement, off by default so
+    // an ordinary desktop session's floating/tiling behavior is
+    // completely unaffected - see `WindowManager::phone_mode`'s own doc
+    // comment.
+    set("general.phone_mode", Bool(false));
     // Real desktop icons (Home/Computer/Trash plus `~/Desktop`'s own
     // contents) on by default - see `WindowManager::desktop_icons_
     // enabled`'s own doc comment for why this, unlike `general.gpu` just
     // above, doesn't need an opt-in safety net.
     set("general.desktop_icons", Bool(true));
+    // On by default - see `WindowManager::desktop_icons_all_monitors`'s
+    // own doc comment.
+    set("general.desktop_icons_all_monitors", Bool(true));
+    // `0` (no static reservation) by default - see `WindowManager::
+    // reserve_top`'s own doc comment for what this is and why.
+    set("general.reserve_top", Number(0.0));
+    set("general.reserve_bottom", Number(0.0));
+    set("general.reserve_left", Number(0.0));
+    set("general.reserve_right", Number(0.0));
     // Empty by default - see `WindowManager::file_manager`'s own doc
     // comment: empty means "dispatch via `xdg-open`", not "no file manager
     // configured, do nothing".

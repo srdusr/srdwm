@@ -128,8 +128,8 @@ impl Engine {
     /// class_regex = "...", instance = "..." }, { floating = true,
     /// workspace = 2, x = .., y = .., width = .., height = ..,
     /// decorated = false, border_color = {r,g,b}, border_width = 2,
-    /// corner_radius = 10, maximized = true, opacity = 0.9 })`. At least
-    /// one matcher field is
+    /// corner_radius = 10, maximized = true, opacity = 0.9,
+    /// aspect_ratio = "9:16" })`. At least one matcher field is
     /// required; unmatched rules apply nothing.
     ///
     /// `title`/`class` are plain substring/exact match, cheap and cover
@@ -172,6 +172,28 @@ impl Engine {
                     _ => None,
                 }
             };
+            // `aspect_ratio = "9:16"` - the "phone monitor / special
+            // workspace" ask's own real, scoped answer (see `Window::
+            // aspect_ratio`'s own doc comment in `crates/core`): a rule
+            // matching any VM/emulator/`scrcpy` window by `app_id` keeps
+            // it phone-shaped through a resize, with no Android-specific
+            // (or even VM-specific) code anywhere in this compositor.
+            // `"W:H"` (a plain string, not a table) matches this
+            // project's own `border_color = {r,g,b}` precedent for "a
+            // structured value needs its own small parse", just with a
+            // string instead of a table since a ratio is conventionally
+            // written that way everywhere (`16:9`, `9:16`, `4:3`).
+            let aspect_ratio: Option<(u32, u32)> = match actions.get::<_, Option<String>>("aspect_ratio")? {
+                Some(spec) => {
+                    let (w, h) = spec
+                        .split_once(':')
+                        .and_then(|(w, h)| Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?)))
+                        .filter(|(w, h)| *w > 0 && *h > 0)
+                        .ok_or_else(|| mlua::Error::RuntimeError(format!("srd.rule: aspect_ratio must be \"W:H\" with positive integers, got {spec:?}")))?;
+                    Some((w, h))
+                }
+                None => None,
+            };
 
             let rule = WindowRule {
                 matcher: WindowMatch { title_contains, class, title_regex, class_regex, instance },
@@ -187,6 +209,7 @@ impl Engine {
                     pinned: actions.get("pinned")?,
                     opacity: actions.get("opacity")?,
                     resize_margin: actions.get("resize_margin")?,
+                    aspect_ratio,
                 },
             };
             state.borrow().wm.borrow_mut().add_rule(rule);

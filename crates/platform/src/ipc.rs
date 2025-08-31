@@ -359,6 +359,12 @@ struct SettingsResponse {
     animations: bool,
     night_light: bool,
     reading_mode: bool,
+    /// `WindowManager::phone_mode`'s own doc comment: read-only here so a
+    /// shell panel (AGS) can adapt its own chrome to the same
+    /// single-app-at-a-time signal srdwm's own placement already uses,
+    /// without a second, separate way to ask "is this a phone-shaped
+    /// session".
+    phone_mode: bool,
 }
 
 /// `"keyboard_layout"`'s one-shot reply shape - the active XKB layout's
@@ -740,6 +746,7 @@ fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<WindowManager
                 animations: wm.animations_enabled,
                 night_light: wm.color_filter == srdwm_core::ColorFilter::NightLight,
                 reading_mode: wm.color_filter == srdwm_core::ColorFilter::ReadingMode,
+                phone_mode: wm.phone_mode,
             };
             (serde_json::to_vec(&settings).unwrap_or_default(), false)
         }
@@ -815,6 +822,28 @@ fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<WindowManager
         // doc comment.
         "lock" => {
             wm.borrow_mut().request_lock();
+            (ok(), true)
+        }
+        // `{"cmd":"pin_input","pid":<client pid>,"id":<window id>}` pins
+        // every `zwlr_virtual_pointer_unstable_v1` object that client owns
+        // to window `id` - Phase 2 of the multi-cursor plan (`docs/
+        // TODO.md`), the primitive an agent-controlling tool needs to
+        // operate one specific window without moving the human's own
+        // cursor or stealing focus. Omitting `id` unpins instead (`{"cmd":
+        // "pin_input","pid":<pid>}`) - one command for both directions,
+        // since "pin" and "unpin" are really just "set the pin to Some or
+        // None", the same shape `set_output_enabled`'s own boolean already
+        // uses for two related actions on one dispatch. Keyed by pid, not
+        // an opaque per-object id nothing outside the Wayland backend
+        // could ever learn - a controlling tool already knows its own
+        // pid (`std::process::id()`) for free. Queued via `request_pin_
+        // input` and applied by the Wayland backend on its own next poll,
+        // same one-poll-tick latency `set_output_position` already has.
+        "pin_input" => {
+            let Some(pid) = req.get("pid").and_then(|v| v.as_i64()) else {
+                return (err("missing pid"), false);
+            };
+            wm.borrow_mut().request_pin_input(pid as i32, id);
             (ok(), true)
         }
         // `srd.window.maximize()`/`.fullscreen()`'s exact IPC-side
@@ -1172,6 +1201,20 @@ fn handle_set(req: &serde_json::Value, wm: &std::rc::Rc<std::cell::RefCell<Windo
         "animations" => {
             let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("animations needs a boolean value"), false) };
             wm.borrow_mut().animations_enabled = v;
+            (ok(), true)
+        }
+        // `srd set phone_mode <bool>` - live equivalent of `general.
+        // phone_mode`, same "config-settable at startup, also live via
+        // `srd set`" shape as `animations`/`shadows`/`rounded_corners`
+        // just above. Only ever changes how the *next* new window opens
+        // (`WindowManager::add_window`'s own use of this) - `changed`
+        // is still `true` since a subscriber (a shell panel adapting its
+        // own chrome to this same signal) genuinely has something new to
+        // read from `srd settings`, even though no *window* moves as a
+        // direct result of this call alone.
+        "phone_mode" => {
+            let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("phone_mode needs a boolean value"), false) };
+            wm.borrow_mut().phone_mode = v;
             (ok(), true)
         }
         "blur" => (err("blur is not supported - no GPU shader path on this compositor's software renderer yet"), false),
