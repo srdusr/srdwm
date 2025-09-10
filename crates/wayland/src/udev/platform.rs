@@ -16,6 +16,12 @@ pub struct UdevPlatform {
     /// Last time the unconditional end-of-cycle `render_udev_frame()` call
     /// actually ran - see its own call site for why.
     last_render: Instant,
+    /// Sticky designation of which connector `monitors()` reports as
+    /// primary - see that function's own doc comment on `primary_name`
+    /// for why this can't be recomputed from `udev.heads`' own iteration
+    /// order every call. `None` until the first `monitors()` call ever
+    /// runs.
+    primary_connector: Option<String>,
 }
 
 impl UdevPlatform {
@@ -158,6 +164,7 @@ impl UdevPlatform {
             heads,
             active: true,
             pointer_pos: (width as f64 / 2.0, height as f64 / 2.0).into(),
+            secondary_cursors: std::collections::HashMap::new(),
             session: session.clone(),
             disabled_connectors: std::collections::HashSet::new(),
             last_rendered_workspace: None,
@@ -190,6 +197,7 @@ impl UdevPlatform {
                 |_| true,
             ),
             _screencopy_state: crate::screencopy::ScreencopyState::new::<CompState>(&display_handle),
+            _virtual_pointer_state: crate::virtual_pointer::VirtualPointerState::new::<CompState>(&display_handle),
             screencopy_pending: Vec::new(),
             _appmenu_state: crate::appmenu::AppmenuManagerState::new::<CompState>(&display_handle),
             _virtual_keyboard_state: smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState::new::<CompState, _>(&display_handle, |_client| true),
@@ -233,6 +241,8 @@ impl UdevPlatform {
             desktop_icons: None,
             desktop_icon_buffers: HashMap::new(),
             desktop_icon_drag: None,
+            desktop_marquee: None,
+            marquee_buffers: Default::default(),
             desktop_menu: None,
             desktop_menu_buffer: None,
             last_icon_click: None,
@@ -240,6 +250,7 @@ impl UdevPlatform {
             wm: wm.clone(),
             surface_to_id: HashMap::new(),
             id_to_window: HashMap::new(),
+            virtual_pointers: Vec::new(),
             dead_layer_surfaces: HashSet::new(),
             hidden_layer_surfaces: HashMap::new(),
             layer_surfaces_shown_once: HashSet::new(),
@@ -279,6 +290,17 @@ impl UdevPlatform {
         // default, un-restored arrangement, not even for one frame, since
         // the socket a client would need to connect to doesn't exist yet.
         state.restore_monitor_layout();
+
+        // Per-app remembered window position/size (`window_memory.rs`) --
+        // no ordering requirement as strict as the layout restore just
+        // above (a window can't map before a client connects, and the
+        // socket isn't even bound yet), but seeded here anyway, at the
+        // same "before anything else can possibly run" point, so there's
+        // no window in this compositor's own startup where a first window
+        // could map before this table is populated.
+        for (app_id, g) in crate::window_memory::load() {
+            state.wm.borrow_mut().set_remembered_geometry(app_id, (g.x, g.y, g.width, g.height));
+        }
 
         let listener = ListeningSocket::bind_auto("wayland", 0..32).map_err(err)?;
         if let Some(name) = listener.socket_name() {
@@ -326,11 +348,52 @@ impl UdevPlatform {
         if let Err(e) = register_udev_monitor(&handle, &seat_name) {
             log::warn!("udev: connector hotplug unavailable ({e}); monitors are fixed at startup");
         }
-        if let Err(e) = crate::xwayland::spawn(&handle, &display_handle) {
-            log::warn!("XWayland unavailable ({e}); X11-only clients will not run");
-        }
+        // Deferred to the loop's first idle tick, not called here directly.
+        // This function still runs inside `connect()`, before the caller
+        // ever calls `event_loop.run()` - so a direct call here forks
+        // XWayland while nothing is actually dispatching this process's own
+        // Wayland socket yet. XWayland connects immediately (`WAYLAND_SOCKET`
+        // is already a live fd, no accept() to wait for) and starts its own
+        // registry/seat/keyboard handshake right away; if that handshake's
+        // response - specifically the `wl_keyboard.keymap` event carrying
+        // this compositor's real `pc105+inet`-derived keymap - doesn't get
+        // serviced before XWayland's own internal timeout, XWayland falls
+        // back to compiling a keymap of its own with no real RMLVO behind
+        // it, which is exactly the "Failed to load keymap. Loading default
+        // keymap instead" line seen in `xwayland.log` right before "Fatal
+        // server error: Failed to activate virtual core keyboard: 2" --
+        // confirmed to reproduce on every single real startup (53 identical
+        // crashes across one session's restarts) while an external XWayland
+        // spawned against this exact same, already-*running* compositor
+        // (same socket, same keymap, same env-clearing, same `-wm`/
+        // `-displayfd` fd-passing - checked by replicating smithay's own
+        // `XWayland::spawn` byte for byte in a standalone harness) never
+        // once reproduced it. `insert_idle` runs its callback on the loop's
+        // own first dispatch pass, which only happens once `event_loop.run`
+        // is actually pumping this process's sockets - moving the fork
+        // there closes the exact gap between "child process exists and
+        // starts talking" and "someone is listening," which nothing else
+        // about this fix changes.
+        let handle_for_xwayland = handle.clone();
+        let idle_display_handle = display_handle.clone();
+        handle.insert_idle(move |_state| {
+            if let Err(e) = crate::xwayland::spawn(&handle_for_xwayland, &idle_display_handle) {
+                log::warn!("XWayland unavailable ({e}); X11-only clients will not run");
+            }
+        });
 
-        Ok(Self { event_loop, display: dh, state, listener, clients: Vec::new(), pending, ipc, last_ipc_poll: Instant::now(), last_render: Instant::now() })
+        Ok(Self {
+            event_loop,
+            display: dh,
+            state,
+            listener,
+            clients: Vec::new(),
+            pending,
+            ipc,
+            last_ipc_poll: Instant::now(),
+            last_render: Instant::now(),
+            primary_connector: None,
+        })
     }
 
     fn accept_clients(&mut self) -> PlatformResult<()> {
@@ -550,6 +613,14 @@ impl Platform for UdevPlatform {
                 self.state.disable_connector_by_name(&name);
             }
         }
+        // Applies any `srd dispatch pin input`/`unpin input` IPC requests
+        // queued since the last poll - Phase 2 of the multi-cursor plan,
+        // see `virtual_pointer.rs`'s module doc comment and `CompState::
+        // set_virtual_pointer_pin`'s own doc comment for the full design.
+        let pin_requests = self.state.wm.borrow_mut().drain_pin_input_requests();
+        for (pid, window) in pin_requests {
+            self.state.set_virtual_pointer_pin(pid, window);
+        }
         // Throttled the same way and for the same underlying reason as the
         // `ipc.poll()` call above - this is the *other*, larger half of
         // this cycle's needless work at the dead-pipe-driven spin rate.
@@ -597,6 +668,50 @@ impl Platform for UdevPlatform {
         let wm = wm.borrow();
         let mut out = Vec::new();
         let mut next_id: u32 = 0;
+        // Sticky by connector name, not "whichever head is first in `udev.
+        // heads` this call" - that positional rule looked harmless (heads
+        // are only ever appended, in probe order, at startup) but
+        // `enable_connector_by_name` pushes a re-enabled connector back
+        // onto the *end* of the vec, same as a fresh hotplug - so cycling
+        // any non-first connector's own enabled state (confirmed live: a
+        // peer session repeatedly toggling one monitor for unrelated
+        // testing) never moves it, but disabling the connector that
+        // currently sits first and re-enabling it does, silently handing
+        // "primary" to whatever was second. Reported live as this
+        // session's own desktop icons (pinned to whichever monitor `Platform
+        // ::monitors()` calls primary) "sometimes showing on the other
+        // monitor" with no action anyone took that looked related. Once a
+        // primary connector name is chosen, it keeps that designation
+        // across every later call as long as it's still connected --
+        // falling back to the first head only when it genuinely isn't
+        // (unplugged, or the very first call this process ever makes).
+        // The *first* fallback pick (when nothing is sticky yet) used to be
+        // `udev.heads.first()` - whichever connector DRM happened to probe
+        // first, which has no relationship to the user's actual layout.
+        // Reported live on this machine: with an "extend left" saved layout
+        // (external monitor at negative x, laptop panel at x=0), the
+        // external monitor still got "primary" at boot whenever it happened
+        // to probe before the panel, dragging desktop icons and every
+        // primary-monitor-anchored window placement onto it - exactly the
+        // "apps open on the wrong monitor" and "icons not showing" symptoms
+        // reported live, on the very first call this process ever makes,
+        // before stickiness has anything to preserve. `relayout_outputs`/
+        // `output_management::apply_output_position` already keep the
+        // user's actual anchor monitor at physical `(0, 0)` - that IS the
+        // position-based definition of "primary" every desktop convention
+        // (xrandr, wlr-output-management) already uses, and unlike
+        // enumeration order it's driven by the same saved layout the user
+        // configured. Preferred over the origin-search only as the initial
+        // pick; once chosen, `primary_connector` stays sticky exactly as
+        // before, so a later `relayout_outputs` call temporarily putting a
+        // different head at `(0, 0)` mid-drag doesn't itself flip primary.
+        let primary_name = self
+            .primary_connector
+            .clone()
+            .filter(|name| udev.heads.iter().any(|h| &h.output.name() == name))
+            .or_else(|| udev.heads.iter().find(|h| h.location == Point::from((0, 0))).map(|h| h.output.name()))
+            .or_else(|| udev.heads.first().map(|h| h.output.name()));
+        self.primary_connector = primary_name.clone();
         for head in udev.heads.iter() {
             // Shrunk by whatever a layer-shell surface (bar, dock) has
             // reserved via `set_exclusive_zone` - reporting the full
@@ -630,12 +745,48 @@ impl Platform for UdevPlatform {
             let zone = layer_map_for_output(&head.output).non_exclusive_zone();
             let scale = head.output.current_scale().fractional_scale();
             let zone_physical = |v: i32| (v as f64 * scale).round() as i32;
-            let usable = srdwm_core::Rect::new(
+            let mut usable = srdwm_core::Rect::new(
                 head.location.x + zone_physical(zone.loc.x),
                 head.location.y + zone_physical(zone.loc.y),
                 zone_physical(zone.size.w).max(0) as u32,
                 zone_physical(zone.size.h).max(0) as u32,
             );
+            // `general.reserve_top`/`_bottom`/`_left`/`_right` - a static
+            // floor under the real exclusive zone above, not a competing
+            // claim: only shrinks `usable` further if the configured
+            // reservation is *larger* than what's already reserved for
+            // that edge, so a real bar/dock that has actually connected
+            // and registered its own (equal or bigger) zone always wins.
+            // See `WindowManager::reserve_top`'s own doc comment for the
+            // startup-race this exists to close.
+            let (rt, rb, rl, rr) =
+                (zone_physical(wm.reserve_top as i32), zone_physical(wm.reserve_bottom as i32), zone_physical(wm.reserve_left as i32), zone_physical(wm.reserve_right as i32));
+            let full_top = head.location.y;
+            let full_left = head.location.x;
+            let full_bottom = head.location.y + head.size.1;
+            let full_right = head.location.x + head.size.0;
+            let want_top = full_top + rt;
+            let want_left = full_left + rl;
+            let want_bottom = full_bottom - rb;
+            let want_right = full_right - rr;
+            if want_top > usable.y {
+                let shrink = want_top - usable.y;
+                usable.y = want_top;
+                usable.height = usable.height.saturating_sub(shrink.max(0) as u32);
+            }
+            if want_left > usable.x {
+                let shrink = want_left - usable.x;
+                usable.x = want_left;
+                usable.width = usable.width.saturating_sub(shrink.max(0) as u32);
+            }
+            let usable_bottom = usable.y + usable.height as i32;
+            if want_bottom < usable_bottom {
+                usable.height = (want_bottom - usable.y).max(0) as u32;
+            }
+            let usable_right = usable.x + usable.width as i32;
+            if want_right < usable_right {
+                usable.width = (want_right - usable.x).max(0) as u32;
+            }
             // The head's true full rect, ignoring any exclusive zone --
             // deliberately *not* defaulted from `usable` the way `Monitor::
             // new` alone would (see the fullscreen note below).
@@ -668,7 +819,7 @@ impl Platform for UdevPlatform {
                 // erasing the split it was placed to respect.
                 m.full_geometry = srdwm_core::monitor::split_rect(full, part, parts, rows);
                 m.maximize_geometry = srdwm_core::monitor::split_rect(maximize, part, parts, rows);
-                m.primary = next_id == 0;
+                m.primary = primary_name.as_deref() == Some(name.as_str());
                 m.split = parts > 1;
                 m.scale = scale;
                 out.push(m);

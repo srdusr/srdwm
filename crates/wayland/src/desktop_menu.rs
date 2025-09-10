@@ -20,6 +20,9 @@ pub(crate) enum DesktopMenuAction {
     /// convention as `Delete`.
     EmptyTrash,
     NewFolder,
+    /// "not even new file" - see `CompState::new_desktop_text_file`'s own
+    /// doc comment.
+    NewTextFile,
     /// Spawns a terminal with `~/Desktop` as its working directory --
     /// `general.terminal`, or a common-binary fallback list if unset.
     OpenTerminalHere,
@@ -28,6 +31,10 @@ pub(crate) enum DesktopMenuAction {
     /// paste, properties, ...), deliberately not reimplemented here.
     OpenInFileManager,
     Refresh,
+    /// A purely visual divider row - see `context_menu::MenuAction::
+    /// Separator`'s own doc comment (same shape, same reason, separate
+    /// enum since this menu and the titlebar one don't share one).
+    Separator,
 }
 
 pub(crate) struct DesktopMenu {
@@ -66,8 +73,11 @@ impl DesktopMenu {
     pub(crate) fn open_for_desktop(pos: (i32, i32)) -> Self {
         let items = vec![
             ("New Folder", DesktopMenuAction::NewFolder),
+            ("New Text Document", DesktopMenuAction::NewTextFile),
+            ("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", DesktopMenuAction::Separator),
             ("Open Terminal Here", DesktopMenuAction::OpenTerminalHere),
             ("Open in File Manager", DesktopMenuAction::OpenInFileManager),
+            ("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", DesktopMenuAction::Separator),
             ("Refresh", DesktopMenuAction::Refresh),
         ];
         Self { pos, width: MENU_WIDTH, row_height: ROW_HEIGHT, items }
@@ -132,8 +142,9 @@ mod tests {
     #[test]
     fn desktop_menu_offers_the_full_set() {
         let menu = DesktopMenu::open_for_desktop((10, 10));
-        let labels: Vec<&str> = menu.items.iter().map(|(l, _)| *l).collect();
-        assert_eq!(labels, vec!["New Folder", "Open Terminal Here", "Open in File Manager", "Refresh"]);
+        let real_actions: Vec<&str> =
+            menu.items.iter().filter(|(_, a)| !matches!(a, DesktopMenuAction::Separator)).map(|(l, _)| *l).collect();
+        assert_eq!(real_actions, vec!["New Folder", "New Text Document", "Open Terminal Here", "Open in File Manager", "Refresh"]);
     }
 
     #[test]

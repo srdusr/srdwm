@@ -36,7 +36,13 @@ impl CompState {
     /// through the inherent method below wherever a plain `&self` is
     /// available (input handling, `redraw_decoration_buffer`); this
     /// version exists for the render loops specifically.
-    pub(crate) fn effective_frame_of(wm: &Rc<RefCell<WindowManager>>, id_to_window: &HashMap<WindowId, DWindow>, id: WindowId, geom: srdwm_core::Rect) -> srdwm_core::Rect {
+    pub(crate) fn effective_frame_of(
+        wm: &Rc<RefCell<WindowManager>>,
+        id_to_window: &HashMap<WindowId, DWindow>,
+        pending_size_configure: &HashMap<WindowId, ((i32, i32), Instant)>,
+        id: WindowId,
+        geom: srdwm_core::Rect,
+    ) -> srdwm_core::Rect {
         // A version of this function briefly (this same session) skipped
         // the committed-size correction below entirely during an active
         // resize, on the reasoning that trusting the client's stale last
@@ -79,6 +85,36 @@ impl CompState {
         //    branch existing is what keeps that gap small in practice
         //    rather than a full commit-cycle wide.
         if wm.borrow().resizing_window() == Some(id) {
+            return geom;
+        }
+        // Same reasoning as the active-resize branch just above, for a gap
+        // that isn't a drag at all: a plain cross-monitor *move* between two
+        // differently-scaled outputs still forces a size-changing configure
+        // (see `sync_geometry`'s own doc comment - a window's physical
+        // footprint stays constant across the move, so its *logical* size,
+        // what the client is actually told, necessarily changes with the
+        // new monitor's scale). Until the client catches up, `bbox()` below
+        // still reflects its *last real commit* - content sized for the
+        // *old* monitor's scale - but `w.monitor` has already flipped to
+        // the *new* one (updated live, every drag tick, independently of
+        // any commit). Multiplying the stale logical content by the new
+        // scale produces neither the old physical size nor the new one, a
+        // real mismatch between where the border/shadow get drawn and where
+        // the client's actual pixels are. Reported live, confirmed with
+        // before/after screenshots: a window's left border missing and its
+        // content clipped for one frame right after crossing from a
+        // scale-0.843 output onto a scale-1.0 one, self-correcting once the
+        // client's own commit landed - see `docs/TODO.md`. `pending_size_
+        // configure` (see its own doc comment) already tracks exactly this
+        // gap for the throttle above; reusing it here instead of adding new
+        // state closes it: while a configure is outstanding, trust this
+        // compositor's own live target (`geom`) the same way an active
+        // resize already does, rather than reconstructing physical size
+        // from a logical value that was never committed under this scale.
+        if pending_size_configure.get(&id).is_some_and(|(pending_size, sent_at)| {
+            let caught_up = id_to_window.get(&id).is_some_and(|w| w.geometry().size.w == pending_size.0 && w.geometry().size.h == pending_size.1);
+            !caught_up && sent_at.elapsed() < CONFIGURE_THROTTLE_TIMEOUT
+        }) {
             return geom;
         }
         let Some(w) = wm.borrow().window(id).cloned() else { return geom };
@@ -206,7 +242,7 @@ impl CompState {
     /// compositor's own bookkeeping staying self-consistent, not about
     /// matching a client's real pixels.
     pub(crate) fn effective_frame(&self, id: WindowId, geom: srdwm_core::Rect) -> srdwm_core::Rect {
-        Self::effective_frame_of(&self.wm, &self.id_to_window, id, geom)
+        Self::effective_frame_of(&self.wm, &self.id_to_window, &self.pending_size_configure, id, geom)
     }
 
     pub(crate) fn sync_geometry(&mut self, id: WindowId) {

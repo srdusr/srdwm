@@ -73,7 +73,9 @@ pub(crate) fn sync_toplevel_metadata(state: &mut CompState, id: WindowId, surfac
         // window back to the front any time its title happened to
         // update - reported live as an older window jumping in front of
         // a newer, focused one with no user action to explain it.
-        if state.wm.borrow_mut().reapply_rules_if_pending(id) {
+        let reapplied = state.wm.borrow_mut().reapply_rules_if_pending(id);
+        log::warn!("DECO-DIAG sync_toplevel_metadata id={id} changed=true reapplied={reapplied}");
+        if reapplied {
             state.redraw_decoration_buffer(id);
             state.sync_geometry(id);
         }

@@ -813,14 +813,26 @@ fn context_menu_highlighted_row_has_a_different_background_than_the_rest() {
 }
 
 #[test]
-fn context_menu_border_is_opaque_at_every_edge() {
+fn context_menu_panel_is_opaque_in_the_middle_but_rounded_at_the_corners() {
+    // Reported live: the old hard-square panel with a single 1px border
+    // read as "squished... not at all polished" next to this project's own
+    // AGS reference (`GlobalMenu/style.scss`'s `popover box.menu-list`,
+    // flat rows with no border, only the panel itself rounded). A real
+    // rounded corner means the exact corner pixel is now transparent, not
+    // opaque - the opposite of what this test used to assert - while an
+    // edge's midpoint (away from any corner's curve) and the panel's own
+    // interior stay fully opaque either way.
     let items = [("Close", false)];
     let buf = render_context_menu(100, 28, &items, (0, 0, 0), (0xff, 0xff, 0xff), (0, 0, 0), (0x99, 0x99, 0x99));
     let alpha_at = |x: usize, y: usize| buf[(y * 100 + x) * 4 + 3];
-    assert_eq!(alpha_at(0, 0), 255);
-    assert_eq!(alpha_at(99, 0), 255);
-    assert_eq!(alpha_at(0, 27), 255);
-    assert_eq!(alpha_at(99, 27), 255);
+    assert_eq!(alpha_at(0, 0), 0, "the exact corner pixel is now outside the rounded curve, not a hard square");
+    // 2px in from the flat top/bottom edges, at the midpoint (far enough
+    // from either corner's own curve, and past this helper's own ~1px
+    // antialiasing band around every edge - see `fill_rounded_rect`'s
+    // shared smoothstep construction, not specific to this test).
+    assert_eq!(alpha_at(50, 2), 255, "just inside the flat top edge, away from either corner, is opaque");
+    assert_eq!(alpha_at(50, 25), 255, "just inside the flat bottom edge is opaque");
+    assert_eq!(alpha_at(50, 14), 255, "the panel's interior stays opaque");
 }
 
 #[test]
@@ -842,6 +854,21 @@ fn snap_flyout_border_is_opaque_at_every_outer_edge() {
     assert_eq!(alpha_at(width as usize - 1, 0), 255);
     assert_eq!(alpha_at(0, height as usize - 1), 255);
     assert_eq!(alpha_at(width as usize - 1, height as usize - 1), 255);
+}
+
+#[test]
+fn render_desktop_icon_actually_draws_something_visible_for_every_kind() {
+    // Reported live: desktop icons construct and push correctly (confirmed
+    // via a live diagnostic: non-empty element list, correct position,
+    // no import error) but nothing visible shows up on screen - this
+    // isolates whether the rasterizer itself is the problem, offline,
+    // without needing a live compositor round-trip to check.
+    use crate::desktop_icons::IconKind;
+    for kind in [IconKind::Home, IconKind::Computer, IconKind::Trash, IconKind::Folder, IconKind::File] {
+        let buf = render_desktop_icon(88, 88, kind, "Test", false, (74, 144, 226), (240, 240, 240), (100, 100, 100), None);
+        let opaque_pixels = buf.chunks_exact(4).filter(|px| px[3] > 0).count();
+        assert!(opaque_pixels > 100, "{kind:?} drew only {opaque_pixels} non-transparent pixels out of {}", buf.len() / 4);
+    }
 }
 
 #[test]

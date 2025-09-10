@@ -172,7 +172,13 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     // this can't just be `get_bool(..., true)` like every other flag here.
     let rounded_corners = engine.get("general.rounded_corners").and_then(|v| v.as_bool());
     let gpu = engine.get_bool("general.gpu", false);
+    let phone_mode = engine.get_bool("general.phone_mode", false);
     let desktop_icons = engine.get_bool("general.desktop_icons", true);
+    let desktop_icons_all_monitors = engine.get_bool("general.desktop_icons_all_monitors", true);
+    let reserve_top = engine.get_f64("general.reserve_top", 0.0).max(0.0) as u32;
+    let reserve_bottom = engine.get_f64("general.reserve_bottom", 0.0).max(0.0) as u32;
+    let reserve_left = engine.get_f64("general.reserve_left", 0.0).max(0.0) as u32;
+    let reserve_right = engine.get_f64("general.reserve_right", 0.0).max(0.0) as u32;
     let file_manager = engine.get_string("general.file_manager", "");
     let desktop_icon_single_click = engine.get_bool("general.desktop_icon_single_click", false);
     let terminal = engine.get_string("general.terminal", "");
@@ -301,7 +307,13 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     wm.resize_margin = resize_margin;
     wm.rounded_corners_enabled = rounded_corners;
     wm.gpu_enabled = gpu;
+    wm.phone_mode = phone_mode;
     wm.desktop_icons_enabled = desktop_icons;
+    wm.desktop_icons_all_monitors = desktop_icons_all_monitors;
+    wm.reserve_top = reserve_top;
+    wm.reserve_bottom = reserve_bottom;
+    wm.reserve_left = reserve_left;
+    wm.reserve_right = reserve_right;
     wm.file_manager = file_manager;
     wm.desktop_icon_single_click = desktop_icon_single_click;
     wm.terminal = terminal;

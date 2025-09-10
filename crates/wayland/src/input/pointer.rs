@@ -231,6 +231,8 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
     // A no-op whenever no desktop icon is currently being dragged - see
     // `CompState::update_desktop_icon_drag`'s own doc comment.
     state.update_desktop_icon_drag((pos.x as i32, pos.y as i32));
+    // Likewise a no-op whenever no marquee selection is in progress.
+    state.update_desktop_marquee((pos.x as i32, pos.y as i32));
 
     // Tells core which monitor the pointer is physically over right now --
     // core has no pointer of its own to know this (see `pointer_monitor`'s
@@ -505,6 +507,17 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
         if let Some(menu) = state.context_menu.take() {
             if let Some(row) = menu.row_at(pos.x as i32, pos.y as i32) {
                 let (_, action) = menu.items[row];
+                // A separator row occupies real space (`row_at` resolves a
+                // click on it same as any other) but isn't a real action --
+                // same "click does nothing, menu stays open" convention any
+                // native menu's own divider follows, rather than either
+                // running a no-op action or dismissing the whole menu on
+                // what was very possibly a slightly-off click at a real
+                // item just above/below it.
+                if matches!(action, crate::context_menu::MenuAction::Separator) {
+                    state.context_menu = Some(menu);
+                    return;
+                }
                 state.close_context_menu();
                 state.run_context_menu_action(menu.window, action);
             } else {
@@ -528,6 +541,10 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
         if let Some(menu) = state.desktop_menu.take() {
             if let Some(row) = menu.row_at(pos.x as i32, pos.y as i32) {
                 let (_, action) = menu.items[row].clone();
+                if matches!(action, crate::desktop_menu::DesktopMenuAction::Separator) {
+                    state.desktop_menu = Some(menu);
+                    return;
+                }
                 state.close_desktop_menu();
                 state.run_desktop_menu_action(action);
             } else {
@@ -635,19 +652,28 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
                 // comment): a desktop icon here, single- or double-click
                 // per `general.desktop_icon_single_click`, otherwise clear
                 // whatever was selected.
-                let icon_hit = state.desktop_icons.as_ref().and_then(|icons| icons.icon_at(pos.x as i32, pos.y as i32).map(|i| icons.icons[i].id.clone()));
+                let icon_hit = state
+                    .desktop_icons
+                    .as_ref()
+                    .and_then(|icons| icons.icon_at(pos.x as i32, pos.y as i32).map(|(i, origin)| (icons.icons[i].id.clone(), origin)));
                 match icon_hit {
-                    Some(id) => {
+                    Some((id, origin)) => {
                         let single_click_opens = state.wm.borrow().desktop_icon_single_click;
                         if single_click_opens || state.is_double_click_icon(&id, time) {
                             state.select_desktop_icon(Some(&id));
                             state.open_desktop_icon(&id);
                         } else {
                             state.select_desktop_icon(Some(&id));
-                            state.start_desktop_icon_drag(&id, (pos.x as i32, pos.y as i32));
+                            state.start_desktop_icon_drag(&id, origin, (pos.x as i32, pos.y as i32));
                         }
                     }
-                    None => state.select_desktop_icon(None),
+                    // Genuinely bare desktop, not just "no icon under the
+                    // pointer" - starts a rubber-band selection instead of
+                    // only clearing whatever was selected before. The one
+                    // "click and drag" desktop interaction this compositor
+                    // never had (reported live next to "missing click and
+                    // drag stuff like from windows").
+                    None => state.start_desktop_marquee((pos.x as i32, pos.y as i32)),
                 }
             }
         }
@@ -681,7 +707,7 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
             (BTN_RIGHT, None)
                 if layer_surface_under(state, pos).is_none() && !state.space.element_under(pos).is_some_and(|(w, _)| dwindow_is_visible(state, w)) =>
             {
-                let icon_hit = state.desktop_icons.as_ref().and_then(|icons| icons.icon_at(pos.x as i32, pos.y as i32).map(|i| icons.icons[i].id.clone()));
+                let icon_hit = state.desktop_icons.as_ref().and_then(|icons| icons.icon_at(pos.x as i32, pos.y as i32).map(|(i, _origin)| icons.icons[i].id.clone()));
                 match icon_hit {
                     Some(id) => {
                         state.select_desktop_icon(Some(&id));
@@ -697,6 +723,7 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
         // always checked on release, same as `was_dragging`/`was_resizing`
         // below, just for a desktop icon instead of a window.
         state.end_desktop_icon_drag();
+        state.end_desktop_marquee();
         let mut wm = state.wm.borrow_mut();
         let was_dragging = wm.is_dragging();
         let was_resizing = wm.is_resizing();
@@ -711,6 +738,14 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
             wm.end_drag();
         } else if was_resizing {
             wm.end_resize();
+        }
+        // Persists whatever `end_drag`/`end_resize` just updated in
+        // `remembered_geometry` - a real user action (button released
+        // after a drag/resize), not a per-frame event, so writing the
+        // whole small table each time is cheap and needs no separate
+        // dirty-tracking. See `window_memory.rs`'s own doc comment.
+        if was_dragging || was_resizing {
+            crate::window_memory::save_all(wm.all_remembered_geometry());
         }
         drop(wm);
         // `end_drag` can snap the geometry one more time (edge/top-of-

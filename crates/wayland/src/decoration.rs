@@ -74,25 +74,56 @@ pub(crate) const CORNER_RADIUS: u32 = 12;
 /// held). `items` is `(label, highlighted)`; `row_height` matches
 /// `TITLEBAR_HEIGHT` by convention at the call site, not enforced here.
 ///
-/// Deliberately plain: solid rows, left-padded text, a 1px border for
-/// definition against whatever's behind it - no submenus, no icons, no
-/// separators. A context menu widget with real visual polish is a project
-/// of its own; this is the minimum that makes the actions discoverable and
-/// clickable at all, which is the actual gap.
+/// Rounded floating panel with a per-row rounded hover highlight, matching
+/// the reference this project's own AGS panel already settled on for its
+/// global-menu dropdown (`widget/Bar/components/GlobalMenu/style.scss`'s
+/// `popover box.menu-list`): flat rows with no border/outline at rest, a
+/// soft tinted fill (not a frame) on the highlighted one, inset padding so
+/// rows don't touch the panel's own edge, real gaps between rows. Reported
+/// live as looking "squished, no spacing/padding/margining, not at all
+/// polished" - the previous version drew edge-to-edge square rows with a
+/// single hard 1px border around the whole menu, exactly what that
+/// complaint (raised about the AGS dropdown, fixed there first) describes.
+/// Still no submenus/icons/separators - real gaps beyond this pass' own
+/// scope, not attempted blind.
 pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], bg: (u8, u8, u8), fg: (u8, u8, u8), highlight_bg: (u8, u8, u8), border: (u8, u8, u8)) -> Vec<u8> {
+    let _ = border; // No outline anywhere now - see this function's own doc comment. Kept as a parameter so callers/themes don't need updating for a look this function no longer draws.
+    const PANEL_RADIUS: f32 = 10.0;
+    const ROW_INSET: i32 = 4;
+    const ROW_RADIUS: f32 = 6.0;
+
     let (width, row_height) = (width.max(1) as usize, row_height.max(1) as usize);
+    // Exactly `row_height * items.len()`, same as before this pass --
+    // `ContextMenu`/`DesktopMenu`'s own `height()` and `row_at()` (which
+    // this function has no access to and mustn't get out of sync with)
+    // assume row `i` starts at `i * row_height` with no extra top/bottom
+    // inset, so all of this rework happens *inside* that unchanged canvas
+    // rather than by growing it.
     let height = (row_height * items.len().max(1)).max(1);
     let mut buf = vec![0u8; width * height * 4];
 
+    // The panel itself: one flat rounded-rect fill on an otherwise fully
+    // transparent canvas, so the corners genuinely show whatever's behind
+    // the menu (desktop/window content) rather than a hard-edged square.
+    fill_rounded_rect(&mut buf, width, height, 0, 0, width as i32, height as i32, PANEL_RADIUS, bg, bg);
+
     let font = find_system_font();
     for (i, (label, highlighted)) in items.iter().enumerate() {
+        let row_top = (i * row_height) as i32;
+        // The background text actually sits on, for `blit_glyph`'s own
+        // blend-toward-a-known-solid-colour contract - the row's own
+        // highlight fill (already baked into `buf` by this point, above)
+        // when highlighted, otherwise the panel's shared flat fill.
+        // `blit_glyph_on_transparent` would be wrong here even though most
+        // of `buf` started transparent: every row itself sits on the
+        // panel's own opaque fill, not bare transparency, and that
+        // blitter's whole design assumes the latter (see its own doc
+        // comment) - used correctly, it would leave a visible dark
+        // fringe around every character's anti-aliased edge instead of a
+        // clean blend into the row's real colour.
         let row_bg = if *highlighted { highlight_bg } else { bg };
-        let row_top = i * row_height;
-        for y in row_top..(row_top + row_height).min(height) {
-            for x in 0..width {
-                let idx = (y * width + x) * 4;
-                buf[idx..idx + 4].copy_from_slice(&rgb_to_bgra(row_bg, 255));
-            }
+        if *highlighted {
+            fill_rounded_rect_over(&mut buf, width, height, ROW_INSET, row_top, width as i32 - ROW_INSET, row_top + row_height as i32, ROW_RADIUS, highlight_bg);
         }
         if let Some(font) = &font {
             let baseline = row_top as f32 + row_height as f32 * 0.72;
@@ -113,21 +144,6 @@ pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], 
                 }
             }
         }
-    }
-
-    // A 1px border around the whole menu, drawn last so it isn't overdrawn
-    // by any row's background fill.
-    let border_px = rgb_to_bgra(border, 255);
-    for x in 0..width {
-        buf[x * 4..x * 4 + 4].copy_from_slice(&border_px);
-        let last_row = (height - 1) * width + x;
-        buf[last_row * 4..last_row * 4 + 4].copy_from_slice(&border_px);
-    }
-    for y in 0..height {
-        let left = y * width;
-        buf[left * 4..left * 4 + 4].copy_from_slice(&border_px);
-        let right = y * width + width - 1;
-        buf[right * 4..right * 4 + 4].copy_from_slice(&border_px);
     }
     buf
 }
@@ -208,33 +224,76 @@ pub fn render_snap_flyout(columns: u32, cell_width: u32, cell_height: u32, label
 /// alpha blending this function has no other reason to do (every other
 /// pixel here is drawn fully opaque or left fully transparent).
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_desktop_icon(width: u32, height: u32, kind: crate::desktop_icons::IconKind, label: &str, selected: bool, icon_color: (u8, u8, u8), label_color: (u8, u8, u8), selected_bg: (u8, u8, u8)) -> Vec<u8> {
+/// The glyph area within a desktop-icon cell, shared between `render_
+/// desktop_icon` (where it draws into) and its caller (which needs the
+/// exact same box to know what size to rasterize a real theme icon at --
+/// a mismatch would either leave a gap or need cropping, neither of which
+/// `render_desktop_icon`'s own straight-copy blend handles).
+pub(crate) fn desktop_icon_glyph_box(width: u32, height: u32) -> (i32, i32, i32, i32) {
+    let _ = height;
+    ((width as i32 - 40) / 2, 8, (width as i32 + 40) / 2, 44)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_desktop_icon(
+    width: u32,
+    height: u32,
+    kind: crate::desktop_icons::IconKind,
+    label: &str,
+    selected: bool,
+    icon_color: (u8, u8, u8),
+    label_color: (u8, u8, u8),
+    selected_bg: (u8, u8, u8),
+    real_icon: Option<&[u8]>,
+) -> Vec<u8> {
     use crate::desktop_icons::IconKind;
     let (width, height) = (width.max(1) as usize, height.max(1) as usize);
     let mut buf = vec![0u8; width * height * 4];
 
-    let glyph_box = ((width as i32 - 40) / 2, 8, (width as i32 + 40) / 2, 44);
-    // A top-lighter/bottom-`icon_color` vertical gradient, not one flat
-    // fill - the same subtle top-to-bottom light-source cue `buttons.rs`'s
-    // own `glossy_shade` uses for the titlebar dots, applied here as a
-    // plain linear gradient (`fill_rounded_rect`'s own job) rather than a
-    // radial highlight, which reads just as "polished" at this icon size
-    // for a lot less code. `border` (outline/detail colour) stays a flat
-    // darken of the base, unchanged.
-    let top = color::brighten(icon_color);
-    let border = color::darken(icon_color);
-    match kind {
-        IconKind::Home => draw_home_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
-        IconKind::Computer => draw_computer_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
-        IconKind::Trash => draw_trash_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
-        IconKind::Folder => draw_folder_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
-        IconKind::File => draw_file_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
+    let glyph_box = desktop_icon_glyph_box(width as u32, height as u32);
+    if let Some(real_icon) = real_icon {
+        // A real theme icon, already rasterized by `icon_theme::
+        // rasterize_svg` at exactly this box's own size - premultiplied
+        // BGRA8 straight from `resvg`, the same convention `blit_glyph_on_
+        // transparent` below already uses, and `buf` starts fully
+        // transparent (freshly zeroed) everywhere this box covers, so
+        // "blend over" and "copy" are the same operation here: no alpha
+        // math needed, unlike compositing onto a real background would.
+        let box_w = (glyph_box.2 - glyph_box.0).max(0) as usize;
+        let box_h = (glyph_box.3 - glyph_box.1).max(0) as usize;
+        for row in 0..box_h {
+            let y = glyph_box.1 + row as i32;
+            if y < 0 || y as usize >= height {
+                continue;
+            }
+            let src_row = &real_icon[row * box_w * 4..(row + 1) * box_w * 4];
+            let dst_start = (y as usize * width + glyph_box.0.max(0) as usize) * 4;
+            let copy_w = box_w.min(width.saturating_sub(glyph_box.0.max(0) as usize));
+            buf[dst_start..dst_start + copy_w * 4].copy_from_slice(&src_row[..copy_w * 4]);
+        }
+    } else {
+        // A top-lighter/bottom-`icon_color` vertical gradient, not one flat
+        // fill - the same subtle top-to-bottom light-source cue `buttons.rs`'s
+        // own `glossy_shade` uses for the titlebar dots, applied here as a
+        // plain linear gradient (`fill_rounded_rect`'s own job) rather than a
+        // radial highlight, which reads just as "polished" at this icon size
+        // for a lot less code. `border` (outline/detail colour) stays a flat
+        // darken of the base, unchanged. Only reached when no real icon-theme
+        // artwork resolved at all (`icon_theme::find_icon` found nothing, or
+        // the file it found failed to parse/render) - the fallback, not the
+        // normal path on a machine with any real icon theme installed.
+        let top = color::brighten(icon_color);
+        let border = color::darken(icon_color);
+        match kind {
+            IconKind::Home => draw_home_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
+            IconKind::Computer => draw_computer_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
+            IconKind::Trash => draw_trash_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
+            IconKind::Folder => draw_folder_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
+            IconKind::File => draw_file_glyph(&mut buf, width, height, glyph_box, top, icon_color, border),
+        }
     }
 
     let label_top = 50i32;
-    if selected {
-        fill_rect(&mut buf, width, height, 2, label_top, width as i32 - 2, height as i32 - 2, selected_bg, 255);
-    }
     if let Some(font) = find_system_font() {
         let baseline = label_top as f32 + 14.0;
         let mut widths = Vec::new();
@@ -244,6 +303,28 @@ pub(crate) fn render_desktop_icon(width: u32, height: u32, kind: crate::desktop_
             widths.push(m.advance_width);
             total += m.advance_width;
         }
+        // Reported live: the old selection highlight was a flat, edge-to-edge
+        // rectangle spanning the label's whole vertical band (`label_top` to
+        // `height - 2`, full cell width minus 2px either side) - "big
+        // highlighting... for some reason", next to a saturated theme accent
+        // colour (`selected_bg` is `theme.default_border_color`, e.g.
+        // Catppuccin's mauve) it read as an oversized, disproportionate
+        // block rather than a label being picked out. Real file managers
+        // (Nautilus, Explorer) size the highlight to the text itself plus a
+        // small margin, not to the cell - snug and rounded, same "fill, not
+        // a frame" principle already applied to the context-menu rewrite.
+        const LABEL_PAD_X: f32 = 6.0;
+        const LABEL_PAD_Y: f32 = 3.0;
+        const LABEL_RADIUS: f32 = 5.0;
+        let text_height = FONT_PIXELS; // close enough for a snug box; exact ascent/descent isn't worth tracking here.
+        if selected {
+            let box_x0 = ((width as f32 - total) / 2.0 - LABEL_PAD_X).max(0.0);
+            let box_x1 = ((width as f32 + total) / 2.0 + LABEL_PAD_X).min(width as f32);
+            let box_y0 = (baseline - text_height - LABEL_PAD_Y).max(0.0);
+            let box_y1 = (baseline + LABEL_PAD_Y).min(height as f32);
+            fill_rounded_rect(&mut buf, width, height, box_x0.round() as i32, box_y0.round() as i32, box_x1.round() as i32, box_y1.round() as i32, LABEL_RADIUS, selected_bg, selected_bg);
+        }
+        let row_bg = selected_bg; // only meaningful when `selected`; `blit_glyph_on_transparent` below is used otherwise.
         let mut pen_x = ((width as f32 - total) / 2.0).max(2.0);
         for (ch, adv) in label.chars().zip(widths) {
             if ch.is_control() {
@@ -254,7 +335,11 @@ pub(crate) fn render_desktop_icon(width: u32, height: u32, kind: crate::desktop_
             if metrics.width > 0 && metrics.height > 0 {
                 let glyph_x = pen_x + metrics.xmin as f32;
                 let glyph_y = baseline - metrics.height as f32 - metrics.ymin as f32;
-                blit_glyph_on_transparent(&mut buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, label_color);
+                if selected {
+                    blit_glyph(&mut buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, row_bg, label_color);
+                } else {
+                    blit_glyph_on_transparent(&mut buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, label_color);
+                }
             }
             pen_x += adv;
             if pen_x as usize >= width {
@@ -347,6 +432,44 @@ fn fill_rounded_rect(buf: &mut [u8], width: usize, height: usize, x0: i32, y0: i
                 let alpha = (255.0 * (1.0 - smoothstep(-1.0, 1.0, dist))).round() as u8;
                 let premul = |c: u8| ((c as u32 * alpha as u32 + 127) / 255) as u8;
                 buf[idx..idx + 4].copy_from_slice(&rgb_to_bgra((premul(color.0), premul(color.1), premul(color.2)), alpha));
+            }
+        }
+    }
+}
+
+/// Same rounded-rect antialiasing as `fill_rounded_rect`, but blends its
+/// edge pixels against whatever is *already* in `buf` instead of assuming
+/// a transparent canvas - needed for a menu row's hover highlight, which
+/// paints on top of the panel's own already-opaque background fill.
+/// `fill_rounded_rect` itself can't be reused there: its edge pixels
+/// premultiply toward black (correct on a blank canvas, where "not fully
+/// covered" means "let the transparent backdrop show through"), which
+/// would show up as a visible dark seam around every rounded hover chip
+/// sitting on top of an opaque panel instead of a clean blend into it.
+#[allow(clippy::too_many_arguments)]
+fn fill_rounded_rect_over(buf: &mut [u8], width: usize, height: usize, x0: i32, y0: i32, x1: i32, y1: i32, radius: f32, color: (u8, u8, u8)) {
+    let (w, h) = (width as i32, height as i32);
+    let radius = radius.min((x1 - x0) as f32 / 2.0).min((y1 - y0) as f32 / 2.0).max(0.0);
+    let new_px = rgb_to_bgra(color, 255);
+    for y in y0.max(0)..y1.min(h) {
+        for x in x0.max(0)..x1.min(w) {
+            let px = x as f32 + 0.5;
+            let py = y as f32 + 0.5;
+            let cx = px.clamp(x0 as f32 + radius, x1 as f32 - radius);
+            let cy = py.clamp(y0 as f32 + radius, y1 as f32 - radius);
+            let dist = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt() - radius;
+            if dist >= 1.0 {
+                continue;
+            }
+            let idx = (y as usize * width + x as usize) * 4;
+            if dist <= -1.0 {
+                buf[idx..idx + 4].copy_from_slice(&new_px);
+            } else {
+                let t = 1.0 - smoothstep(-1.0, 1.0, dist);
+                let existing = &buf[idx..idx + 4];
+                let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+                let blended = (lerp(existing[0], new_px[0]), lerp(existing[1], new_px[1]), lerp(existing[2], new_px[2]), lerp(existing[3], new_px[3]));
+                buf[idx..idx + 4].copy_from_slice(&[blended.0, blended.1, blended.2, blended.3]);
             }
         }
     }

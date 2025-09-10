@@ -335,6 +335,12 @@ fn handle_libinput_event(state: &mut CompState, event: InputEvent<LibinputInputB
             udev.pointer_pos.x = (udev.pointer_pos.x + delta.x).clamp(min_x, (max_x - 1.0).max(min_x));
             udev.pointer_pos.y = (udev.pointer_pos.y + delta.y).clamp(min_y, (max_y - 1.0).max(min_y));
             let pos = udev.pointer_pos;
+            // Multi-cursor mode, Phase 1 (see `UdevState::secondary_
+            // cursors`'s own doc comment): records this specific physical
+            // device's own position too, purely for rendering its own
+            // cursor sprite - `pos`/`handle_pointer_position` below are
+            // still the one interactive position, unchanged.
+            udev.secondary_cursors.insert(event.device(), pos);
             handle_pointer_position(state, pos, event.time_msec());
         }
         // Absolute-positioning devices (a touchscreen, a drawing tablet,
@@ -362,6 +368,7 @@ fn handle_libinput_event(state: &mut CompState, event: InputEvent<LibinputInputB
             udev.pointer_pos.x = (pos.x + min_x).clamp(min_x, (max_x - 1.0).max(min_x));
             udev.pointer_pos.y = (pos.y + min_y).clamp(min_y, (max_y - 1.0).max(min_y));
             let pos = udev.pointer_pos;
+            udev.secondary_cursors.insert(event.device(), pos);
             handle_pointer_position(state, pos, event.time_msec());
         }
         InputEvent::PointerButton { event } => {

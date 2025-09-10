@@ -69,6 +69,16 @@ impl Platform for WaylandPlatform {
             self.state.begin_native_lock();
         }
         self.state.poll_native_lock_auth();
+        // Same pin-input draining as `udev/platform.rs`'s matching block --
+        // see its own comment and `virtual_pointer.rs`'s module doc
+        // comment for the full Phase 2 design. Pinned virtual-pointer
+        // delivery never touches `udev`/`bounds()` at all (unlike this
+        // backend's own unpinned motion, which is a documented no-op
+        // here), so this is exercised here too - genuinely the way to
+        // validate it in a nested instance rather than the live session.
+        for (pid, window) in self.wm.borrow_mut().drain_pin_input_requests() {
+            self.state.set_virtual_pointer_pin(pid, window);
+        }
         let wait = TARGET_FRAME_TIME.saturating_sub(self.last_frame.elapsed());
         let _ = self.idle_event_loop.dispatch(Some(wait), &mut self.state);
         self.last_frame = Instant::now();

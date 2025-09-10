@@ -7,6 +7,19 @@ impl CompState {
     /// monitors on different refresh rates each run at their own pace
     /// instead of the slowest one gating the rest.
     pub(crate) fn render_udev_frame(&mut self) {
+        // Real perf instrumentation, not a guess-fix: reported live as
+        // "resizing seems slow", and this session's own investigation
+        // (checked decoration-buffer caching, motion-path logging levels,
+        // GPU-path config) found no smoking gun without an actual
+        // measurement. Cheap when nothing's slow (one `Instant::now()` and
+        // one comparison per frame, no allocation, no formatting unless
+        // the threshold trips) - logs only when a frame actually misses a
+        // 60fps budget, tagged with whether a resize/drag was in progress
+        // at the time, so the next real resize either produces real
+        // evidence this is a genuine per-frame cost during resize
+        // specifically, or rules that out in favor of something else
+        // (input latency, client-side redraw cost, a specific app).
+        let frame_start = Instant::now();
         self.tick_animations();
         self.tick_hover_glyph_animation();
         self.tick_dirty_broadcasts();
@@ -299,6 +312,23 @@ impl CompState {
                     origin,
                     hsize,
                 ));
+                // Multi-cursor mode, Phase 1: one extra sprite per *other*
+                // physical pointer device's own last-known position (see
+                // `UdevState::secondary_cursors`'s own doc comment) - the
+                // device that drove `pointer_pos` itself is skipped so its
+                // cursor isn't drawn twice at the same spot. All secondary
+                // sprites share the one real cursor image/theme
+                // (`cursor_status`/`cursor_buffers`) rather than each
+                // device getting its own - a real visual distinction
+                // between devices is a later-phase refinement, not needed
+                // to prove multiple live positions render at all.
+                let active_device = udev.secondary_cursors.iter().find(|&(_, &p)| p == pointer_pos).map(|(d, _)| d.clone());
+                for (device, &pos) in &udev.secondary_cursors {
+                    if Some(device) == active_device.as_ref() {
+                        continue;
+                    }
+                    custom_elements.extend(crate::cursor::render_elements(&cursor_status, &cursor_buffers, &mut udev.renderer, pos, origin, hsize));
+                }
                 // Night light/reading mode - a translucent full-output
                 // overlay, pushed right after the cursor so it colours
                 // everything else (windows, bars, menus) but never the
@@ -415,7 +445,7 @@ impl CompState {
                     // the actual content position still reads `geom`/`band`
                     // directly, since that's already correctly anchored via
                     // `content_offset` below regardless of this correction.
-                    let frame = crate::state::CompState::effective_frame_of(&self.wm, &self.id_to_window, id, geom);
+                    let frame = crate::state::CompState::effective_frame_of(&self.wm, &self.id_to_window, &self.pending_size_configure, id, geom);
                     // Computed here, ahead of the border strips below,
                     // purely so they can know it - the actual content
                     // element that reads this same masked buffer is still
@@ -924,6 +954,34 @@ impl CompState {
                 // background-layer push just below (so the wallpaper still
                 // shows through everywhere an icon doesn't draw). See
                 // `desktop_icons.rs`'s own module doc comment.
+                // The rubber-band marquee outline, above the icons it's
+                // selecting - four thin solid-colour strips (the same
+                // `border_side_render_element` primitive window borders
+                // already use), not a translucent fill: `SolidColorRender
+                // Element` has no alpha-blend path, and a plain accent-
+                // coloured outline is still a real, visible selection
+                // indicator without needing a new element type for one
+                // feature.
+                if let Some((start, current)) = self.desktop_marquee {
+                    let (x0, y0) = (start.0.min(current.0), start.1.min(current.1));
+                    let (x1, y1) = (start.0.max(current.0), start.1.max(current.1));
+                    let color = self.wm.borrow().theme.default_border_color;
+                    const T: i32 = 1;
+                    let strips = [
+                        srdwm_core::Rect::new(x0, y0, (x1 - x0).max(0) as u32, T as u32),
+                        srdwm_core::Rect::new(x0, y1 - T, (x1 - x0).max(0) as u32, T as u32),
+                        srdwm_core::Rect::new(x0, y0, T as u32, (y1 - y0).max(0) as u32),
+                        srdwm_core::Rect::new(x1 - T, y0, T as u32, (y1 - y0).max(0) as u32),
+                    ];
+                    for (strip, buf) in strips.into_iter().zip(self.marquee_buffers.iter_mut()) {
+                        custom_elements.push(crate::elements::OverlayElement::Solid(crate::elements::border_side_render_element(
+                            buf,
+                            strip,
+                            color,
+                            (origin.x, origin.y),
+                        )));
+                    }
+                }
                 for (pos, buffer) in &desktop_icon_render_list {
                     let local_pos = ((pos.0 - origin.x) as f64, (pos.1 - origin.y) as f64);
                     match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, local_pos, buffer, None, None, None, Kind::Unspecified) {
@@ -1189,6 +1247,16 @@ impl CompState {
             // made `grim` hang waiting on a `ready`/`failed` that would
             // otherwise never come (see docs/PANEL_SUPPORT_TODO.md, P1).
             self.screencopy_pending.extend(captures);
+        }
+        const FRAME_BUDGET: Duration = Duration::from_millis(16);
+        let frame_time = frame_start.elapsed();
+        if frame_time > FRAME_BUDGET {
+            let wm = self.wm.borrow();
+            log::warn!(
+                "PERF-RESIZE render_udev_frame took {frame_time:?} (budget {FRAME_BUDGET:?}) - resizing={} dragging={}",
+                wm.resizing_window().is_some(),
+                wm.is_dragging()
+            );
         }
     }
 

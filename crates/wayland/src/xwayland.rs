@@ -92,8 +92,31 @@ pub(crate) fn spawn(handle: &LoopHandle<'static, CompState>, display_handle: &sm
             std::process::Stdio::null()
         })
     };
-    let (xwayland, client) =
-        XWayland::spawn(display_handle, None, std::iter::empty::<(String, String)>(), true, stdio(&xwayland_log), stdio(&xwayland_log), |_| ())?;
+    // `XWayland::spawn` itself clears the child's entire environment except
+    // `PATH`/`XDG_RUNTIME_DIR` before applying whatever's passed here (see
+    // smithay 0.7.0's own `xwayland/xserver.rs::spawn`) - deliberate
+    // isolation, but too aggressive for this compositor's own keyboard
+    // setup: `xkb_config.rs` reads the real `pc105+inet`-style model/layout
+    // from `/etc/X11/xorg.conf.d/00-keyboard.conf` and feeds it to
+    // `smithay::input::keyboard::XkbConfig`, whose compiled keymap is what
+    // XWayland receives over Wayland and re-compiles internally via its own
+    // `xkbcomp` subprocess (visible as "The XKEYBOARD keymap compiler
+    // (xkbcomp) reports" in `xwayland.log`) - and that subprocess, with no
+    // `HOME`/`LANG` at all, hit "Keyboard initialization failed... Fatal
+    // server error: Failed to activate virtual core keyboard: 2" on every
+    // single spawn in a live session (confirmed: 53 identical crashes in
+    // one `xwayland.log`), while the exact same binary spawned by hand with
+    // a normal environment against the same running compositor stayed up
+    // and answered `xdpyinfo` - narrowing the difference to the
+    // environment `XWayland::spawn` hands the child, not the keymap
+    // content or the binary itself. `HOME`/`LANG`/`LC_ALL` are what
+    // `xkbcomp` and the C locale layer it runs under (`iconv`, `setlocale`)
+    // actually consult; passed through only if this process itself has
+    // them, same "degrade to `spawn`'s own already-safe default rather
+    // than pass an empty string" shape as everywhere else in this file.
+    let xwayland_envs: Vec<(String, String)> =
+        ["HOME", "LANG", "LC_ALL", "LC_CTYPE"].into_iter().filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v))).collect();
+    let (xwayland, client) = XWayland::spawn(display_handle, None, xwayland_envs, true, stdio(&xwayland_log), stdio(&xwayland_log), |_| ())?;
 
     let handle_for_ready = handle.clone();
     handle
@@ -576,7 +599,33 @@ fn ensure_shm_wrapper_on_path() -> std::io::Result<()> {
 
     let wrapper_path = wrapper_dir.join("Xwayland");
     let quoted = shell_single_quote(&real_xwayland.to_string_lossy());
-    std::fs::write(&wrapper_path, format!("#!/bin/sh\nexec {quoted} -shm \"$@\"\n"))?;
+    // `< /dev/null` on the final `exec`, not just `-shm` - `smithay::
+    // xwayland::XWayland::spawn` sets `stdout`/`stderr` on the child
+    // (redirected to `xwayland_log` above) but has no parameter for `stdin`
+    // at all, so Rust's `Command` default (`Stdio::inherit()`) applies:
+    // Xwayland's own fd 0 is whatever *this* process's fd 0 is. On the real
+    // udev/DRM backend that's the real active VT (`/dev/tty1`, confirmed by
+    // reading `/proc/<pid>/fd/0` on a live session) - srdwm itself already
+    // holds that VT's keyboard mode exclusively via libseat for its own
+    // DRM/KMS session. A generic X server's keyboard-driver bring-up still
+    // probes whatever's on its own stdin as a possible console device
+    // before falling back to its Wayland-only input path, and inheriting a
+    // *real, already-owned* VT there is exactly the shape of "Failed to
+    // activate virtual core keyboard: 2" - confirmed reproducing 100% of
+    // cold starts (54 identical crashes across every restart this session,
+    // including one after the previous, insufficient fix), never once
+    // reproducing under a manual invocation from an interactive shell
+    // (whose own stdin is a pty, not a VT) the same way this file's own
+    // env-passthrough fix never reproduced it either. A shell wrapper can
+    // redirect its own stdin before the final `exec` in a way `Command`'s
+    // public API here cannot - the same reason this wrapper exists at all
+    // for `-shm`.
+    // DECO-DIAG/XWAYLAND-DIAG temporary: `strace -f` (follows forked
+    // children, e.g. xkbcomp) around the real binary, to see exactly what
+    // xkbcomp's own execve/openat/etc. calls do differently here than in
+    // an interactive-shell reproduction of the identical command that
+    // never fails - remove once the real cause is found.
+    std::fs::write(&wrapper_path, format!("#!/bin/sh\nexec strace -f -o /tmp/xwayland-strace.log {quoted} -shm \"$@\" < /dev/null\n"))?;
     let mut perms = std::fs::metadata(&wrapper_path)?.permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&wrapper_path, perms)?;

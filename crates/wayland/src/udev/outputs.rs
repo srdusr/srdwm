@@ -371,7 +371,7 @@ impl CompState {
             head.output.change_current_state(None, None, None, Some((x_logical, 0).into()));
             placed.push((head.output.clone(), head.location));
             x_physical += head.size.0;
-            x_logical += (head.size.0 as f64 / scale).round() as i32;
+            x_logical = next_logical_x(x_logical, head.size.0, scale);
         }
         for (output, location) in placed {
             if let Some(entry) = self.outputs.iter_mut().find(|e| e.output == output) {
@@ -382,6 +382,58 @@ impl CompState {
             // recomputed against the moved output rectangle.
             layer_map_for_output(&output).arrange();
         }
+    }
+}
+
+/// The actual arithmetic behind [`CompState::relayout_outputs`]'s logical-x
+/// accumulation - pulled out so it's testable without a real `Output`/DRM
+/// head, the same reasoning `udev/mod.rs::bounds_of` already applies to
+/// `UdevState::bounds`. Takes the previous head's own resulting logical x,
+/// this head's physical width, and this head's fractional scale; returns
+/// the *next* head's logical x.
+fn next_logical_x(prev_logical_x: i32, physical_width: i32, scale: f64) -> i32 {
+    prev_logical_x + (physical_width as f64 / scale).round() as i32
+}
+
+#[cfg(test)]
+mod relayout_tests {
+    use super::next_logical_x;
+
+    /// The exact scenario this function exists to fix, using the exact
+    /// figures a peer session measured live from inside GTK
+    /// (`Gdk.Display.get_monitors()`) before the fix: `HDMI-A-1` at 1920
+    /// physical / ~0.843 scale (2276 logical), `eDP-1` at 1920 physical /
+    /// 1.0 scale placed after it. The bug this guards against: passing the
+    /// raw physical accumulator straight into `change_current_state`
+    /// advertised `eDP-1` at logical x=1920 - inside `HDMI-A-1`'s own
+    /// logical extent (0..2276), a real, measured ~356px overlap.
+    #[test]
+    fn a_sub_one_scale_head_is_not_overrun_by_the_next_heads_logical_x() {
+        let hdmi_logical_end = next_logical_x(0, 1920, 1920.0 / 2276.0);
+        assert_eq!(hdmi_logical_end, 2276);
+        let edp_logical_x = next_logical_x(hdmi_logical_end, 1920, 1.0);
+        assert!(edp_logical_x >= hdmi_logical_end, "eDP-1 logical x ({edp_logical_x}) must not land inside HDMI-A-1's own logical extent (0..{hdmi_logical_end})");
+        assert_eq!(edp_logical_x, 2276 + 1920);
+    }
+
+    /// Every output at `scale == 1.0` (this machine's actual current,
+    /// user-chosen configuration - see docs/TODO.md's "HDMI-A-1 forced to
+    /// scale 1.0" entry) must reduce to plain physical accumulation, byte
+    /// for byte - this is the case that was already correct before the
+    /// fix and must stay that way.
+    #[test]
+    fn every_output_at_unit_scale_reduces_to_plain_physical_accumulation() {
+        assert_eq!(next_logical_x(0, 1920, 1.0), 1920);
+        assert_eq!(next_logical_x(1920, 1920, 1.0), 3840);
+    }
+
+    /// A scale above 1.0 (a HiDPI output) narrows logical space relative to
+    /// physical - the next head's logical x must land *before* its own
+    /// physical offset would suggest, not after.
+    #[test]
+    fn a_scale_above_one_narrows_the_next_heads_logical_x() {
+        let logical_end = next_logical_x(0, 3840, 2.0);
+        assert_eq!(logical_end, 1920);
     }
 }
 

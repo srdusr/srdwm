@@ -58,19 +58,35 @@ impl DesktopIcon {
 }
 
 pub(crate) struct DesktopIcons {
-    /// Top-left of the grid's own `(0, 0)` cell, in global space - the
-    /// primary monitor's usable-area origin plus `GRID_MARGIN`.
-    pub(crate) origin: (i32, i32),
+    /// Top-left of the grid's own `(0, 0)` cell, in global space, one per
+    /// participating monitor - each monitor's own usable-area origin plus
+    /// `GRID_MARGIN`. The same `icons` list is mirrored at every origin
+    /// (`general.desktop_icons_all_monitors`, see `ensure_desktop_icons`):
+    /// one shared set of icons/cells, rendered and hit-tested again at each
+    /// monitor's own corner, rather than a separate icon set per monitor --
+    /// dragging a mirrored copy on any monitor moves the one underlying
+    /// icon, which then shows in its new cell everywhere it's mirrored.
+    /// Exactly one entry (the primary monitor's) when that config flag is
+    /// off, matching the original single-monitor behaviour.
+    pub(crate) origins: Vec<(i32, i32)>,
     pub(crate) icons: Vec<DesktopIcon>,
 }
 
 impl DesktopIcons {
-    /// Which icon (if any) global-space point `(x, y)` falls on - same
-    /// shape as `ContextMenu::row_at`. Returns an index into `self.icons`,
-    /// not the icon itself, so a caller holding `&mut self` can still
-    /// mutate the match without a borrow conflict.
-    pub(crate) fn icon_at(&self, x: i32, y: i32) -> Option<usize> {
-        self.icons.iter().position(|icon| icon.contains(self.origin, x, y))
+    /// Which icon (if any) global-space point `(x, y)` falls on, checked
+    /// against every mirrored origin - same shape as `ContextMenu::
+    /// row_at`. Returns an index into `self.icons` plus the origin it
+    /// matched (needed by drag-start to grab the copy actually clicked,
+    /// not always the primary monitor's), not the icon itself, so a caller
+    /// holding `&mut self` can still mutate the match without a borrow
+    /// conflict.
+    pub(crate) fn icon_at(&self, x: i32, y: i32) -> Option<(usize, (i32, i32))> {
+        for &origin in &self.origins {
+            if let Some(i) = self.icons.iter().position(|icon| icon.contains(origin, x, y)) {
+                return Some((i, origin));
+            }
+        }
+        None
     }
 }
 
@@ -276,13 +292,25 @@ mod tests {
     #[test]
     fn icon_at_matches_only_its_own_cell() {
         let icons = DesktopIcons {
-            origin: (100, 100),
+            origins: vec![(100, 100)],
             icons: vec![DesktopIcon { id: "a".into(), label: "a".into(), kind: IconKind::File, target: PathBuf::new(), cell: (1, 0), selected: false }],
         };
-        let (left, top) = icons.icons[0].top_left(icons.origin);
-        assert_eq!(icons.icon_at(left, top), Some(0), "top-left corner of the cell");
-        assert_eq!(icons.icon_at(left + CELL_WIDTH - 1, top + CELL_HEIGHT - 1), Some(0), "bottom-right pixel of the cell");
+        let origin = icons.origins[0];
+        let (left, top) = icons.icons[0].top_left(origin);
+        assert_eq!(icons.icon_at(left, top), Some((0, origin)), "top-left corner of the cell");
+        assert_eq!(icons.icon_at(left + CELL_WIDTH - 1, top + CELL_HEIGHT - 1), Some((0, origin)), "bottom-right pixel of the cell");
         assert_eq!(icons.icon_at(left - 1, top), None, "just left of the cell");
         assert_eq!(icons.icon_at(left + CELL_WIDTH, top), None, "just right of the cell");
+    }
+
+    #[test]
+    fn icon_at_checks_every_mirrored_origin() {
+        let icons = DesktopIcons {
+            origins: vec![(0, 0), (2000, 0)],
+            icons: vec![DesktopIcon { id: "a".into(), label: "a".into(), kind: IconKind::File, target: PathBuf::new(), cell: (0, 0), selected: false }],
+        };
+        assert_eq!(icons.icon_at(10, 10), Some((0, (0, 0))), "matches the first monitor's mirror");
+        assert_eq!(icons.icon_at(2010, 10), Some((0, (2000, 0))), "matches the second monitor's mirror, with its own origin");
+        assert_eq!(icons.icon_at(1000, 10), None, "the gap between the two monitors matches neither");
     }
 }

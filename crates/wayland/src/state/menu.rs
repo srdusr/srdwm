@@ -45,14 +45,32 @@ impl CompState {
                 self.sync_geometry(window);
                 foreign_toplevel::send_state(self, window);
             }
+            MenuAction::ToggleFullscreen => {
+                self.wm.borrow_mut().toggle_fullscreen(window);
+                self.sync_geometry(window);
+                foreign_toplevel::send_state(self, window);
+            }
+            MenuAction::ToggleFloating => {
+                self.wm.borrow_mut().toggle_floating(window);
+                self.sync_geometry(window);
+            }
             MenuAction::ToggleAlwaysOnTop => {
                 self.wm.borrow_mut().toggle_always_on_top(window);
+            }
+            MenuAction::MoveToWorkspace(workspace) => {
+                self.wm.borrow_mut().move_window_to_workspace(window, workspace);
             }
             MenuAction::Close => {
                 if let Some(w) = self.id_to_window.get(&window) {
                     crate::input::close_dwindow(w);
                 }
             }
+            // Never actually reached: the click-dispatch site
+            // (`input/pointer.rs`) intercepts `Separator` before calling
+            // this function at all. Handled here too so this match stays
+            // exhaustive without a catch-all that would silently swallow a
+            // real future variant added without updating this function.
+            MenuAction::Separator => {}
         }
     }
 

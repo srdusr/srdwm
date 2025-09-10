@@ -111,6 +111,7 @@ impl WaylandPlatform {
             data_control_state,
             session_lock_state: SessionLockManagerState::new::<CompState, _>(&dh, |_| true),
             _screencopy_state: screencopy::ScreencopyState::new::<CompState>(&dh),
+            _virtual_pointer_state: crate::virtual_pointer::VirtualPointerState::new::<CompState>(&dh),
             screencopy_pending: Vec::new(),
             _appmenu_state: crate::appmenu::AppmenuManagerState::new::<CompState>(&dh),
             _virtual_keyboard_state: smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState::new::<CompState, _>(&dh, |_client| true),
@@ -154,6 +155,8 @@ impl WaylandPlatform {
             desktop_icons: None,
             desktop_icon_buffers: HashMap::new(),
             desktop_icon_drag: None,
+            desktop_marquee: None,
+            marquee_buffers: Default::default(),
             desktop_menu: None,
             desktop_menu_buffer: None,
             last_icon_click: None,
@@ -161,6 +164,7 @@ impl WaylandPlatform {
             wm: wm.clone(),
             surface_to_id: HashMap::new(),
             id_to_window: HashMap::new(),
+            virtual_pointers: Vec::new(),
             dead_layer_surfaces: HashSet::new(),
             hidden_layer_surfaces: HashMap::new(),
             layer_surfaces_shown_once: HashSet::new(),
@@ -191,6 +195,16 @@ impl WaylandPlatform {
             ewmh: None,
             appmenu_registrar: None,
         };
+
+        // Same per-app remembered position/size seeding as the udev
+        // backend's own `connect()` - see that call site's own comment
+        // and `window_memory.rs` for what/why. The nested backend has no
+        // daily-driver use case of its own, but a window mapped while
+        // testing under it should still honor whatever a real session
+        // already remembered, not silently ignore the same store.
+        for (app_id, g) in crate::window_memory::load() {
+            wm.borrow_mut().set_remembered_geometry(app_id, (g.x, g.y, g.width, g.height));
+        }
 
         let listener = ListeningSocket::bind_auto("wayland", 0..32).map_err(err)?;
         if let Some(name) = listener.socket_name() {

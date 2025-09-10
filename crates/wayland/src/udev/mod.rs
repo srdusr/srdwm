@@ -204,6 +204,21 @@ pub(crate) struct UdevState {
     /// Pointer position in the *global* space, so it can cross between
     /// monitors; clamped to the union of all head rectangles.
     pub(crate) pointer_pos: Point<f64, Logical>,
+    /// Multi-cursor mode, Phase 1: every physical pointer/trackpad's own
+    /// last-known position, keyed by its real libinput device identity
+    /// (`smithay::backend::input::Event::device()`, confirmed `Device:
+    /// PartialEq + Eq + Hash` by reading smithay's own trait definition).
+    /// Purely a *visual* addition - `pointer_pos` above is still the one
+    /// position that actually drives clicks/drags/hit-testing, updated by
+    /// whichever device moved most recently exactly as before, so nothing
+    /// about existing interactive behaviour changes. This is what lets a
+    /// mouse and a trackpad each show their own live cursor sprite instead
+    /// of only the most-recently-moved device having a visible pointer at
+    /// all - see `docs/TODO.md`'s "Multi-cursor" plan for what later
+    /// phases would still need (per-device *interaction*, not just
+    /// per-device *rendering*, and the real `wl_seat` ecosystem wall a
+    /// second seat runs into for arbitrary client content).
+    pub(crate) secondary_cursors: HashMap<smithay::reexports::input::Device, Point<f64, Logical>>,
     /// A clone of the same `LibSeatSession` `platform.rs` opened the DRM
     /// device with (`LibSeatSession` is cheaply `Clone` - see its own
     /// derive - all clones share the same underlying seat connection).
@@ -267,7 +282,7 @@ impl UdevState {
     /// this from outside, but srdwm's own pointer clamp assuming an origin
     /// no other part of this backend actually enforces is the real bug --
     /// fixed here instead of just left for every future caller to avoid.
-    fn bounds(&self) -> (f64, f64, f64, f64) {
+    pub(crate) fn bounds(&self) -> (f64, f64, f64, f64) {
         bounds_of(self.heads.iter().map(|h| (h.location.x, h.location.y, h.size.0, h.size.1)))
     }
 }

@@ -52,6 +52,9 @@ xcursor = "0.3.11"
 # other "pinned to smithay's own version" dependency above - both need to
 # see one identical `Keysym` type, not two incompatible ones.
 xkbcommon = { version = "0.8", features = ["wayland"] }
+resvg = "0.48.1"
+usvg = "0.48.1"
+tiny-skia = "0.12.0"
 
 [dependencies.smithay]
 version = "0.7"

@@ -39,6 +39,7 @@ use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::dmabuf::DmabufState;
 use smithay::wayland::shm::ShmState;
 use smithay::wayland::xdg_activation::XdgActivationState;
+use wayland_protocols_wlr::virtual_pointer::v1::server::zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1;
 
 use srdwm_core::{Event as CoreEvent, SnapZoneKind, Window as CoreWindow, WindowId, WindowManager, TITLEBAR_HEIGHT};
 
@@ -217,6 +218,7 @@ pub(crate) struct CompState {
     pub(crate) _fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState,
     pub(crate) _cursor_shape_state: smithay::wayland::cursor_shape::CursorShapeManagerState,
     pub(crate) _screencopy_state: screencopy::ScreencopyState,
+    pub(crate) _virtual_pointer_state: crate::virtual_pointer::VirtualPointerState,
     /// Captures requested via `wlr-screencopy` but not yet serviced; drained
     /// inside the render pass (see `screencopy::service_pending`).
     pub(crate) screencopy_pending: Vec<screencopy::PendingCapture>,
@@ -362,6 +364,20 @@ pub(crate) struct CompState {
     /// drag is active.
     #[allow(clippy::type_complexity)]
     pub(crate) desktop_icon_drag: Option<(String, (i32, i32), (i32, i32))>,
+    /// An active rubber-band/marquee selection drag on bare desktop --
+    /// `(start, current)`, both global-space pointer positions. The one
+    /// "click and drag" desktop interaction this compositor never had at
+    /// all (only single-icon click-select existed) - reported live next
+    /// to "missing click and drag stuff like from windows". `None`
+    /// whenever no marquee is active. See `start_desktop_marquee`/
+    /// `update_desktop_marquee`/`end_desktop_marquee`.
+    pub(crate) desktop_marquee: Option<((i32, i32), (i32, i32))>,
+    /// Four thin solid-color strips forming the marquee's own rectangle
+    /// outline (top/bottom/left/right) - same "keep a persistent `Solid
+    /// ColorBuffer` per strip, update it in place every frame" pattern
+    /// `border_side_buffers` already uses for window borders, reused here
+    /// rather than allocating a fresh buffer on every motion tick.
+    pub(crate) marquee_buffers: [SolidColorBuffer; 4],
     /// The right-click desktop-icon/bare-desktop menu, if one is currently
     /// open - see `desktop_menu.rs`. Same lifecycle/mutual-exclusion
     /// story as `context_menu`/`snap_flyout` above.
@@ -383,6 +399,17 @@ pub(crate) struct CompState {
     pub(crate) wm: Rc<RefCell<WindowManager>>,
     pub(crate) surface_to_id: HashMap<WlSurface, WindowId>,
     pub(crate) id_to_window: HashMap<WindowId, DWindow>,
+    /// Every live `zwlr_virtual_pointer_v1` object, so `set_virtual_pointer_
+    /// pin` (`virtual_pointer.rs`) can find every pointer a given client
+    /// (identified by pid, via `Client::get_credentials`) owns without a
+    /// second, redundant per-client map - see that module's own doc
+    /// comment for why pid, not an opaque per-object id nothing outside
+    /// this compositor could otherwise learn, is the pinning handle. Pruned
+    /// lazily (a destroyed resource's own methods become no-ops, and dead
+    /// entries are filtered out the next time this is walked) rather than
+    /// on every single destroy - this list is only ever touched by an
+    /// infrequent pin/unpin request, never a hot path.
+    pub(crate) virtual_pointers: Vec<ZwlrVirtualPointerV1>,
     /// Surfaces whose `zwlr_layer_surface_v1` role has been destroyed --
     /// consulted by the pre-commit hook `CompositorHandler::new_surface`
     /// registers (see its doc comment) to work around a real smithay bug

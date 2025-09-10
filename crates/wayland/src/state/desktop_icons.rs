@@ -52,17 +52,42 @@ impl CompState {
         if !self.wm.borrow().desktop_icons_enabled {
             return;
         }
-        let Some(monitor) = self.wm.borrow().monitors().iter().find(|m| m.primary).cloned() else { return };
-        let origin = (monitor.geometry.x + GRID_MARGIN, monitor.geometry.y + GRID_MARGIN);
-        if let Some(icons) = &mut self.desktop_icons {
-            icons.origin = origin;
+        let origins = self.desktop_icon_origins();
+        if origins.is_empty() {
             return;
         }
-        let rows = ((monitor.geometry.height as i32 - 2 * GRID_MARGIN) / CELL_HEIGHT).max(1);
+        // Rows (for the default-cell-assignment grid) are always derived
+        // from the *primary* monitor's own height, even when mirroring onto
+        // every monitor - one shared cell layout for the shared icon list,
+        // not a different grid shape per monitor.
+        let rows_source = self.wm.borrow().monitors().iter().find(|m| m.primary).map(|m| m.geometry.height as i32).unwrap_or(600);
+        if let Some(icons) = &mut self.desktop_icons {
+            icons.origins = origins;
+            return;
+        }
+        let rows = ((rows_source - 2 * GRID_MARGIN) / CELL_HEIGHT).max(1);
         let saved = crate::desktop_icons_state::load();
         let icons = crate::desktop_icons::rescan(&saved, rows);
-        self.desktop_icons = Some(DesktopIcons { origin, icons });
+        self.desktop_icons = Some(DesktopIcons { origins, icons });
         self.desktop_icon_buffers.clear();
+    }
+
+    /// One grid origin per monitor icons should mirror onto: every enabled
+    /// monitor when `general.desktop_icons_all_monitors` is on (the
+    /// default - see that field's own doc comment), otherwise just the
+    /// primary monitor's, matching the original single-monitor behaviour.
+    /// Sorted by monitor id so the list (and therefore which origin
+    /// `icon_at` matches first) is stable call to call, not at the mercy of
+    /// `WindowManager::monitors()`'s own iteration order.
+    fn desktop_icon_origins(&self) -> Vec<(i32, i32)> {
+        let wm = self.wm.borrow();
+        let mut monitors = wm.monitors().to_vec();
+        monitors.sort_by_key(|m| m.id);
+        if wm.desktop_icons_all_monitors {
+            monitors.iter().map(|m| (m.geometry.x + GRID_MARGIN, m.geometry.y + GRID_MARGIN)).collect()
+        } else {
+            monitors.iter().find(|m| m.primary).map(|m| vec![(m.geometry.x + GRID_MARGIN, m.geometry.y + GRID_MARGIN)]).unwrap_or_default()
+        }
     }
 
     /// Re-derives the icon list from the real filesystem (a new/removed
@@ -73,9 +98,9 @@ impl CompState {
         let Some(icons) = &self.desktop_icons else { return };
         let rows = ((self.primary_monitor_height()) / CELL_HEIGHT).max(1);
         let saved = crate::desktop_icons_state::load();
-        let origin = icons.origin;
+        let origins = icons.origins.clone();
         let icons = crate::desktop_icons::rescan(&saved, rows);
-        self.desktop_icons = Some(DesktopIcons { origin, icons });
+        self.desktop_icons = Some(DesktopIcons { origins, icons });
         self.desktop_icon_buffers.clear();
     }
 
@@ -100,6 +125,19 @@ impl CompState {
             Some((rid, buf)) if rid == id => format!("{buf}_").into(),
             _ => icon.label.as_str().into(),
         };
+        // Real icon-theme artwork (WhiteSur, or whatever the user has
+        // configured) when it resolves; `None` - no installed theme ships
+        // this name, or the file it found didn't parse/render - falls
+        // back to `render_desktop_icon`'s own hand-drawn glyph rather than
+        // a blank box. Re-looked-up on every rebuild (icon selection
+        // toggling, a rename) rather than cached separately: rebuilds are
+        // already infrequent (see this function's own doc comment), and a
+        // theme change while running should just work on the next one
+        // without a separate cache-invalidation path to get wrong.
+        let glyph_box = decoration::desktop_icon_glyph_box(CELL_WIDTH as u32, CELL_HEIGHT as u32);
+        let (glyph_w, glyph_h) = ((glyph_box.2 - glyph_box.0).max(1) as u32, (glyph_box.3 - glyph_box.1).max(1) as u32);
+        let real_icon = crate::icon_theme::find_icon(crate::icon_theme::icon_name(icon.kind))
+            .and_then(|path| crate::icon_theme::rasterize_svg(&path, glyph_w, glyph_h));
         let data = decoration::render_desktop_icon(
             CELL_WIDTH as u32,
             CELL_HEIGHT as u32,
@@ -109,6 +147,7 @@ impl CompState {
             ICON_COLOR,
             label_color,
             theme.default_border_color,
+            real_icon.as_deref(),
         );
         let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (CELL_WIDTH, CELL_HEIGHT), 1, Transform::Normal, None);
         self.desktop_icon_buffers.insert(id.to_string(), buffer);
@@ -130,9 +169,9 @@ impl CompState {
     pub(crate) fn desktop_icon_render_list(&mut self) -> Vec<((i32, i32), MemoryRenderBuffer)> {
         let Some(icons) = &self.desktop_icons else { return Vec::new() };
         let ids: Vec<String> = icons.icons.iter().map(|i| i.id.clone()).collect();
-        let origin = icons.origin;
+        let origins = icons.origins.clone();
         let dragging = self.desktop_icon_drag.clone();
-        let mut out = Vec::with_capacity(ids.len());
+        let mut out = Vec::with_capacity(ids.len() * origins.len());
         for id in ids {
             let buffer = match self.icon_buffer(&id) {
                 Some(b) => b.clone(),
@@ -140,11 +179,19 @@ impl CompState {
             };
             let icons = self.desktop_icons.as_ref().unwrap();
             let icon = icons.icons.iter().find(|i| i.id == id).unwrap();
-            let pos = match &dragging {
-                Some((drag_id, _, live_pos)) if *drag_id == id => *live_pos,
-                _ => icon.top_left(origin),
-            };
-            out.push((pos, buffer));
+            // The dragged copy follows the live pointer on whichever
+            // monitor it's actually being dragged over; every other
+            // mirror (if any) stays put at its own origin's cell position
+            // - dragging on one monitor doesn't yank the icon's other
+            // mirrors around mid-gesture, only the one actually grabbed.
+            match &dragging {
+                Some((drag_id, _, live_pos)) if *drag_id == id => out.push((*live_pos, buffer)),
+                _ => {
+                    for &origin in &origins {
+                        out.push((icon.top_left(origin), buffer.clone()));
+                    }
+                }
+            }
         }
         out
     }
@@ -167,6 +214,66 @@ impl CompState {
         }
     }
 
+    /// Starts a rubber-band selection at `pos` (global space) - clears
+    /// whatever was selected before, matching real desktop convention
+    /// (Windows/GNOME/macOS all start a fresh marquee selection, not an
+    /// additive one, unless a modifier like Ctrl/Shift is held - not
+    /// implemented here, same as this menu's own already-documented "no
+    /// multi-select via click" gap, just now closed for the drag case).
+    pub(crate) fn start_desktop_marquee(&mut self, pos: (i32, i32)) {
+        self.select_desktop_icon(None);
+        self.desktop_marquee = Some((pos, pos));
+    }
+
+    /// Updates the live end corner of an in-progress marquee and re-
+    /// selects whatever icon cells the resulting rectangle now overlaps --
+    /// called from every pointer-motion event while a marquee is active,
+    /// same shape as `update_desktop_icon_drag`.
+    pub(crate) fn update_desktop_marquee(&mut self, pos: (i32, i32)) {
+        let Some((start, _)) = self.desktop_marquee else { return };
+        self.desktop_marquee = Some((start, pos));
+        let (x0, y0) = (start.0.min(pos.0), start.1.min(pos.1));
+        let (x1, y1) = (start.0.max(pos.0), start.1.max(pos.1));
+        // Only the mirror on whichever monitor the marquee itself *started*
+        // on - a drag on one monitor selecting another monitor's mirrored
+        // copies (or double-selecting both) would be actively confusing,
+        // not a feature. Falls back to every origin if no monitor claims
+        // the start point at all (shouldn't happen in practice; `Compositor
+        // ::pointer_monitor`-style clamping already keeps the pointer
+        // inside some monitor's bounds).
+        let origins: Vec<(i32, i32)> = {
+            let wm = self.wm.borrow();
+            match wm.monitors().iter().find(|m| m.full_geometry.contains_point(start.0, start.1)) {
+                Some(m) => vec![(m.geometry.x + GRID_MARGIN, m.geometry.y + GRID_MARGIN)],
+                None => self.desktop_icons.as_ref().map(|i| i.origins.clone()).unwrap_or_default(),
+            }
+        };
+        let Some(icons) = &mut self.desktop_icons else { return };
+        let mut changed = Vec::new();
+        for icon in &mut icons.icons {
+            let overlaps = origins.iter().any(|&origin| {
+                let (left, top) = icon.top_left(origin);
+                let (right, bottom) = (left + CELL_WIDTH, top + CELL_HEIGHT);
+                left < x1 && right > x0 && top < y1 && bottom > y0
+            });
+            if icon.selected != overlaps {
+                icon.selected = overlaps;
+                changed.push(icon.id.clone());
+            }
+        }
+        for id in changed {
+            self.rebuild_icon_buffer(&id);
+        }
+    }
+
+    /// Ends an in-progress marquee, if any - the final `update_desktop_
+    /// marquee` call already left the right icons selected, so this only
+    /// needs to clear the drag state itself (and the rendered outline with
+    /// it).
+    pub(crate) fn end_desktop_marquee(&mut self) {
+        self.desktop_marquee = None;
+    }
+
     /// True when this press is the second of a double-click on the same
     /// icon - same 400ms threshold and reset-after-a-double shape as
     /// `is_double_click`, keyed by `DesktopIcon::id` since an icon has no
@@ -181,10 +288,16 @@ impl CompState {
         doubled
     }
 
-    pub(crate) fn start_desktop_icon_drag(&mut self, id: &str, pointer: (i32, i32)) {
+    /// `origin` is whichever mirror was actually clicked (`icon_at`'s own
+    /// return value, threaded through by the caller) - with the icon
+    /// mirrored onto several monitors, grabbing it relative to the copy
+    /// under the pointer, not always the primary monitor's, is what makes
+    /// the drag track the cursor instead of jumping to a different
+    /// monitor's copy the instant the drag starts.
+    pub(crate) fn start_desktop_icon_drag(&mut self, id: &str, origin: (i32, i32), pointer: (i32, i32)) {
         let Some(icons) = &self.desktop_icons else { return };
         let Some(icon) = icons.icons.iter().find(|i| i.id == id) else { return };
-        let top_left = icon.top_left(icons.origin);
+        let top_left = icon.top_left(origin);
         let grab_offset = (pointer.0 - top_left.0, pointer.1 - top_left.1);
         self.desktop_icon_drag = Some((id.to_string(), grab_offset, top_left));
     }
@@ -204,8 +317,22 @@ impl CompState {
     /// and persists it.
     pub(crate) fn end_desktop_icon_drag(&mut self) {
         let Some((id, _, live_pos)) = self.desktop_icon_drag.take() else { return };
+        // The cell math below needs the origin of whichever monitor the
+        // icon was actually dropped on, not always the first mirror --
+        // recomputed fresh (same formula `desktop_icon_origins` uses)
+        // rather than searched for in `icons.origins`, since a drop
+        // just past every monitor's own strict icon-grid rect (but still
+        // on-screen) should still resolve to that monitor's grid, not fall
+        // through to a stale/wrong one.
+        let origin = self
+            .wm
+            .borrow()
+            .monitors()
+            .iter()
+            .find(|m| m.full_geometry.contains_point(live_pos.0, live_pos.1))
+            .map(|m| (m.geometry.x + GRID_MARGIN, m.geometry.y + GRID_MARGIN))
+            .unwrap_or(self.desktop_icons.as_ref().map(|i| i.origins.first().copied().unwrap_or((0, 0))).unwrap_or((0, 0)));
         let Some(icons) = &mut self.desktop_icons else { return };
-        let origin = icons.origin;
         let raw = (live_pos.0 - origin.0, live_pos.1 - origin.1);
         let raw_cell = ((raw.0 as f64 / CELL_WIDTH as f64).round() as i32, (raw.1 as f64 / CELL_HEIGHT as f64).round() as i32).max_zero();
         let occupied: std::collections::HashSet<(i32, i32)> = icons.icons.iter().filter(|i| i.id != id).map(|i| i.cell).collect();
@@ -364,6 +491,27 @@ impl CompState {
         self.refresh_desktop_icons();
     }
 
+    /// "New > Text Document" (Windows) / a blank file (macOS's own desktop
+    /// menu has no direct equivalent, but every mainstream file manager
+    /// does) - the concrete gap behind "not even new file" reported live
+    /// against this menu next to Windows'/macOS' own. Same collision-
+    /// avoidance and refresh as `new_desktop_folder` just above.
+    pub(crate) fn new_desktop_text_file(&mut self) {
+        let Ok(home) = std::env::var("HOME") else { return };
+        let desktop = std::path::PathBuf::from(home).join("Desktop");
+        let mut name = "New Text Document.txt".to_string();
+        let mut n = 2;
+        while desktop.join(&name).exists() {
+            name = format!("New Text Document ({n}).txt");
+            n += 1;
+        }
+        if let Err(e) = std::fs::write(desktop.join(&name), "") {
+            log::warn!("desktop_icons: couldn't create {name:?}: {e}");
+            return;
+        }
+        self.refresh_desktop_icons();
+    }
+
     pub(crate) fn open_desktop_icon_menu(&mut self, icon_id: &str, pos: (i32, i32)) {
         let Some(icons) = &self.desktop_icons else { return };
         let Some(icon) = icons.icons.iter().find(|i| i.id == icon_id) else { return };
@@ -397,9 +545,15 @@ impl CompState {
             DesktopMenuAction::Delete(id) => self.delete_desktop_icon(&id),
             DesktopMenuAction::EmptyTrash => self.empty_trash(),
             DesktopMenuAction::NewFolder => self.new_desktop_folder(),
+            DesktopMenuAction::NewTextFile => self.new_desktop_text_file(),
             DesktopMenuAction::OpenTerminalHere => self.open_terminal_here(),
             DesktopMenuAction::OpenInFileManager => self.open_desktop_in_file_manager(),
             DesktopMenuAction::Refresh => self.refresh_desktop_icons(),
+            // Never actually reached - the click-dispatch site intercepts
+            // `Separator` first, same as `context_menu::MenuAction::
+            // Separator`'s own dispatch. Handled here too so this match
+            // stays exhaustive.
+            DesktopMenuAction::Separator => {}
         }
     }
 }
