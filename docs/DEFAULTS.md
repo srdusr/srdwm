@@ -18,9 +18,15 @@ srd.set("general.focus_follows_mouse", false)          -- Default: false - hover
 srd.set("general.auto_raise", false)                   -- Default: false - also raise on hover-focus, not just focus
 srd.set("general.gpu", false)                          -- Default: false - udev backend only, see "GPU rendering" below
 srd.set("general.desktop_icons", true)                 -- Default: true - see "Desktop icons" below
+srd.set("general.desktop_icons_all_monitors", true)    -- Default: true - mirror icons onto every monitor, not just primary
+srd.set("general.reserve_top", 0)                      -- Default: 0 - static space reserved before any bar/dock connects
+srd.set("general.reserve_bottom", 0)                   -- Default: 0 - see "Startup space reservation" below
+srd.set("general.reserve_left", 0)                     -- Default: 0
+srd.set("general.reserve_right", 0)                    -- Default: 0
 srd.set("general.file_manager", "")                    -- Default: "" - empty means dispatch via `xdg-open`
 srd.set("general.desktop_icon_single_click", false)    -- Default: false - double-click opens an icon
 srd.set("general.terminal", "")                        -- Default: "" - empty tries a common terminal on $PATH
+srd.set("general.phone_mode", false)                   -- Default: false - see "Phone mode" below
 ```
 `general.smart_placement`/`general.border_width` are not listed: neither
 is implemented - new-window placement always uses smart placement
@@ -58,20 +64,50 @@ separate, lower-level override for testing without touching config --
 either it or `general.gpu` being set is enough to
 attempt GPU rendering.
 
+#### Phone mode (`general.phone_mode`)
+
+Off by default. When on, a new window opens maximized instead of
+floating/tiled small - the one placement default a phone-shaped screen
+actually needs (no real room for more than one window at a time), applied
+the same way every other rule-overridable default already is: a rule's
+own explicit `floating = true` (a genuinely small popup) or `maximized =
+false` still wins over this. Live-settable via `srd set phone_mode
+<true|false>` (`WindowManager::phone_mode`'s own doc comment) - changes
+only how the *next* new window opens, not a re-layout of windows already
+open, same as `general.animations`/`general.shadows`.
+
+Read-only via `srd settings`'s own `phone_mode` field too, specifically so
+a shell panel (AGS) can adapt its own chrome (a phone-shaped bar/dock
+layout, concretely) to the same signal without a second, separate way to
+ask "is this a phone-shaped session" - that adaptation is real work in
+*that* project, not this one; this is the one thing srdwm itself needed
+to add so a panel has something real to read. Not touchscreen input --
+see `docs/TODO.md`'s own touchscreen entry for why that's separately
+skipped (no hardware to verify against).
+
 #### Desktop icons (`general.desktop_icons`)
 
 Real, individually-draggable desktop icons rendered above the wallpaper
-and below every window, on the primary monitor only: fixed **Home**
-(`$HOME`), **Computer** (`/`), and **Trash** (`~/.local/share/Trash/files`,
-or `$XDG_DATA_HOME/Trash/files` if set) icons, plus one per real,
-non-hidden entry of `~/Desktop` (created if it doesn't exist yet). On by
-default - unlike `general.gpu`, this is a purely visual, directly
-requested feature with no hardware-support question to hedge against.
+and below every window: fixed **Home** (`$HOME`), **Computer** (`/`), and
+**Trash** (`~/.local/share/Trash/files`, or `$XDG_DATA_HOME/Trash/files`
+if set) icons, plus one per real, non-hidden entry of `~/Desktop` (created
+if it doesn't exist yet). On by default - unlike `general.gpu`, this is a
+purely visual, directly requested feature with no hardware-support
+question to hedge against.
 
-Hand-drawn glyphs, not real icon-theme artwork - no PNG/SVG decoding
-capability exists anywhere in this codebase, so folder/computer/trash/file
-icons are simple flat shapes, the same technique the titlebar's own
-buttons use.
+`general.desktop_icons_all_monitors` (default `true`) mirrors the same
+icon set onto every enabled monitor's own corner, matching real macOS
+convention (each display gets its own Desktop icons view) rather than the
+older single-monitor-only convention. Set `false` for the original
+primary-monitor-only behaviour. One shared set of icons/cells underneath
+either way - dragging a mirrored copy on any monitor moves the one real
+icon, which then shows in its new cell everywhere it's mirrored.
+
+Real freedesktop icon-theme artwork (`resvg`-rendered SVG, real theme
+lookup honoring whatever `gtk-icon-theme-name` is configured - WhiteSur on
+this machine) when a theme has the icon; the original hand-drawn flat
+shapes remain as the fallback for whatever a theme doesn't ship (see
+`icon_theme.rs`'s own module doc comment).
 
 Icons sort into one alphabetical list by label, case-insensitive - the
 three fixed shortcuts interleave with real filenames rather than always
@@ -116,8 +152,25 @@ manager needs the Wayland `wl_data_device`/`text/uri-list` clipboard
 protocol, a separate substantial feature - an srdwm-only internal
 clipboard wouldn't achieve real interop anyway), filesystem watching (a
 file added to `~/Desktop` by another program needs "Refresh" or a restart
-to appear), multi-select, View/Sort submenus (no nested-menu UI exists),
-and icons on any monitor but the primary one.
+to appear), multi-select, and View/Sort submenus (no nested-menu UI
+exists).
+
+#### Startup space reservation (`general.reserve_top`/`_bottom`/`_left`/`_right`)
+
+`0` (no reservation) on every edge by default. A bar or dock only actually
+reserves its own strip (`set_exclusive_zone`) once it has connected and
+committed a real surface - which happens *after* this compositor's own
+first render pass and first-window-placement decisions, since autostart
+spawns those clients rather than waiting for them. Desktop icons re-derive
+their position every frame so they self-correct once the real zone lands,
+but a window placed in that gap gets a one-time placement decision and can
+end up spawned under where the bar will render, with nothing to nudge it
+out afterward. Setting these to the bar/dock's own known height/width
+closes that gap: every usable-area computation already accounts for it
+from the first call, before any real client has connected. Only ever
+shrinks the usable area *further* than a real, already-connected client's
+own zone - a real bar registering a bigger reservation always wins, this
+is a floor under it, not a competing claim.
 
 ### Monitor Settings (`monitor.*`)
 ```lua
@@ -535,10 +588,18 @@ srd.rule(matcher, actions)
   `general.resize_margin` (Hyprland's per-window `extend_border_grab_area`).
   Also settable live via `srd.window.set_resize_margin(n)` on the focused
   window.
+- `aspect_ratio` (string, `"W:H"`, positive integers) - holds this ratio
+  while the window is floating and being interactively resized, deriving
+  whichever dimension the user isn't actively dragging from the one they
+  are. No effect on a tiled window. The "phone monitor" primitive: tag any
+  VM/emulator/`scrcpy` window by `class` and it keeps a phone-shaped frame
+  through a resize - this is a plain window-rule action, not anything
+  Android- or VM-specific.
 
 ```lua
 srd.rule({ class = "pavucontrol" }, { floating = true })
 srd.rule({ title = "Picture-in-Picture" }, { floating = true, width = 480, height = 270 })
+srd.rule({ class = "scrcpy" }, { floating = true, aspect_ratio = "9:16" })
 ```
 
 ## Platform-Specific Defaults

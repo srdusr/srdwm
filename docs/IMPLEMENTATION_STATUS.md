@@ -1,7 +1,8 @@
 # Implementation status
 
-This mirrors the style of the legacy C++ project's own status doc (now at
-`legacy-cpp/docs/IMPLEMENTATION_STATUS.md`), but for the Rust rewrite.
+This mirrors the style of the project's own earlier C++ status doc (that
+codebase has since been removed - see `docs/PRIOR_ART.md` for what it was
+and why it was replaced; git history still has it if anyone needs it).
 "Verified" means: built with `cargo test --workspace` (0 warnings under
 `cargo clippy --workspace`) and, where applicable, actually run and observed
 doing the thing described - not just "the code compiles and looks right."
@@ -71,6 +72,17 @@ doing the thing described - not just "the code compiles and looks right."
   translated from Lua combo strings via a hand-maintained keysym table
   (`crates/x11/src/keysyms.rs`, letters/digits/navigation/F-keys/media keys;
   not a full xkbcommon keymap).
+- Right-click titlebar window menu (minimize/maximize/fullscreen/floating/
+  always-on-top/move-to-workspace/close), same row set as the Wayland
+  backend's own (`srdwm_core::context_menu`, shared between both) --
+  drawn into a small override-redirect popup window with a root-window
+  pointer grab for "click anywhere else dismisses" (`crates/x11/src/
+  platform/context_menu.rs`). Live-verified under an isolated Xvfb
+  instance.
+- `_NET_WM_STRUT`/`_NET_WM_STRUT_PARTIAL` read from any mapped window
+  (including override-redirect bars/docks), shrinking each monitor's own
+  usable rect the same way the Wayland backend's layer-shell exclusive
+  zones already do (`crates/x11/src/platform/struts.rs`).
 - **Verified live**: run under Xephyr with the shipped example config, an
   `xterm` client was correctly reparented (frame at the exact
   `SmartPlacement`-computed position, client offset by exactly

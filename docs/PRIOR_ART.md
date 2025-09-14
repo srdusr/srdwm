@@ -1,14 +1,16 @@
 # Prior art
 
-Two kinds of "prior art" shaped this rewrite: the legacy C++ codebase this
-project itself started as, and the wider field of window managers/compositors
-that solve pieces of the same problem.
+Two kinds of "prior art" shaped this project: the C++ codebase it originally
+started as, and the wider field of window managers/compositors that solve
+pieces of the same problem.
 
-## The legacy C++ codebase
+## The original C++ codebase
 
-`legacy-cpp/` (formerly the repo root) is preserved for reference. An
-`Explore`-agent audit of it before the rewrite found it was mostly a design
-skeleton rather than working software:
+Removed from the tree (2026-08-26, on request - it had no working code left
+to reference and this project is now far past what it was). Git history has
+it if anyone ever needs to look. An `Explore`-agent audit of it, done before
+it was replaced, found it was mostly a design skeleton rather than working
+software:
 
 | Backend | Status | What was real |
 |---|---|---|
@@ -18,7 +20,7 @@ skeleton rather than working software:
 | macOS (`macos_platform.cc`) | Mostly stub | Real Accessibility-permission request and `CGDisplay`-based monitor enumeration. Window move/resize were empty TODOs; the "overlay window" decoration idea was never implemented. |
 | Lua config (`lua_manager.cc`) | Partially functional | Scalar config get/set worked. `srd.bind()` stored the key-combo string but not the actual Lua closure - keybindings could never fire. `srd.window.focused()` returned a hardcoded placeholder table with no methods, so the shipped example config's `window:close()` would have errored at runtime. |
 
-The Rust rewrite fixes these rather than porting them: see
+This project fixes these rather than porting them: see
 `docs/IMPLEMENTATION_STATUS.md` for what's real now, and the module-level doc
 comments in `crates/x11/src/lib.rs` and `crates/wayland/src/lib.rs` for the
 specific bugs each backend's replacement corrects.
@@ -35,7 +37,7 @@ informed a specific decision:
 - **[river](https://codeberg.org/river/river)** (Zig, Wayland, wlroots) --
   configured via an external CLI/IPC protocol rather than an embedded
   scripting language. srdwm deliberately goes the other way (embedded Lua,
-  matching the project's own history and this rewrite's brief), but river is
+  matching the project's own history and direction), but river is
   a useful reminder that "protocol, not library" is a legitimate alternative
   to what this project does.
 - **[leftwm](https://github.com/leftwm/leftwm)** and
@@ -75,5 +77,5 @@ informed a specific decision:
   focused window, `srd.window.focus("left")` for directional navigation,
   `srd.workspace.next()`) matches what `docs/DEFAULTS.md` always
   *documented* - but the legacy engine never actually implemented that
-  surface (see table above). This rewrite implements the documented API for
+  surface (see table above). This project implements the documented API for
   real rather than inventing a new one.
