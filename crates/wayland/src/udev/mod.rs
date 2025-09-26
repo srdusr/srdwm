@@ -200,6 +200,10 @@ pub(crate) struct UdevState {
     /// Shared by every head: one GPU, one software renderer.
     pub(crate) renderer: PixmanRenderer,
     pub(crate) heads: Vec<UdevHead>,
+    /// Fully virtual "fake" monitors - no DRM connector/CRTC, never
+    /// scanned out. See `virtual_heads.rs`'s own module doc comment for
+    /// the full design and scope.
+    pub(crate) virtual_heads: Vec<VirtualHead>,
     pub(crate) active: bool,
     /// Pointer position in the *global* space, so it can cross between
     /// monitors; clamped to the union of all head rectangles.
@@ -558,5 +562,7 @@ mod outputs;
 mod platform;
 mod render;
 mod session;
+mod virtual_heads;
 
 pub use platform::UdevPlatform;
+pub(crate) use virtual_heads::VirtualHead;

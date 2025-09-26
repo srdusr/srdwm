@@ -149,7 +149,16 @@ impl WindowManager {
             if layout_name != "tiling" {
                 let existing: Vec<Rect> = self.windows_on_workspace(workspace).map(|w| w.geometry).collect();
                 let size = (window.geometry.width, window.geometry.height);
-                window.geometry = SmartPlacement::place(monitor, &existing, size, &self.placement);
+                // `next_cascade_step` advances on every real placement,
+                // never reset by a window closing - see `SmartPlacement::
+                // cascade`'s own doc comment for the reported bug this
+                // fixes ("every window opens in the same spot" when
+                // opening one app at a time, closing each before the
+                // next, which kept `existing` empty at the moment of
+                // every single placement).
+                let step = self.next_cascade_step.get();
+                self.next_cascade_step.set(step.wrapping_add(1));
+                window.geometry = SmartPlacement::place(monitor, &existing, size, &self.placement, step);
             }
         }
         if let Some(geometry) = actions.as_ref().and_then(|a| a.geometry) {

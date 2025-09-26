@@ -321,6 +321,27 @@ fn build_dispatch(args: &[String]) -> Result<String, String> {
                 _ => Err(format!("unknown 'set output' target '{noun}' - {usage_hint}")),
             }
         }
+        // `srd dispatch create fake-monitor <name> <width>x<height>` /
+        // `srd dispatch remove fake-monitor <name>` - a fully virtual
+        // `wl_output` with no real hardware behind it. See
+        // `crates/wayland/src/udev/virtual_heads.rs`'s own module doc
+        // comment for the full design and scope (content is readable via
+        // any `zwlr_screencopy_manager_v1` client - `grim -o <name>`,
+        // concretely - there is no real display to look at directly).
+        "create" | "remove" => {
+            if args.get(1).map(String::as_str) != Some("fake-monitor") {
+                return Err(format!("'{verb}' only supports 'fake-monitor' - {usage_hint}"));
+            }
+            let name = args.get(2).ok_or("'fake-monitor' needs a name")?;
+            if verb == "remove" {
+                return Ok(format!(r#"{{"cmd":"remove_fake_monitor","name":{name:?}}}"#));
+            }
+            let size = args.get(3).ok_or("'create fake-monitor' needs a <width>x<height>")?;
+            let (w, h) = size.split_once('x').ok_or("size must be '<width>x<height>', e.g. 1920x1080")?;
+            let width: u32 = w.parse().map_err(|_| "width must be a number".to_string())?;
+            let height: u32 = h.parse().map_err(|_| "height must be a number".to_string())?;
+            Ok(format!(r#"{{"cmd":"create_fake_monitor","name":{name:?},"width":{width},"height":{height}}}"#))
+        }
         // `srd dispatch pin input <pid> <window-id>` / `srd dispatch
         // unpin input <pid>` - the CLI surface for `pin_input`, Phase 2
         // of the multi-cursor plan (`docs/TODO.md`). `<pid>` is the
@@ -366,6 +387,8 @@ fn print_usage() {
     eprintln!("  srd dispatch set output enabled <name|id> <true|false>");
     eprintln!("  srd dispatch pin input <pid> <window-id>");
     eprintln!("  srd dispatch unpin input <pid>");
+    eprintln!("  srd dispatch create fake-monitor <name> <width>x<height>");
+    eprintln!("  srd dispatch remove fake-monitor <name>");
     eprintln!("  srd capture workspace <id> <path> [<width>x<height>]");
     eprintln!("  srd set border_width <n>");
     eprintln!("  srd set border_color <#hex>");
@@ -469,6 +492,25 @@ mod tests {
             build_request(&args(&["dispatch", "set", "output", "enabled", "HDMI-A-1", "true"])).unwrap(),
             r#"{"cmd":"set_output_enabled","name":"HDMI-A-1","enabled":true}"#
         );
+    }
+
+    #[test]
+    fn create_fake_monitor_builds_a_sized_request() {
+        assert_eq!(
+            build_request(&args(&["dispatch", "create", "fake-monitor", "FAKE-1", "1920x1080"])).unwrap(),
+            r#"{"cmd":"create_fake_monitor","name":"FAKE-1","width":1920,"height":1080}"#
+        );
+    }
+
+    #[test]
+    fn remove_fake_monitor_needs_no_size() {
+        assert_eq!(build_request(&args(&["dispatch", "remove", "fake-monitor", "FAKE-1"])).unwrap(), r#"{"cmd":"remove_fake_monitor","name":"FAKE-1"}"#);
+    }
+
+    #[test]
+    fn create_fake_monitor_rejects_a_malformed_size() {
+        assert!(build_request(&args(&["dispatch", "create", "fake-monitor", "FAKE-1", "1920"])).is_err());
+        assert!(build_request(&args(&["dispatch", "create", "fake-monitor", "FAKE-1", "widexhigh"])).is_err());
     }
 
     #[test]

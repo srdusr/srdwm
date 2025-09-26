@@ -162,6 +162,7 @@ impl UdevPlatform {
             card: card.clone(),
             renderer,
             heads,
+            virtual_heads: Vec::new(),
             active: true,
             pointer_pos: (width as f64 / 2.0, height as f64 / 2.0).into(),
             secondary_cursors: std::collections::HashMap::new(),
@@ -621,6 +622,22 @@ impl Platform for UdevPlatform {
         for (pid, window) in pin_requests {
             self.state.set_virtual_pointer_pin(pid, window);
         }
+        // Applies any `srd dispatch create fake-monitor`/`remove fake-
+        // monitor` IPC requests queued since the last poll - see
+        // `crates/wayland/src/udev/virtual_heads.rs`'s own module doc
+        // comment.
+        let create_fake_monitor_requests = self.state.wm.borrow_mut().drain_create_fake_monitor_requests();
+        for (name, width, height) in create_fake_monitor_requests {
+            if let Err(e) = self.state.create_virtual_head(name.clone(), width as i32, height as i32) {
+                log::warn!("fake monitor: failed to create {name}: {e}");
+            }
+        }
+        let remove_fake_monitor_requests = self.state.wm.borrow_mut().drain_remove_fake_monitor_requests();
+        for name in remove_fake_monitor_requests {
+            if let Err(e) = self.state.remove_virtual_head(&name) {
+                log::warn!("fake monitor: failed to remove {name}: {e}");
+            }
+        }
         // Throttled the same way and for the same underlying reason as the
         // `ipc.poll()` call above - this is the *other*, larger half of
         // this cycle's needless work at the dead-pipe-driven spin rate.
@@ -648,6 +665,12 @@ impl Platform for UdevPlatform {
         const RENDER_INTERVAL: Duration = Duration::from_millis(8);
         if self.last_render.elapsed() >= RENDER_INTERVAL {
             self.last_render = Instant::now();
+            // Before `render_udev_frame` drains `self.screencopy_pending`
+            // for real heads - see `service_virtual_head_captures`'s own
+            // doc comment for why a fake-monitor capture must never reach
+            // that drain at all (it would wait forever for a real page-
+            // flip that will never come).
+            self.state.service_virtual_head_captures();
             self.state.render_udev_frame();
         }
         Ok(self.pending.borrow_mut().drain(..).collect())
@@ -825,6 +848,23 @@ impl Platform for UdevPlatform {
                 out.push(m);
                 next_id += 1;
             }
+        }
+        // Fake monitors (`virtual_heads.rs`) get the same treatment a real
+        // head does, minus the layer-shell exclusive-zone/reservation math
+        // (nothing binds a bar/dock to one in this phase, so there is
+        // never a zone to shrink `usable` by) and minus `srd.monitor.
+        // split` (a fake monitor already *is* exactly the size it was
+        // created at - splitting it further is a real, separate ask this
+        // phase doesn't attempt). `full == usable == maximize`, `scale`
+        // always `1.0` - see `VirtualHead`'s own doc comment for why.
+        for head in &udev.virtual_heads {
+            let full = srdwm_core::Rect::new(head.location.x, head.location.y, head.size.0 as u32, head.size.1 as u32);
+            let mut m = srdwm_core::Monitor::new(next_id, head.name.clone(), full);
+            m.full_geometry = full;
+            m.maximize_geometry = full;
+            m.primary = false;
+            out.push(m);
+            next_id += 1;
         }
         Ok(out)
     }

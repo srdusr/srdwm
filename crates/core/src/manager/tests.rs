@@ -18,8 +18,11 @@
         w.geometry = Rect::new(0, 0, 400, 300);
         wm.add_window(w);
         let placed = wm.window(id).unwrap().geometry;
-        // Grid placement starts at grid_margin, not (0,0).
-        assert_eq!(placed.x, wm.placement.grid_margin as i32);
+        // The first window on an empty workspace cascades (see
+        // `SmartPlacement::place`'s own doc comment on why grid is
+        // skipped entirely when nothing else is open), starting at
+        // `cascade_offset`, not (0,0).
+        assert_eq!(placed.x, wm.placement.cascade_offset);
     }
 
     #[test]
@@ -569,16 +572,35 @@
         let mut wa = Window::new(a, "a");
         wa.geometry = Rect::new(0, 0, 400, 300);
         wm.add_window(wa);
+        // `a`'s own real, auto-placed geometry - read back rather than
+        // assumed, since `SmartPlacement` (not the `Rect` set above,
+        // which `add_window` overwrites) decides where it actually lands.
+        let a_geom = wm.window(a).unwrap().geometry;
         let b = wm.alloc_window_id();
-        let mut wb = Window::new(b, "b");
-        wb.geometry = Rect::new(0, 0, 400, 300); // identical geometry to `a`
-        wm.add_window(wb);
+        wm.add_window(Window::new(b, "b"));
+        // Forced to genuinely identical geometry to `a` *after* placement
+        // (`add_window`'s own `SmartPlacement` would otherwise place `b`
+        // to avoid overlapping `a`, defeating this test's actual point --
+        // the overlap here needs to be real, not incidental).
+        wm.window_mut(b).unwrap().geometry = a_geom;
         let other_workspace = wm.add_workspace("2", "dynamic");
         wm.move_window_to_workspace(b, other_workspace); // b is now off-screen, not minimized
 
-        let (hit_id, _) = wm.hit_test(200, 10).unwrap();
+        // `hit_test` specifically means titlebar/border/resize-margin hits
+        // (see its own doc comment) - a point in the window's plain
+        // content area always resolves `None` there by design (`w`'s own
+        // opaque content is in the way, `hit_test_with`'s own comment).
+        // A few pixels below the top edge, horizontally centered, is
+        // safely inside the titlebar band without landing in a corner
+        // resize zone.
+        let (px, py) = (a_geom.x + a_geom.width as i32 / 2, a_geom.y + 5);
+        let (hit_id, _) = wm.hit_test(px, py).unwrap();
         assert_eq!(hit_id, a, "a click must land on the visible window, not one hidden on another workspace");
-        assert_eq!(wm.window_at(200, 10), Some(a));
+        // `window_at` (content-inclusive) is checked at the window's
+        // actual center instead - unlike `hit_test`, it has no titlebar-
+        // only restriction to work around.
+        let center = (a_geom.x + a_geom.width as i32 / 2, a_geom.y + a_geom.height as i32 / 2);
+        assert_eq!(wm.window_at(center.0, center.1), Some(a));
     }
 
     #[test]

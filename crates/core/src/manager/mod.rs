@@ -80,6 +80,12 @@ pub struct WindowManager {
     /// ever learn) to a specific window. See `input_pin.rs`'s own doc
     /// comment.
     pin_input_requests: Vec<(i32, Option<WindowId>)>,
+    /// Same cross-boundary-request pattern, for fake (fully virtual, no
+    /// real hardware) monitors - see `fake_monitor.rs`'s own doc comment
+    /// and `crates/wayland/src/udev/virtual_heads.rs`'s module doc
+    /// comment for the full design.
+    create_fake_monitor_requests: Vec<(String, u32, u32)>,
+    remove_fake_monitor_requests: Vec<String>,
     /// Same cross-boundary-request pattern as `output_position_requests`
     /// just above, for enable/disable - see `request_output_enabled`'s
     /// own doc comment for why this is keyed by name, not `MonitorId`.
@@ -170,6 +176,19 @@ pub struct WindowManager {
     layouts: HashMap<String, Box<dyn Layout>>,
     pub tiling: TilingConfig,
     pub placement: PlacementConfig,
+    /// Feeds `SmartPlacement::place`'s own `cascade_step` - advances on
+    /// every real cascade/grid placement, session-long, never reset by a
+    /// window closing. See `SmartPlacement::cascade`'s own doc comment
+    /// for the reported "every window opens in the same spot" bug this
+    /// exists to fix. A `Cell`, not a plain field: `add_window`'s own
+    /// `target_monitor` is a `&Monitor` borrowed from `self.monitors` and
+    /// stays alive across the same call that needs to bump this counter,
+    /// so a plain `&mut self` write there would conflict with that live
+    /// immutable borrow - interior mutability sidesteps it without
+    /// restructuring the borrow, the same reasoning any of this
+    /// compositor's other `Rc<RefCell<...>>`-style shared-mutation points
+    /// already accept.
+    next_cascade_step: std::cell::Cell<u32>,
     /// Whether geometry changes made via `toggle_maximize`/`toggle_fullscreen`
     /// should be animated. Read from `general.animations`; a backend's open
     /// animation is gated on this too, since core has no notion of "open".
@@ -410,6 +429,8 @@ impl WindowManager {
             monitors: Vec::new(),
             output_position_requests: Vec::new(),
             pin_input_requests: Vec::new(),
+            create_fake_monitor_requests: Vec::new(),
+            remove_fake_monitor_requests: Vec::new(),
             output_enable_requests: Vec::new(),
             disabled_monitors: HashMap::new(),
             monitor_splits: HashMap::new(),
@@ -460,6 +481,7 @@ impl WindowManager {
             layouts,
             tiling: TilingConfig::default(),
             placement: PlacementConfig::default(),
+            next_cascade_step: std::cell::Cell::new(0),
             animations_enabled: true,
             animation_duration_ms: 200,
             shadows_enabled: true,
@@ -510,6 +532,7 @@ impl WindowManager {
 
 mod capture;
 mod dragresize;
+mod fake_monitor;
 mod focus;
 mod hittest;
 mod input_pin;

@@ -122,8 +122,26 @@ pub struct SmartPlacement;
 impl SmartPlacement {
     /// Place a new window of `size` given the geometries of windows already
     /// occupying `monitor`. Tries a grid cell first, falling back to cascade.
-    pub fn place(monitor: &Monitor, existing: &[Rect], size: (u32, u32), cfg: &PlacementConfig) -> Rect {
-        Self::grid(monitor, existing, size, cfg).unwrap_or_else(|| Self::cascade(monitor, existing, size, cfg))
+    /// `cascade_step` is a monotonically increasing counter the caller owns
+    /// (`WindowManager::next_cascade_step`) - see `cascade`'s own doc
+    /// comment for why this can't just be `existing.len()` the way `grid`'s
+    /// own cell count legitimately still is.
+    ///
+    /// Skips grid entirely when `existing` is empty, going straight to
+    /// cascade instead: grid's real job is dividing space fairly among
+    /// *concurrent* windows, and with nothing else open there is nothing
+    /// to divide against - a 1x1 grid is mathematically one single cell
+    /// no matter how it's rotated, so it can never vary by session
+    /// history the way this reported bug needs. This is the actual
+    /// overwhelmingly common case in practice (open one app, use it,
+    /// close it, open the next), which is exactly why the bug this fixes
+    /// ("every window opens in the same spot") was reported as the normal
+    /// experience, not an edge case.
+    pub fn place(monitor: &Monitor, existing: &[Rect], size: (u32, u32), cfg: &PlacementConfig, cascade_step: u32) -> Rect {
+        if existing.is_empty() {
+            return Self::cascade(monitor, size, cfg, cascade_step);
+        }
+        Self::grid(monitor, existing, size, cfg).unwrap_or_else(|| Self::cascade(monitor, size, cfg, cascade_step))
     }
 
     fn grid(monitor: &Monitor, existing: &[Rect], size: (u32, u32), cfg: &PlacementConfig) -> Option<Rect> {
@@ -155,10 +173,27 @@ impl SmartPlacement {
         None
     }
 
-    /// Diagonal cascade, stepping by `cascade_offset` per already-placed
-    /// window and wrapping back to the origin once it would run off the
+    /// Diagonal cascade, stepping by `cascade_offset` per window opened so
+    /// far and wrapping back to the origin once it would run off the
     /// monitor.
-    fn cascade(monitor: &Monitor, existing: &[Rect], size: (u32, u32), cfg: &PlacementConfig) -> Rect {
+    ///
+    /// Driven by `cascade_step` - a counter the caller keeps incrementing
+    /// across the whole session - rather than `existing.len()` (how many
+    /// windows happen to be open on this workspace *right now*), which is
+    /// what this used to take. That reads as reasonable ("cascade further
+    /// when more windows are open") but has a real, reported bug baked in:
+    /// the overwhelmingly common way people actually use a desktop is one
+    /// app at a time - open, use, close, open the next - and `existing`
+    /// is empty at the start of every single one of those opens, so `step`
+    /// was `0` every time regardless of how many windows had already been
+    /// opened-and-closed that session. Reported live as "every window
+    /// spawns in the exact same place and size, not at all like Windows" --
+    /// confirmed by reading this function, not guessed: real Windows
+    /// cascades the *next* window further even after you close the
+    /// previous one, which needs a counter that survives a window closing,
+    /// not one derived from whoever is still open at the moment of the
+    /// next placement.
+    fn cascade(monitor: &Monitor, size: (u32, u32), cfg: &PlacementConfig, cascade_step: u32) -> Rect {
         let area = monitor.geometry;
         let width = size.0.min(area.width);
         let height = size.1.min(area.height);
@@ -167,7 +202,7 @@ impl SmartPlacement {
         let max_steps_y = ((area.height as i32 - height as i32) / cfg.cascade_offset.max(1)).max(1);
         let max_steps = max_steps_x.min(max_steps_y).max(1);
 
-        let step = existing.len() as i32 % max_steps;
+        let step = (cascade_step as i32) % max_steps;
         let x = (area.x + cfg.cascade_offset + step * cfg.cascade_offset).min(area.right() - width as i32).max(area.x);
         let y = (area.y + cfg.cascade_offset + step * cfg.cascade_offset).min(area.bottom() - height as i32).max(area.y);
         Rect::new(x, y, width, height)
@@ -210,18 +245,36 @@ mod tests {
     }
 
     #[test]
-    fn first_window_goes_in_top_left_grid_cell() {
+    fn a_window_opened_alone_cascades_rather_than_using_a_pointless_1x1_grid() {
+        // `place` skips `grid` entirely when nothing else is open - see
+        // its own doc comment for why: a grid with nothing to divide space
+        // against is always exactly one cell, which can never vary by
+        // session history, and "one app open at a time" is the ordinary
+        // case, not an edge one.
         let cfg = PlacementConfig::default();
-        let r = SmartPlacement::place(&monitor(), &[], (400, 300), &cfg);
-        assert_eq!(r.x, cfg.grid_margin as i32);
-        assert_eq!(r.y, cfg.grid_margin as i32);
+        let r = SmartPlacement::place(&monitor(), &[], (400, 300), &cfg, 0);
+        assert_eq!(r.x, cfg.cascade_offset);
+        assert_eq!(r.y, cfg.cascade_offset);
+    }
+
+    #[test]
+    fn opening_the_same_app_alone_twice_in_a_row_lands_in_different_spots() {
+        // The concrete reported symptom, exercised through the real
+        // `place` entry point (not `cascade` directly, unlike the more
+        // targeted unit test below) - opening one window, closing it, and
+        // opening another must not silently collapse back to the exact
+        // same spot just because `existing` is empty again both times.
+        let cfg = PlacementConfig::default();
+        let first = SmartPlacement::place(&monitor(), &[], (400, 300), &cfg, 0);
+        let second = SmartPlacement::place(&monitor(), &[], (400, 300), &cfg, 1);
+        assert_ne!(first, second);
     }
 
     #[test]
     fn grid_avoids_occupied_cells() {
         let cfg = PlacementConfig::default();
-        let first = SmartPlacement::place(&monitor(), &[], (400, 300), &cfg);
-        let second = SmartPlacement::place(&monitor(), &[first], (400, 300), &cfg);
+        let first = SmartPlacement::place(&monitor(), &[], (400, 300), &cfg, 0);
+        let second = SmartPlacement::place(&monitor(), &[first], (400, 300), &cfg, 1);
         assert!(!first.overlaps(&second), "second window must not overlap the first: {first:?} vs {second:?}");
     }
 
@@ -230,14 +283,36 @@ mod tests {
         let cfg = PlacementConfig { max_grid: 1, ..Default::default() };
         // max_grid=1 means the grid is always a single cell, so a second
         // window can never find a free grid cell and must cascade.
-        let first = SmartPlacement::place(&monitor(), &[], (400, 300), &cfg);
-        let second = SmartPlacement::place(&monitor(), &[first], (400, 300), &cfg);
+        let first = SmartPlacement::place(&monitor(), &[], (400, 300), &cfg, 0);
+        let second = SmartPlacement::place(&monitor(), &[first], (400, 300), &cfg, 1);
         assert_ne!(first, second);
         // First window is grid-placed (offset by grid_margin); the second no
         // longer fits any grid cell and falls back to cascade, which steps
-        // from the monitor origin by `cascade_offset` per already-placed window.
+        // from the monitor origin by `cascade_offset` per window opened so
+        // far this session (the caller's own counter, passed in as `1` here).
         assert_eq!(second.x, cfg.cascade_offset * 2);
         assert_eq!(second.y, cfg.cascade_offset * 2);
+    }
+
+    #[test]
+    fn cascade_step_keeps_advancing_even_if_the_previous_window_closed() {
+        // The actual reported bug this counter exists to fix: opening one
+        // window at a time (closing each before the next) used to reset
+        // `existing` to empty every time, so `step` - driven by `existing.
+        // len()` - was always 0 regardless of how many windows had already
+        // been opened-and-closed. A cascade_step the caller keeps
+        // incrementing across the session, independent of what is
+        // currently open, is what actually fixes it. Calls `cascade`
+        // directly (not `place`): `place`'s own grid-first fallback would
+        // succeed for an empty `existing` regardless of this test's own
+        // point (a grid's cell *count* legitimately does depend on live
+        // occupancy - see `place`'s own doc comment on why only `cascade`
+        // takes this counter), so a `place`-level test couldn't actually
+        // isolate cascade's own behavior here.
+        let cfg = PlacementConfig::default();
+        let first = SmartPlacement::cascade(&monitor(), (400, 300), &cfg, 0);
+        let second = SmartPlacement::cascade(&monitor(), (400, 300), &cfg, 1);
+        assert_ne!(first, second, "an unchanged cascade_step of 0 vs 1 must not collapse to the same spot");
     }
 
     #[test]

@@ -846,6 +846,27 @@ fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<WindowManager
             wm.borrow_mut().request_pin_input(pid as i32, id);
             (ok(), true)
         }
+        // `{"cmd":"create_fake_monitor","name":<string>,"width":<u32>,
+        // "height":<u32>}` - a fully virtual `wl_output` with no real
+        // hardware behind it, applied by whichever backend owns real
+        // output hardware (only the udev backend can; the winit/nested
+        // backend has no headless render path to draw one with). See
+        // `crates/wayland/src/udev/virtual_heads.rs`'s own module doc
+        // comment for the full design and scope.
+        "create_fake_monitor" => {
+            let Some(name) = req.get("name").and_then(|v| v.as_str()) else { return (err("missing name"), false) };
+            let (Some(width), Some(height)) = (req.get("width").and_then(|v| v.as_u64()), req.get("height").and_then(|v| v.as_u64())) else {
+                return (err("missing width/height"), false);
+            };
+            wm.borrow_mut().request_create_fake_monitor(name.to_string(), width as u32, height as u32);
+            (ok(), true)
+        }
+        // `{"cmd":"remove_fake_monitor","name":<string>}`.
+        "remove_fake_monitor" => {
+            let Some(name) = req.get("name").and_then(|v| v.as_str()) else { return (err("missing name"), false) };
+            wm.borrow_mut().request_remove_fake_monitor(name.to_string());
+            (ok(), true)
+        }
         // `srd.window.maximize()`/`.fullscreen()`'s exact IPC-side
         // equivalents - lets an external script (or a live diagnostic
         // check, same as `toggle_visibility`/`focus`/`close` already allow)
