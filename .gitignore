@@ -1,0 +1,36 @@
+# Build directories
+build/
+build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
+Testing/
+compile_commands.json
+
+# Binaries and libraries
+srdwm
+SRDWM
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.DS_Store
+
+# IDE/project files
+.vscode/
+.idea/
+*.user
+
+# Package manager caches
+.vcpkg/
+
+# Generated desktop entries if any (installed via CMake, not tracked)
+*.desktop

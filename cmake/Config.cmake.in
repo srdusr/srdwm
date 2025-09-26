@@ -1,0 +1,24 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Find dependencies
+find_dependency(Lua @Lua_VERSION_STRING@ REQUIRED)
+
+# Include the targets file
+include("${CMAKE_CURRENT_LIST_DIR}/@PROJECT_NAME@Targets.cmake")
+
+# Add include directories
+get_target_property(@PROJECT_NAME@_INCLUDE_DIRS @PROJECT_NAME@::@PROJECT_NAME@ INTERFACE_INCLUDE_DIRECTORIES)
+
+# Add compile definitions
+get_target_property(@PROJECT_NAME@_COMPILE_DEFINITIONS @PROJECT_NAME@::@PROJECT_NAME@ INTERFACE_COMPILE_DEFINITIONS)
+
+# Add compile options
+get_target_property(@PROJECT_NAME@_COMPILE_OPTIONS @PROJECT_NAME@::@PROJECT_NAME@ INTERFACE_COMPILE_OPTIONS)
+
+# Add link libraries
+get_target_property(@PROJECT_NAME@_LINK_LIBRARIES @PROJECT_NAME@::@PROJECT_NAME@ INTERFACE_LINK_LIBRARIES)
+
+# Check if all required targets are available
+check_required_components(@PROJECT_NAME@)
