@@ -663,7 +663,20 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
                             state.select_desktop_icon(Some(&id));
                             state.open_desktop_icon(&id);
                         } else {
-                            state.select_desktop_icon(Some(&id));
+                            // Don't collapse an existing multi-selection
+                            // just because the drag grabbed one of its own
+                            // members - `start_desktop_icon_drag` itself
+                            // carries every currently-selected icon along
+                            // when the one grabbed is already selected
+                            // (see its own doc comment), the same "drag one
+                            // of several selected files, they all move"
+                            // convention every real desktop uses. Grabbing
+                            // an icon *outside* the current selection still
+                            // replaces it, same as before.
+                            let already_selected = state.desktop_icons.as_ref().is_some_and(|icons| icons.icons.iter().any(|i| i.id == id && i.selected));
+                            if !already_selected {
+                                state.select_desktop_icon(Some(&id));
+                            }
                             state.start_desktop_icon_drag(&id, origin, (pos.x as i32, pos.y as i32));
                         }
                     }

@@ -170,7 +170,13 @@ impl CompState {
         let Some(icons) = &self.desktop_icons else { return Vec::new() };
         let ids: Vec<String> = icons.icons.iter().map(|i| i.id.clone()).collect();
         let origins = icons.origins.clone();
-        let dragging = self.desktop_icon_drag.clone();
+        // `(primary_pos, members)` - see `DesktopIconDrag`'s own doc
+        // comment. Every dragged icon (not just the one actually grabbed)
+        // follows the live pointer as a rigid group; every other mirror
+        // (if any) and every non-dragged icon stays put at its own
+        // origin's cell position, same as before this could carry more
+        // than one icon.
+        let dragging = self.desktop_icon_drag.as_ref().map(|d| (d.primary_pos, d.members.clone()));
         let mut out = Vec::with_capacity(ids.len() * origins.len());
         for id in ids {
             let buffer = match self.icon_buffer(&id) {
@@ -179,14 +185,12 @@ impl CompState {
             };
             let icons = self.desktop_icons.as_ref().unwrap();
             let icon = icons.icons.iter().find(|i| i.id == id).unwrap();
-            // The dragged copy follows the live pointer on whichever
-            // monitor it's actually being dragged over; every other
-            // mirror (if any) stays put at its own origin's cell position
-            // - dragging on one monitor doesn't yank the icon's other
-            // mirrors around mid-gesture, only the one actually grabbed.
-            match &dragging {
-                Some((drag_id, _, live_pos)) if *drag_id == id => out.push((*live_pos, buffer)),
-                _ => {
+            let drag_pos = dragging
+                .as_ref()
+                .and_then(|(primary_pos, members)| members.iter().find(|(mid, _)| *mid == id).map(|(_, offset)| (primary_pos.0 + offset.0, primary_pos.1 + offset.1)));
+            match drag_pos {
+                Some(pos) => out.push((pos, buffer)),
+                None => {
                     for &origin in &origins {
                         out.push((icon.top_left(origin), buffer.clone()));
                     }
@@ -294,54 +298,105 @@ impl CompState {
     /// under the pointer, not always the primary monitor's, is what makes
     /// the drag track the cursor instead of jumping to a different
     /// monitor's copy the instant the drag starts.
+    /// Starts a drag on `id`. If `id` is already part of a multi-
+    /// selection, every other selected icon comes along as a `member`
+    /// (see `DesktopIconDrag`'s own doc comment); otherwise this starts a
+    /// fresh single-icon drag and selects just `id`, the same "grabbing
+    /// something outside the current selection replaces it" convention
+    /// real desktops use.
     pub(crate) fn start_desktop_icon_drag(&mut self, id: &str, origin: (i32, i32), pointer: (i32, i32)) {
-        let Some(icons) = &self.desktop_icons else { return };
-        let Some(icon) = icons.icons.iter().find(|i| i.id == id) else { return };
-        let top_left = icon.top_left(origin);
-        let grab_offset = (pointer.0 - top_left.0, pointer.1 - top_left.1);
-        self.desktop_icon_drag = Some((id.to_string(), grab_offset, top_left));
-    }
+        let Some(icons) = &mut self.desktop_icons else { return };
+        let Some(primary) = icons.icons.iter().find(|i| i.id == id) else { return };
+        let primary_top_left = primary.top_left(origin);
+        let primary_selected = primary.selected;
+        let grab_offset = (pointer.0 - primary_top_left.0, pointer.1 - primary_top_left.1);
 
-    /// Updates the live position of whichever icon is being dragged, if
-    /// any - called from every pointer-motion event, same as
-    /// `WindowManager::update_resize`'s own per-motion-event update.
-    pub(crate) fn update_desktop_icon_drag(&mut self, pointer: (i32, i32)) {
-        if let Some((_, grab_offset, live_pos)) = &mut self.desktop_icon_drag {
-            *live_pos = (pointer.0 - grab_offset.0, pointer.1 - grab_offset.1);
+        let mut changed = Vec::new();
+        if !primary_selected {
+            for icon in &mut icons.icons {
+                let should = icon.id == id;
+                if icon.selected != should {
+                    icon.selected = should;
+                    changed.push(icon.id.clone());
+                }
+            }
+        }
+        let members: Vec<(String, (i32, i32))> = icons
+            .icons
+            .iter()
+            .filter(|i| i.id == id || i.selected)
+            .map(|i| {
+                let top_left = i.top_left(origin);
+                (i.id.clone(), (top_left.0 - primary_top_left.0, top_left.1 - primary_top_left.1))
+            })
+            .collect();
+        self.desktop_icon_drag = Some(crate::desktop_icons::DesktopIconDrag { grab_offset, primary_pos: primary_top_left, members });
+        for id in changed {
+            self.rebuild_icon_buffer(&id);
         }
     }
 
-    /// Ends an in-progress drag (if any): snaps to the nearest free grid
-    /// cell (occupied cells other than the dragged icon's own previous one
-    /// are avoided by walking outward from the raw target, closest first)
-    /// and persists it.
+    /// Updates the live position of every icon in the current drag (the
+    /// one actually grabbed, plus every icon carried along with it), if
+    /// any - called from every pointer-motion event, same as
+    /// `WindowManager::update_resize`'s own per-motion-event update.
+    pub(crate) fn update_desktop_icon_drag(&mut self, pointer: (i32, i32)) {
+        if let Some(drag) = &mut self.desktop_icon_drag {
+            drag.primary_pos = (pointer.0 - drag.grab_offset.0, pointer.1 - drag.grab_offset.1);
+        }
+    }
+
+    /// Ends an in-progress drag (if any): snaps every dragged icon (the
+    /// one actually grabbed, plus every icon carried along with it) to
+    /// its own nearest free grid cell, independently but never colliding
+    /// with each other - walking outward from each one's own raw target,
+    /// closest first - and persists all of them.
     pub(crate) fn end_desktop_icon_drag(&mut self) {
-        let Some((id, _, live_pos)) = self.desktop_icon_drag.take() else { return };
+        let Some(drag) = self.desktop_icon_drag.take() else { return };
         // The cell math below needs the origin of whichever monitor the
-        // icon was actually dropped on, not always the first mirror --
+        // group was actually dropped on, not always the first mirror --
         // recomputed fresh (same formula `desktop_icon_origins` uses)
         // rather than searched for in `icons.origins`, since a drop
         // just past every monitor's own strict icon-grid rect (but still
         // on-screen) should still resolve to that monitor's grid, not fall
-        // through to a stale/wrong one.
+        // through to a stale/wrong one. Based on the primary's own drop
+        // position - the group drops together onto whichever monitor the
+        // pointer is actually over.
         let origin = self
             .wm
             .borrow()
             .monitors()
             .iter()
-            .find(|m| m.full_geometry.contains_point(live_pos.0, live_pos.1))
+            .find(|m| m.full_geometry.contains_point(drag.primary_pos.0, drag.primary_pos.1))
             .map(|m| (m.geometry.x + GRID_MARGIN, m.geometry.y + GRID_MARGIN))
             .unwrap_or(self.desktop_icons.as_ref().map(|i| i.origins.first().copied().unwrap_or((0, 0))).unwrap_or((0, 0)));
         let Some(icons) = &mut self.desktop_icons else { return };
-        let raw = (live_pos.0 - origin.0, live_pos.1 - origin.1);
-        let raw_cell = ((raw.0 as f64 / CELL_WIDTH as f64).round() as i32, (raw.1 as f64 / CELL_HEIGHT as f64).round() as i32).max_zero();
-        let occupied: std::collections::HashSet<(i32, i32)> = icons.icons.iter().filter(|i| i.id != id).map(|i| i.cell).collect();
-        let cell = nearest_free_cell(raw_cell, &occupied);
-        if let Some(icon) = icons.icons.iter_mut().find(|i| i.id == id) {
-            icon.cell = cell;
+        let dragged_ids: std::collections::HashSet<&str> = drag.members.iter().map(|(id, _)| id.as_str()).collect();
+        // Each member's own nearest free cell, in recorded order (primary
+        // first) - `newly_occupied` accumulates across the loop so two
+        // dragged icons landing near each other never both claim the same
+        // cell, on top of every cell a *non*-dragged icon already holds.
+        let mut newly_occupied: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+        let mut placements: Vec<(String, (i32, i32))> = Vec::with_capacity(drag.members.len());
+        for (id, offset) in &drag.members {
+            let live_pos = (drag.primary_pos.0 + offset.0, drag.primary_pos.1 + offset.1);
+            let raw = (live_pos.0 - origin.0, live_pos.1 - origin.1);
+            let raw_cell = ((raw.0 as f64 / CELL_WIDTH as f64).round() as i32, (raw.1 as f64 / CELL_HEIGHT as f64).round() as i32).max_zero();
+            let occupied: std::collections::HashSet<(i32, i32)> =
+                icons.icons.iter().filter(|i| !dragged_ids.contains(i.id.as_str())).map(|i| i.cell).chain(newly_occupied.iter().copied()).collect();
+            let cell = nearest_free_cell(raw_cell, &occupied);
+            newly_occupied.insert(cell);
+            placements.push((id.clone(), cell));
         }
-        self.rebuild_icon_buffer(&id);
-        crate::desktop_icons_state::save_icon(&id, cell);
+        for (id, cell) in &placements {
+            if let Some(icon) = icons.icons.iter_mut().find(|i| &i.id == id) {
+                icon.cell = *cell;
+            }
+        }
+        for (id, cell) in &placements {
+            self.rebuild_icon_buffer(id);
+            crate::desktop_icons_state::save_icon(id, *cell);
+        }
     }
 
     pub(crate) fn open_desktop_icon(&mut self, id: &str) {

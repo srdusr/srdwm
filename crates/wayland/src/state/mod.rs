@@ -353,17 +353,11 @@ pub(crate) struct CompState {
     /// same cached-until-dirty convention as every other decoration
     /// buffer in this codebase.
     pub(crate) desktop_icon_buffers: HashMap<String, MemoryRenderBuffer>,
-    /// An in-progress icon drag: the icon's own id, the pointer's grab
-    /// offset from that icon's cell origin at the moment the drag started
-    /// (so the icon tracks the pointer smoothly rather than snapping its
-    /// top-left corner straight to the cursor), and the icon's own live
-    /// top-left position this frame - updated on every pointer-motion
-    /// event by `update_desktop_icon_drag`, read straight back by
-    /// `desktop_icon_render_list` with no separate "current pointer
-    /// position" field needed anywhere on `CompState`. `None` whenever no
-    /// drag is active.
-    #[allow(clippy::type_complexity)]
-    pub(crate) desktop_icon_drag: Option<(String, (i32, i32), (i32, i32))>,
+    /// An in-progress icon drag - see `desktop_icons::DesktopIconDrag`'s
+    /// own doc comment for the full shape (it may carry more than one
+    /// icon, when the drag started on an already-multi-selected icon).
+    /// `None` whenever no drag is active.
+    pub(crate) desktop_icon_drag: Option<crate::desktop_icons::DesktopIconDrag>,
     /// An active rubber-band/marquee selection drag on bare desktop --
     /// `(start, current)`, both global-space pointer positions. The one
     /// "click and drag" desktop interaction this compositor never had at

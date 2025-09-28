@@ -57,6 +57,30 @@ impl DesktopIcon {
     }
 }
 
+/// An in-progress icon drag that may carry more than one icon along
+/// together. `primary` is whichever icon the pointer actually grabbed;
+/// `members` is every icon moving with it (always includes `primary`, at
+/// offset `(0, 0)`), each recorded as a fixed offset from `primary`'s own
+/// top-left at the moment the drag started - the whole group moves as
+/// one rigid unit regardless of where each member's own cell happens to
+/// be, the same way dragging one file in a multi-selection in Windows/
+/// GNOME/macOS/KDE carries every other selected file along with it.
+/// Reported live as missing: "try move desktop items all at once
+/// somewhere else" didn't work at all before this - `members` used to
+/// not exist, a drag only ever carried the one icon it grabbed no matter
+/// how many were selected.
+pub(crate) struct DesktopIconDrag {
+    /// Pointer's grab offset from `primary`'s own top-left at drag start,
+    /// so the icon tracks the pointer smoothly rather than snapping its
+    /// top-left corner straight to the cursor.
+    pub(crate) grab_offset: (i32, i32),
+    /// `primary`'s own live top-left this frame.
+    pub(crate) primary_pos: (i32, i32),
+    /// `(icon id, fixed offset from primary's own top-left at drag
+    /// start)` - primary included at offset `(0, 0)`.
+    pub(crate) members: Vec<(String, (i32, i32))>,
+}
+
 pub(crate) struct DesktopIcons {
     /// Top-left of the grid's own `(0, 0)` cell, in global space, one per
     /// participating monitor - each monitor's own usable-area origin plus
