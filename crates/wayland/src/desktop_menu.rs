@@ -30,6 +30,11 @@ pub(crate) enum DesktopMenuAction {
     /// concrete path to a real file manager's own richer menu (cut/copy/
     /// paste, properties, ...), deliberately not reimplemented here.
     OpenInFileManager,
+    /// Selects every desktop icon at once - the one bare-desktop menu
+    /// action every mainstream file manager/desktop offers (Explorer,
+    /// Nautilus, Finder) that this menu had no equivalent for at all,
+    /// reported live as this menu needing "a lot more items".
+    SelectAll,
     Refresh,
     /// A purely visual divider row - see `context_menu::MenuAction::
     /// Separator`'s own doc comment (same shape, same reason, separate
@@ -78,6 +83,7 @@ impl DesktopMenu {
             ("Open Terminal Here", DesktopMenuAction::OpenTerminalHere),
             ("Open in File Manager", DesktopMenuAction::OpenInFileManager),
             ("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", DesktopMenuAction::Separator),
+            ("Select All", DesktopMenuAction::SelectAll),
             ("Refresh", DesktopMenuAction::Refresh),
         ];
         Self { pos, width: MENU_WIDTH, row_height: ROW_HEIGHT, items }
@@ -144,7 +150,7 @@ mod tests {
         let menu = DesktopMenu::open_for_desktop((10, 10));
         let real_actions: Vec<&str> =
             menu.items.iter().filter(|(_, a)| !matches!(a, DesktopMenuAction::Separator)).map(|(l, _)| *l).collect();
-        assert_eq!(real_actions, vec!["New Folder", "New Text Document", "Open Terminal Here", "Open in File Manager", "Refresh"]);
+        assert_eq!(real_actions, vec!["New Folder", "New Text Document", "Open Terminal Here", "Open in File Manager", "Select All", "Refresh"]);
     }
 
     #[test]

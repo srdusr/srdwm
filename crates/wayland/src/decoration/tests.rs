@@ -809,7 +809,15 @@ fn context_menu_highlighted_row_has_a_different_background_than_the_rest() {
         [buf[i + 2], buf[i + 1], buf[i]] // BGRA -> RGB
     };
     assert_eq!(px_at(100, 5), [bg.0, bg.1, bg.2], "row 0 (not highlighted) should use bg");
-    assert_eq!(px_at(100, 33), [highlight.0, highlight.1, highlight.2], "row 1 (highlighted) should use highlight_bg");
+    // Not `highlight` at full strength: the AGS reference dropdown's own
+    // hover fill is a 22%-mixed wash of the accent over the panel
+    // background (`color-mix(in srgb, var(--primary-bg) 22%, var(
+    // --widget-bg))`), not a flat, fully-saturated fill - see `render_
+    // context_menu`'s own doc comment. `mix_rgb(bg, highlight, 0.22)`,
+    // computed by hand here rather than imported, so this test would
+    // actually catch the ratio drifting.
+    let expected = (53, 59, 73); // (46,52,64) blended 22% toward (76,86,106)
+    assert_eq!(px_at(100, 33), [expected.0, expected.1, expected.2], "row 1 (highlighted) should use a subtle tinted wash toward highlight_bg, not a flat fill of it");
 }
 
 #[test]
@@ -833,6 +841,68 @@ fn context_menu_panel_is_opaque_in_the_middle_but_rounded_at_the_corners() {
     assert_eq!(alpha_at(50, 2), 255, "just inside the flat top edge, away from either corner, is opaque");
     assert_eq!(alpha_at(50, 25), 255, "just inside the flat bottom edge is opaque");
     assert_eq!(alpha_at(50, 14), 255, "the panel's interior stays opaque");
+}
+
+#[test]
+fn a_pure_separator_row_draws_a_narrow_line_not_a_full_text_row() {
+    // A label of only `\u{2500}` renders as a thin graphical line instead
+    // of text glyphs - see `render_context_menu`'s own doc comment for
+    // why (Unicode box-drawing glyphs render inconsistently at small
+    // sizes; a real line reads as an intentional divider). Scans every
+    // pixel in the row (not one fixed column, which could accidentally
+    // land in a font glyph's own hollow spot) - a hairline should touch
+    // only a couple of the row's own pixel rows, nowhere near a real text
+    // row's spread (see the sibling test just below).
+    //
+    // Three items, separator in the middle: `fill_rounded_rect`'s own
+    // distance field softens alpha within `PANEL_RADIUS` of *any* of the
+    // panel's four edges, not just the visible corner curves (a rounded
+    // rect's SDF clamps the comparison point toward whichever edge is
+    // nearest along each axis independently, so a point that's flat-on
+    // to one edge but still within `radius` of another edge still gets
+    // partial coverage). Sandwiching the separator row between two
+    // others, and scanning only rows/columns comfortably past `PANEL_
+    // RADIUS` in from every canvas edge, keeps this test inside the
+    // panel's genuinely flat, fully-opaque interior - confirmed by
+    // measurement (a debug dump of raw pixel deltas), not assumed --
+    // so only the separator itself can account for a non-`bg` pixel here.
+    let bg = (0x2e, 0x34, 0x40);
+    let width = 160usize;
+    let items = [("Open", false), ("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", false), ("Close", false)];
+    let buf = render_context_menu(width as u32, 28, &items, bg, (0xff, 0xff, 0xff), (0x4c, 0x56, 0x6a), (0x10, 0x10, 0x10));
+    let px_at = |x: usize, y: usize| -> [u8; 3] {
+        let i = (y * width + x) * 4;
+        [buf[i + 2], buf[i + 1], buf[i]]
+    };
+    const PANEL_RADIUS: usize = 10;
+    let safe_x = (PANEL_RADIUS + 2)..(width - PANEL_RADIUS - 2);
+    let row_has_any_non_bg = |y: usize| safe_x.clone().any(|x| px_at(x, y) != [bg.0, bg.1, bg.2]);
+    let separator_row_top = 28;
+    let non_bg_rows = (separator_row_top..separator_row_top + 28).filter(|&y| row_has_any_non_bg(y)).count();
+    assert!(non_bg_rows <= 3, "a hairline separator should touch only a couple of the row's pixel rows, got {non_bg_rows}");
+    assert!(non_bg_rows >= 1, "the separator must actually draw something, not vanish entirely");
+}
+
+#[test]
+fn a_labeled_section_header_separator_still_renders_as_text() {
+    // `"─── Move to Workspace ───"` deliberately mixes the divider
+    // character with real text (`core::ContextMenu`'s own section-header
+    // convention) - it must keep rendering as text, not collapse into a
+    // plain hairline just because it contains `\u{2500}` characters too.
+    // Same whole-row scan and same "sandwich away from the panel's own
+    // rounded-edge antialiasing" shape as the sibling test above.
+    let bg = (0x2e, 0x34, 0x40);
+    let width = 200usize;
+    let items = [("Open", false), ("\u{2500}\u{2500}\u{2500} Move to Workspace \u{2500}\u{2500}\u{2500}", false), ("Close", false)];
+    let buf = render_context_menu(width as u32, 28, &items, bg, (0xff, 0xff, 0xff), (0x4c, 0x56, 0x6a), (0x10, 0x10, 0x10));
+    let px_at = |x: usize, y: usize| -> [u8; 3] {
+        let i = (y * width + x) * 4;
+        [buf[i + 2], buf[i + 1], buf[i]]
+    };
+    let row_has_any_non_bg = |y: usize| (0..width).any(|x| px_at(x, y) != [bg.0, bg.1, bg.2]);
+    let header_row_top = 28;
+    let non_bg_rows = (header_row_top..header_row_top + 28).filter(|&y| row_has_any_non_bg(y)).count();
+    assert!(non_bg_rows > 3, "a text row (mixed divider+caption) should paint well more than a hairline's worth of rows, got {non_bg_rows}");
 }
 
 #[test]

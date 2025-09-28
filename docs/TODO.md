@@ -13,6 +13,18 @@ that has the full story. Keep this list current as items close or open;
 update the source doc's own entry too, don't let this drift into a
 second stale copy the way `PANEL_SUPPORT_TODO.md` did.
 
+## Context/desktop menu polish: a real hover-tint ratio, a real separator line, and "Select All" (2026-08-27)
+
+Reported live: "looks weird and unpolished... should be smooth... need a lot more items." Compared the current renderer directly against the exact reference this project's own menu rebuild already targets (`~/dotfiles/ags_project/widget/Bar/components/GlobalMenu/style.scss`'s `popover box.menu-list`) rather than guessing at what "polished" means:
+
+- The highlighted-row fill was a flat, fully-saturated `highlight_bg` at 100% opacity. The reference's own hover fill is a *subtle tinted wash* - `color-mix(in srgb, var(--primary-bg) 22%, var(--widget-bg))`, only 22% accent mixed into the panel's own background. New `decoration::color::mix_rgb` (channel-wise linear blend, generalizing `brighten`/`darken`'s fixed-target blends to an arbitrary second colour and ratio) lets `render_context_menu` reproduce that same 22% ratio instead of a flat fill.
+- Every "separator" row was a label string made entirely of the Unicode box-drawing character `─`, rendered through the ordinary text-glyph path - box-drawing glyphs render inconsistently thin/dotted across fonts at small sizes, unlike the reference's own real 1px hairline (`separator.menu-sep`, `color-mix(in srgb, var(--fg) 12%, transparent)`). A label that's *entirely* `─` now draws a real, low-opacity horizontal line instead of glyphs; a label that *mixes* `─` with real text (`"─── Move to Workspace ───"`, the deliberate section-header convention `core::ContextMenu` already uses) is untouched and still renders as text - that dual purpose is the actual design, not a plain separator to collapse.
+- "Select All" added to the bare-desktop menu - the one action every mainstream desktop's own right-click menu offers that this one had no equivalent for at all, and a direct, useful complement to this session's own multi-select-drag fix just above.
+
+New tests needed real care to get right: the panel's own rounded-corner distance field softens alpha within `PANEL_RADIUS` of *any* canvas edge, not just the visible corner curves, so a naive "scan every pixel of the row" comparison against `bg` picked up that pre-existing antialiasing as a false positive on the first attempt - fixed by scanning only rows/columns confirmed (via a throwaway debug dump, not assumed) to sit inside the panel's genuinely flat interior.
+
+Full workspace build/test/clippy clean (223 core / 142 wayland / 29 platform / 24 ctl / 28 config / 10 x11 tests). Still not attempted: real submenus and per-row icons - both real, separate scope (this project's floating-menu UI has no nested-panel concept at all yet), not attempted blind alongside a live-feedback pass.
+
 ## Real bug, root-caused and fixed: dragging a multi-selected desktop icon only ever moved that one icon (2026-08-27)
 
 Reported live: "try move desktop items all at once somewhere else" didn't work. Confirmed by reading the actual data, not guessed: `CompState::desktop_icon_drag` only ever held one icon id, and - the real, compounding bug - the click handler that starts a drag (`input/pointer.rs`) called `select_desktop_icon(Some(&id))` *unconditionally* before starting the drag, which collapses any existing multi-selection down to just the one icon being grabbed. Even if the drag itself had supported multiple icons, that call site would have destroyed the selection before it ever got the chance.

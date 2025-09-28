@@ -218,6 +218,24 @@ impl CompState {
         }
     }
 
+    /// Selects every desktop icon at once - the bare-desktop menu's own
+    /// "Select All" action (see `DesktopMenuAction::SelectAll`'s own doc
+    /// comment). Same "only rebuild the buffers that actually changed"
+    /// shape as `select_desktop_icon`.
+    pub(crate) fn select_all_desktop_icons(&mut self) {
+        let Some(icons) = &mut self.desktop_icons else { return };
+        let mut changed = Vec::new();
+        for icon in &mut icons.icons {
+            if !icon.selected {
+                icon.selected = true;
+                changed.push(icon.id.clone());
+            }
+        }
+        for id in changed {
+            self.rebuild_icon_buffer(&id);
+        }
+    }
+
     /// Starts a rubber-band selection at `pos` (global space) - clears
     /// whatever was selected before, matching real desktop convention
     /// (Windows/GNOME/macOS all start a fresh marquee selection, not an
@@ -603,6 +621,7 @@ impl CompState {
             DesktopMenuAction::NewTextFile => self.new_desktop_text_file(),
             DesktopMenuAction::OpenTerminalHere => self.open_terminal_here(),
             DesktopMenuAction::OpenInFileManager => self.open_desktop_in_file_manager(),
+            DesktopMenuAction::SelectAll => self.select_all_desktop_icons(),
             DesktopMenuAction::Refresh => self.refresh_desktop_icons(),
             // Never actually reached - the click-dispatch site intercepts
             // `Separator` first, same as `context_menu::MenuAction::

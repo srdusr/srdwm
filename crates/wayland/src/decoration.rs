@@ -40,7 +40,7 @@ mod titlebar;
 pub use border::{border_strips, render_border_bottom, render_border_top};
 pub(crate) use border::{border_bottom_visible_rows, border_top_visible_rows};
 pub(crate) use buttons::HOVER_GLYPH_DURATION;
-pub(crate) use color::rgb_to_bgra;
+pub(crate) use color::{mix_rgb, rgb_to_bgra};
 pub(crate) use corners::{round_bottom_corners, round_top_corners};
 pub(crate) use font::{blit_glyph, find_system_font, FONT_PIXELS, TEXT_LEFT_PADDING};
 pub use shadow::{shadow_bitmap, shadow_rect};
@@ -84,13 +84,38 @@ pub(crate) const CORNER_RADIUS: u32 = 12;
 /// polished" - the previous version drew edge-to-edge square rows with a
 /// single hard 1px border around the whole menu, exactly what that
 /// complaint (raised about the AGS dropdown, fixed there first) describes.
-/// Still no submenus/icons/separators - real gaps beyond this pass' own
-/// scope, not attempted blind.
+/// Still no submenus/icons - real gaps beyond this pass' own scope, not
+/// attempted blind.
+///
+/// A row whose label is *entirely* the box-drawing character `─`
+/// (`\u{2500}`, one or more, no other content) renders as a real thin
+/// divider line instead of text glyphs - a label that *mixes* `─` with
+/// real text (`"─── Move to Workspace ───"`, a deliberate section-header
+/// convention `core::ContextMenu` already uses) is untouched and still
+/// renders as text, since that dual purpose (divider *and* caption) is
+/// the actual design, not a plain separator. A pure divider is drawn as
+/// pixels rather than characters because Unicode box-drawing glyphs
+/// render inconsistently thin/dotted across fonts at small sizes - a
+/// real 1px anti-aliased line, inset from both edges and blended low-
+/// opacity against the panel (matching the AGS reference dropdown's own
+/// `separator.menu-sep`: `color-mix(in srgb, var(--fg) 12%, transparent)`),
+/// reads as an intentional divider rather than a run of stray dashes.
 pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], bg: (u8, u8, u8), fg: (u8, u8, u8), highlight_bg: (u8, u8, u8), border: (u8, u8, u8)) -> Vec<u8> {
     let _ = border; // No outline anywhere now - see this function's own doc comment. Kept as a parameter so callers/themes don't need updating for a look this function no longer draws.
     const PANEL_RADIUS: f32 = 10.0;
     const ROW_INSET: i32 = 4;
     const ROW_RADIUS: f32 = 6.0;
+    // AGS reference's own measured/settled ratio (`popover box.menu-list
+    // button:hover`'s `color-mix(in srgb, var(--primary-bg) 22%, var(
+    // --widget-bg))`) - a subtle tinted wash, not a flat, fully-
+    // saturated fill of whatever colour the caller passes as `highlight_
+    // bg`. Applied here rather than changing what callers pass in, so
+    // every existing call site's own colour choice still means "the
+    // accent to tint toward", not "the literal pixel colour".
+    const HIGHLIGHT_MIX: f32 = 0.22;
+    // Matches the reference's own `separator.menu-sep` background --
+    // barely-there, a hairline rather than a visible bar.
+    const SEPARATOR_MIX: f32 = 0.12;
 
     let (width, row_height) = (width.max(1) as usize, row_height.max(1) as usize);
     // Exactly `row_height * items.len()`, same as before this pass --
@@ -107,9 +132,16 @@ pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], 
     // the menu (desktop/window content) rather than a hard-edged square.
     fill_rounded_rect(&mut buf, width, height, 0, 0, width as i32, height as i32, PANEL_RADIUS, bg, bg);
 
+    let highlight_fill = mix_rgb(bg, highlight_bg, HIGHLIGHT_MIX);
+    let separator_color = mix_rgb(bg, fg, SEPARATOR_MIX);
     let font = find_system_font();
     for (i, (label, highlighted)) in items.iter().enumerate() {
         let row_top = (i * row_height) as i32;
+        if !label.is_empty() && label.chars().all(|c| c == '\u{2500}') {
+            let y = row_top + row_height as i32 / 2;
+            fill_rounded_rect_over(&mut buf, width, height, ROW_INSET * 2, y, width as i32 - ROW_INSET * 2, y + 1, 0.0, separator_color);
+            continue;
+        }
         // The background text actually sits on, for `blit_glyph`'s own
         // blend-toward-a-known-solid-colour contract - the row's own
         // highlight fill (already baked into `buf` by this point, above)
@@ -121,9 +153,9 @@ pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], 
         // comment) - used correctly, it would leave a visible dark
         // fringe around every character's anti-aliased edge instead of a
         // clean blend into the row's real colour.
-        let row_bg = if *highlighted { highlight_bg } else { bg };
+        let row_bg = if *highlighted { highlight_fill } else { bg };
         if *highlighted {
-            fill_rounded_rect_over(&mut buf, width, height, ROW_INSET, row_top, width as i32 - ROW_INSET, row_top + row_height as i32, ROW_RADIUS, highlight_bg);
+            fill_rounded_rect_over(&mut buf, width, height, ROW_INSET, row_top, width as i32 - ROW_INSET, row_top + row_height as i32, ROW_RADIUS, highlight_fill);
         }
         if let Some(font) = &font {
             let baseline = row_top as f32 + row_height as f32 * 0.72;
