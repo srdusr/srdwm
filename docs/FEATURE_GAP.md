@@ -97,6 +97,22 @@ claims:
    one - worth confirming with whoever owns that tool before treating it
    as an srdwm gap at all.
 
+## vs. full desktop environments (KDE Plasma, GNOME, XFCE, macOS, Windows), requested directly (2026-08-27)
+
+A different comparison than the rest of this file: niri/sway/Hyprland are tiling-WM peers at the same layer srdwm occupies (compositor + window management), while KDE/GNOME/macOS/Windows are full desktop environments bundling a shell (panel, launcher, notifications, quick settings, wifi/bluetooth applets, alt-tab UI) *on top of* a compositor (KWin, Mutter) or platform windowing system. Since AGS is this project's own shell, most "full DE" features are AGS's scope, not srdwm's - the honest comparison is srdwm against the compositor *underneath* those shells (KWin/Mutter/Explorer's own DWM/macOS's WindowServer), not against the shell chrome itself. Verified by reading the actual code before listing anything, not assumed either way:
+
+**Already real, contrary to what a surface-level comparison might assume:**
+- **Clipboard/copy-paste between apps.** `delegate_data_device!(CompState)` (`crates/wayland/src/protocols.rs`) wires smithay's own real `wl_data_device` support - Ctrl+C in one app, Ctrl+V in another already works, the same as KWin/Mutter/every comparable compositor. What's *not* built (see `docs/TODO.md`'s own desktop-icons entry) is dragging a *desktop icon* into a real app window specifically - desktop icons are compositor-drawn pixels, not real Wayland surfaces, so they can't be a drag-and-drop source through the protocol without new, real work to make them one.
+- **Drag-and-drop between real windows** (a browser tab torn into a new window, a file dragged from one app to another) - real, already fixed this session's own history (`docs/TODO.md`'s "not being able to drag a tab from one window onto another" entry).
+
+**Genuine gaps a full-DE comparison surfaces, beyond what's already tracked above:**
+1. **No compositor-level blur-behind.** KDE Plasma's own Blur effect and GNOME Shell's panel/overview blur both composite a real backdrop blur behind translucent UI (a panel, an overview, this project's own context menus if `opacity` were used for one) - srdwm has no GPU blur shader anywhere; `crates/wayland/src/decoration.rs`'s own menus/panels are plain flat fills. Real, scoped GPU work (a fragment shader pass over the region behind a surface), not attempted here.
+2. **Fractional-scale correctness gap has a real user-facing cost KDE/GNOME don't have.** Already tracked in detail in `docs/TODO.md` ("wl_pointer motion/button coordinates are delivered unscaled... on a non-1.0-scale output") - KWin/Mutter both get this right via their own per-client scale handling; srdwm's own fix needs a real `PointerTarget` reimplementation, already scoped there as large, not re-litigated here.
+3. **No screen-casting/remote-desktop portal backend** (PipeWire + `org.freedesktop.impl.portal.ScreenCast`/`RemoteDesktop`) - confirmed zero references to PipeWire anywhere in `crates/`. KWin and Mutter both ship real backends; niri and sway don't either (already the #1 item in this file's own niri-comparison section above) - a full-DE comparison just raises how much *more* daily-relevant this gap is (Zoom/Discord/OBS screen-share, not a niche feature).
+4. **No accessibility stack** (AT-SPI/AccessKit) - already listed above against niri; KDE/GNOME's own screen-reader, magnifier and high-contrast support is considerably deeper than niri's partial AccessKit tree, widening rather than changing this gap.
+
+**Explicitly AGS's scope, not srdwm's, listed here only to draw the line clearly:** notifications daemon/UI, quick-settings/wifi/bluetooth/volume applets, an app launcher, alt-tab/window-switcher UI (built on `zwlr_foreign_toplevel_handle_v1`, which srdwm already exposes - `crates/wayland/src/foreign_toplevel.rs`), a screenshot-tool UI (srdwm exposes the real capture primitive, `zwlr_screencopy_manager_v1`; `grim` or a custom AGS tool is the UI on top), on-screen keyboard, do-not-disturb. None of these are compositor gaps; conflating them with srdwm's own scope is the actual mistake a naive "vs. Windows/macOS" comparison would make.
+
 ## Deliberately out of scope / not real gaps
 
 - **Multi-GPU.** Documented and accepted (`docs/IMPLEMENTATION_STATUS.md`):
