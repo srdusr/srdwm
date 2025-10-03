@@ -27,6 +27,7 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
                 night_light: wm.color_filter == srdwm_core::ColorFilter::NightLight,
                 reading_mode: wm.color_filter == srdwm_core::ColorFilter::ReadingMode,
                 phone_mode: wm.phone_mode,
+                multi_cursor: wm.multi_cursor_enabled,
             };
             (serde_json::to_vec(&settings).unwrap_or_default(), false)
         }
@@ -516,6 +517,14 @@ fn handle_set(req: &serde_json::Value, wm: &std::rc::Rc<std::cell::RefCell<Windo
         "phone_mode" => {
             let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("phone_mode needs a boolean value"), false) };
             wm.borrow_mut().phone_mode = v;
+            (ok(), true)
+        }
+        // `srd set multi_cursor <bool>` - live equivalent of `general.
+        // multi_cursor`. See `WindowManager::multi_cursor_enabled`'s own
+        // doc comment for why this is opt-in rather than always-on.
+        "multi_cursor" => {
+            let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("multi_cursor needs a boolean value"), false) };
+            wm.borrow_mut().multi_cursor_enabled = v;
             (ok(), true)
         }
         "blur" => (err("blur is not supported - no GPU shader path on this compositor's software renderer yet"), false),

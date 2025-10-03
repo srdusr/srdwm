@@ -232,6 +232,26 @@ pub struct WindowManager {
     /// without touching config - `udev::platform::connect` attempts the
     /// probe if *either* this or the env var says to.
     pub gpu_enabled: bool,
+    /// Read from `general.multi_cursor` - `false` by default. Gates
+    /// whether the udev backend renders one extra cursor sprite per
+    /// *other* physical pointer device that's recently moved (`UdevState::
+    /// secondary_cursors`, "Multi-cursor Phase 1"). Off by default because
+    /// live use found the un-gated version actively confusing rather than
+    /// useful: real hardware routinely reports what is really one mouse
+    /// as more than one distinct libinput device (a side-button/scroll
+    /// cluster on its own HID path, concretely), so an always-on second
+    /// sprite showed up uninvited and, since nothing else ever moved that
+    /// phantom device again, sat frozen on screen with no way to control
+    /// or dismiss it - reported live as exactly that: "I see two cursors
+    /// and can't even control the other one". The two scenarios this
+    /// feature actually exists for are unaffected by this being off:
+    /// genuinely using two input devices at once is now something to
+    /// opt into rather than be surprised by, and "an agent controls a
+    /// window without interrupting me" is Multi-cursor Phase 2's own job
+    /// (`crates/wayland/src/virtual_pointer.rs`'s pinned delivery), which
+    /// never shows a visible cursor at all - it was never blocked on
+    /// this flag to begin with.
+    pub multi_cursor_enabled: bool,
     /// Read from `general.phone_mode` - `false` by default. Optional
     /// single-app-at-a-time placement policy for a phone-shaped display:
     /// see `add_window`'s own use of this (a new window defaults to
@@ -488,6 +508,7 @@ impl WindowManager {
             resize_margin: RESIZE_MARGIN,
             rounded_corners_enabled: None,
             gpu_enabled: false,
+            multi_cursor_enabled: false,
             phone_mode: false,
             desktop_icons_enabled: true,
             desktop_icons_all_monitors: true,

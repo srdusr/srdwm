@@ -319,6 +319,29 @@ pub(crate) fn register_udev_monitor(handle: &LoopHandle<'static, CompState>, sea
     Ok(())
 }
 
+/// Records `device`'s own live position for Multi-cursor Phase 1's
+/// secondary-cursor rendering, and prunes every entry (not just this
+/// device's own) older than `SECONDARY_CURSOR_TIMEOUT` - see
+/// `UdevState::secondary_cursors`'s own doc comment for why both the
+/// config gate and the pruning exist. A no-op, and clears the map
+/// outright, when the feature is off: toggling `general.multi_cursor`
+/// off live must not leave a stale sprite rendering from before the
+/// toggle (`render_udev_frame` also checks this same flag, but clearing
+/// here too keeps the map itself from silently growing while the
+/// feature is disabled).
+fn record_secondary_cursor(state: &mut CompState, device: smithay::reexports::input::Device, pos: Point<f64, Logical>) {
+    if !state.wm.borrow().multi_cursor_enabled {
+        if let Some(udev) = state.udev.as_mut() {
+            udev.secondary_cursors.clear();
+        }
+        return;
+    }
+    let Some(udev) = state.udev.as_mut() else { return };
+    let now = Instant::now();
+    udev.secondary_cursors.insert(device, (pos, now));
+    udev.secondary_cursors.retain(|_, (_, seen)| now.duration_since(*seen) < SECONDARY_CURSOR_TIMEOUT);
+}
+
 fn handle_libinput_event(state: &mut CompState, event: InputEvent<LibinputInputBackend>) {
     match event {
         InputEvent::Keyboard { event } => handle_keyboard_key_event(state, &event),
@@ -339,8 +362,10 @@ fn handle_libinput_event(state: &mut CompState, event: InputEvent<LibinputInputB
             // cursors`'s own doc comment): records this specific physical
             // device's own position too, purely for rendering its own
             // cursor sprite - `pos`/`handle_pointer_position` below are
-            // still the one interactive position, unchanged.
-            udev.secondary_cursors.insert(event.device(), pos);
+            // still the one interactive position, unchanged. Opt-in via
+            // `general.multi_cursor` (`record_secondary_cursor` is a
+            // no-op, and clears any stale entries, when it's off).
+            record_secondary_cursor(state, event.device(), pos);
             handle_pointer_position(state, pos, event.time_msec());
         }
         // Absolute-positioning devices (a touchscreen, a drawing tablet,
@@ -368,7 +393,7 @@ fn handle_libinput_event(state: &mut CompState, event: InputEvent<LibinputInputB
             udev.pointer_pos.x = (pos.x + min_x).clamp(min_x, (max_x - 1.0).max(min_x));
             udev.pointer_pos.y = (pos.y + min_y).clamp(min_y, (max_y - 1.0).max(min_y));
             let pos = udev.pointer_pos;
-            udev.secondary_cursors.insert(event.device(), pos);
+            record_secondary_cursor(state, event.device(), pos);
             handle_pointer_position(state, pos, event.time_msec());
         }
         InputEvent::PointerButton { event } => {

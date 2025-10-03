@@ -148,6 +148,8 @@ pub(crate) struct SettingsResponse {
     /// without a second, separate way to ask "is this a phone-shaped
     /// session".
     pub(crate) phone_mode: bool,
+    /// `WindowManager::multi_cursor_enabled`'s own doc comment.
+    pub(crate) multi_cursor: bool,
 }
 
 /// `"keyboard_layout"`'s one-shot reply shape - the active XKB layout's

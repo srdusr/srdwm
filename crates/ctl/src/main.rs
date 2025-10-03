@@ -178,14 +178,14 @@ fn build_request(args: &[String]) -> Result<String, String> {
         // as booleans at all, not a string it then has to reject.
         Some("set") => {
             let key = args.get(1).ok_or(
-                "set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/shadows/rounded_corners/animations/night_light/reading_mode/phone_mode/decoration_mode)",
+                "set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/shadows/rounded_corners/animations/night_light/reading_mode/phone_mode/multi_cursor/decoration_mode)",
             )?;
             let raw = args.get(2).ok_or("set needs a value")?;
             let value = match key.as_str() {
                 "border_width" | "corner_radius" | "gap_inner" | "gap_outer" => {
                     raw.parse::<u64>().map_err(|_| format!("{key} needs a numeric value"))?.to_string()
                 }
-                "shadows" | "rounded_corners" | "animations" | "night_light" | "reading_mode" | "phone_mode" => match raw.as_str() {
+                "shadows" | "rounded_corners" | "animations" | "night_light" | "reading_mode" | "phone_mode" | "multi_cursor" => match raw.as_str() {
                     "true" | "false" => raw.clone(),
                     _ => return Err(format!("{key} needs 'true' or 'false'")),
                 },
@@ -401,6 +401,7 @@ fn print_usage() {
     eprintln!("  srd set night_light <true|false>");
     eprintln!("  srd set reading_mode <true|false>");
     eprintln!("  srd set phone_mode <true|false>");
+    eprintln!("  srd set multi_cursor <true|false>");
     eprintln!("  srd set decoration_mode <server|client>");
 }
 
@@ -476,6 +477,13 @@ mod tests {
     fn set_output_position_needs_both_coordinates() {
         assert!(build_request(&args(&["dispatch", "set", "output", "position", "1", "1920"])).is_err(), "missing y must error");
         assert!(build_request(&args(&["dispatch", "set", "output", "position", "1", "not-a-number", "0"])).is_err());
+    }
+
+    #[test]
+    fn set_multi_cursor_accepts_only_true_or_false() {
+        assert_eq!(build_request(&args(&["set", "multi_cursor", "true"])).unwrap(), r#"{"cmd":"set","key":"multi_cursor","value":true}"#);
+        assert_eq!(build_request(&args(&["set", "multi_cursor", "false"])).unwrap(), r#"{"cmd":"set","key":"multi_cursor","value":false}"#);
+        assert!(build_request(&args(&["set", "multi_cursor", "maybe"])).is_err());
     }
 
     #[test]

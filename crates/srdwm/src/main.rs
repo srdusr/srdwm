@@ -173,6 +173,7 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     let rounded_corners = engine.get("general.rounded_corners").and_then(|v| v.as_bool());
     let gpu = engine.get_bool("general.gpu", false);
     let phone_mode = engine.get_bool("general.phone_mode", false);
+    let multi_cursor = engine.get_bool("general.multi_cursor", false);
     let desktop_icons = engine.get_bool("general.desktop_icons", true);
     let desktop_icons_all_monitors = engine.get_bool("general.desktop_icons_all_monitors", true);
     let reserve_top = engine.get_f64("general.reserve_top", 0.0).max(0.0) as u32;
@@ -308,6 +309,7 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     wm.rounded_corners_enabled = rounded_corners;
     wm.gpu_enabled = gpu;
     wm.phone_mode = phone_mode;
+    wm.multi_cursor_enabled = multi_cursor;
     wm.desktop_icons_enabled = desktop_icons;
     wm.desktop_icons_all_monitors = desktop_icons_all_monitors;
     wm.reserve_top = reserve_top;

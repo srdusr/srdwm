@@ -13,6 +13,19 @@ that has the full story. Keep this list current as items close or open;
 update the source doc's own entry too, don't let this drift into a
 second stale copy the way `PANEL_SUPPORT_TODO.md` did.
 
+## Real bug, root-caused and fixed: an uncontrollable "ghost" secondary cursor, on by default (2026-08-27)
+
+Reported live: "I see two cursors on screen and I can't even control the other one/shouldn't really auto show. It's more of like if I use two inputs at same time or for agents to use one without interrupting me." Multi-cursor Phase 1 (`UdevState::secondary_cursors`) drew one extra cursor sprite per physical libinput pointer device that had ever reported a position, unconditionally, with no way to turn it off and no way to know which physical device it belonged to.
+
+Two separate problems, both real:
+
+- **On by default with no opt-out.** Nothing about the two use cases this feature exists for - deliberately using two input devices at once, or an agent driving a window without disturbing the user's own pointer - wants a second sprite appearing uninvited. Added `general.multi_cursor` (`WindowManager::multi_cursor_enabled`, default `false`), live-settable via `srd set multi_cursor <true|false>` and readable via `srd get`/the `"settings"` IPC command, same as every other runtime toggle in this codebase. Off by default: the sprite now only ever appears if explicitly turned on.
+- **A stale entry rendered forever.** Real hardware routinely reports what is physically one mouse as more than one distinct libinput device - a side-button/scroll cluster enumerating on its own HID path is a real, common case, not a hypothetical - so a second, phantom device reports a position exactly once and then never moves again. `secondary_cursors` had no expiry, so that phantom's sprite sat frozen on screen indefinitely with nothing to control or dismiss it - exactly the reported symptom. `secondary_cursors` is now keyed to `(Point, Instant)` instead of a bare `Point`; `record_secondary_cursor` (`udev/session.rs`) prunes every entry older than the new `SECONDARY_CURSOR_TIMEOUT` (1500ms) on each recorded motion, and the render loop (`udev/render.rs`) independently skips any entry that's aged out since the last prune. A device has to have moved within the last 1.5 seconds to draw a sprite at all.
+
+The "agent controls a window without interrupting me" use case this report also asked about was never gated on this flag to begin with - that's Multi-cursor Phase 2's own job (`virtual_pointer.rs`'s pinned delivery via `zwlr_virtual_pointer_unstable_v1`), which delivers input directly to one pinned window/surface and never shows a visible cursor sprite at all, regardless of `general.multi_cursor`.
+
+Full workspace build/test/clippy clean. Not yet live-verified - needs a restart, which the user does on their own initiative per standing policy; nothing here was tested against a real second input device.
+
 ## Titlebar/decoration research: the requested system already exists; one real, unverified gap found (2026-08-27)
 
 Asked directly for "different titlebars/decorations, non-traffic-light ones and right side... deep research... especially firefox/chrome". Read the actual code rather than assuming a gap: this is already a complete, working, documented system --

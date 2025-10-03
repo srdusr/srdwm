@@ -107,6 +107,17 @@ pub(crate) struct DrmBuffer {
     image: Image<'static, 'static>,
 }
 
+/// How long a secondary-cursor entry (`UdevState::secondary_cursors`) is
+/// trusted after its own device's last real motion event before it's
+/// treated as stale and pruned/skipped - see that field's own doc
+/// comment for the frozen-ghost-cursor bug this exists to close. Short
+/// enough that a genuinely idle second device's sprite actually
+/// disappears at a human-noticeable timescale (not "eventually, whenever
+/// something else happens to touch this map"), generous enough that
+/// briefly pausing mid-gesture with a real second device doesn't flicker
+/// its own cursor away and back.
+pub(crate) const SECONDARY_CURSOR_TIMEOUT: Duration = Duration::from_millis(1500);
+
 /// One connector+CRTC pair srdwm scans out to - i.e. one physical monitor.
 ///
 /// Each head owns its own scanout buffers, damage tracker and flip state,
@@ -209,20 +220,30 @@ pub(crate) struct UdevState {
     /// monitors; clamped to the union of all head rectangles.
     pub(crate) pointer_pos: Point<f64, Logical>,
     /// Multi-cursor mode, Phase 1: every physical pointer/trackpad's own
-    /// last-known position, keyed by its real libinput device identity
-    /// (`smithay::backend::input::Event::device()`, confirmed `Device:
-    /// PartialEq + Eq + Hash` by reading smithay's own trait definition).
-    /// Purely a *visual* addition - `pointer_pos` above is still the one
-    /// position that actually drives clicks/drags/hit-testing, updated by
-    /// whichever device moved most recently exactly as before, so nothing
-    /// about existing interactive behaviour changes. This is what lets a
-    /// mouse and a trackpad each show their own live cursor sprite instead
-    /// of only the most-recently-moved device having a visible pointer at
-    /// all - see `docs/TODO.md`'s "Multi-cursor" plan for what later
-    /// phases would still need (per-device *interaction*, not just
-    /// per-device *rendering*, and the real `wl_seat` ecosystem wall a
-    /// second seat runs into for arbitrary client content).
-    pub(crate) secondary_cursors: HashMap<smithay::reexports::input::Device, Point<f64, Logical>>,
+    /// last-known position *and when it was last actually recorded*, keyed
+    /// by its real libinput device identity (`smithay::backend::input::
+    /// Event::device()`, confirmed `Device: PartialEq + Eq + Hash` by
+    /// reading smithay's own trait definition). Purely a *visual*
+    /// addition - `pointer_pos` above is still the one position that
+    /// actually drives clicks/drags/hit-testing, updated by whichever
+    /// device moved most recently exactly as before, so nothing about
+    /// existing interactive behaviour changes.
+    ///
+    /// Gated behind `WindowManager::multi_cursor_enabled` (off by
+    /// default) and the timestamp both exist for the same real, reported
+    /// bug: real hardware routinely reports what is genuinely one mouse
+    /// as more than one distinct libinput device (a side-button/scroll
+    /// cluster on its own HID path, concretely) - the first motion event
+    /// from that phantom device seeded a permanent entry here, rendered
+    /// every frame forever after at wherever the pointer happened to be
+    /// at that one moment, since nothing ever moved that specific device
+    /// identity again. Reported live as "I see two cursors and can't even
+    /// control the other one" - a frozen, uncontrollable ghost, exactly
+    /// what an unpruned entry here looks like. `render_udev_frame` now
+    /// skips (and `handle_libinput_event` now prunes) any entry older
+    /// than `SECONDARY_CURSOR_TIMEOUT`, so only a device that has *itself*
+    /// moved recently ever shows a sprite.
+    pub(crate) secondary_cursors: HashMap<smithay::reexports::input::Device, (Point<f64, Logical>, Instant)>,
     /// A clone of the same `LibSeatSession` `platform.rs` opened the DRM
     /// device with (`LibSeatSession` is cheaply `Clone` - see its own
     /// derive - all clones share the same underlying seat connection).

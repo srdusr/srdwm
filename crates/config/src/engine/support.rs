@@ -159,6 +159,12 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     // completely unaffected - see `WindowManager::phone_mode`'s own doc
     // comment.
     set("general.phone_mode", Bool(false));
+    // `false`: an extra cursor sprite per other physical pointer device is
+    // opt-in, not automatic - see `WindowManager::multi_cursor_enabled`'s
+    // own doc comment for the real, reported reason (a phantom libinput
+    // device from otherwise-ordinary hardware showing up as an
+    // uncontrollable frozen ghost cursor).
+    set("general.multi_cursor", Bool(false));
     // Real desktop icons (Home/Computer/Trash plus `~/Desktop`'s own
     // contents) on by default - see `WindowManager::desktop_icons_
     // enabled`'s own doc comment for why this, unlike `general.gpu` just

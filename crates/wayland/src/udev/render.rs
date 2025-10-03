@@ -321,13 +321,28 @@ impl CompState {
                 // (`cursor_status`/`cursor_buffers`) rather than each
                 // device getting its own - a real visual distinction
                 // between devices is a later-phase refinement, not needed
-                // to prove multiple live positions render at all.
-                let active_device = udev.secondary_cursors.iter().find(|&(_, &p)| p == pointer_pos).map(|(d, _)| d.clone());
-                for (device, &pos) in &udev.secondary_cursors {
-                    if Some(device) == active_device.as_ref() {
-                        continue;
+                // to prove multiple live positions render at all. Gated
+                // on `general.multi_cursor` (off by default) and on each
+                // entry's own recency: a device that reported a position
+                // once and then never moved again - the real, reported
+                // live bug - stops rendering after `SECONDARY_CURSOR_
+                // TIMEOUT` instead of sitting frozen on screen forever.
+                if self.wm.borrow().multi_cursor_enabled {
+                    let now = std::time::Instant::now();
+                    let active_device = udev
+                        .secondary_cursors
+                        .iter()
+                        .find(|&(_, &(p, _))| p == pointer_pos)
+                        .map(|(d, _)| d.clone());
+                    for (device, &(pos, seen)) in &udev.secondary_cursors {
+                        if Some(device) == active_device.as_ref() {
+                            continue;
+                        }
+                        if now.duration_since(seen) >= super::SECONDARY_CURSOR_TIMEOUT {
+                            continue;
+                        }
+                        custom_elements.extend(crate::cursor::render_elements(&cursor_status, &cursor_buffers, &mut udev.renderer, pos, origin, hsize));
                     }
-                    custom_elements.extend(crate::cursor::render_elements(&cursor_status, &cursor_buffers, &mut udev.renderer, pos, origin, hsize));
                 }
                 // Night light/reading mode - a translucent full-output
                 // overlay, pushed right after the cursor so it colours
