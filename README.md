@@ -5,25 +5,37 @@ like a native window manager on every platform it targets rather than a
 compromise between them: real title bars with drag/resize/minimize/maximize/close
 on every backend that can support them, not just a border.
 
-This is a Rust rewrite of an earlier C++ prototype (preserved at
-[`legacy-cpp/`](legacy-cpp/)); see [`docs/PRIOR_ART.md`](docs/PRIOR_ART.md)
-for what carried over, what got fixed, and what other window managers
-informed the design.
+This is a Rust rewrite of an earlier C++ prototype; see
+[`docs/PRIOR_ART.md`](docs/PRIOR_ART.md) for what carried over, what got
+fixed, and what other window managers informed the design. The C++
+version itself has been removed from the tree (it was actively
+misleading to keep alongside a fully working rewrite) - git history
+still has it if anyone needs it.
 
 ## Status
 
-Linux is the primary target and the only one verified end-to-end so far:
+Linux is the primary target and the only one verified end-to-end so far.
+The Wayland backend is the daily-driver target and by far the more
+complete of the two - a real `smithay` compositor with its own GPU
+render path, session lock, desktop icons, global menu, layer-shell
+(bars/docks), fully rendered decorations, and more:
 
 | Backend | Status |
 |---|---|
-| X11 | Working - reparenting WM with a drawn title bar (buttons, drag, resize), verified live under Xephyr |
-| Wayland | Working, smaller scope - real `smithay` compositor, verified to run; decorations have no text yet, global keybindings use a coarse heuristic |
+| Wayland | Daily-driver complete: real decorations (titlebar text, resize, snap), session lock, desktop icons with right-click menus, global menu (`com.canonical.AppMenu.Registrar`/dbusmenu), layer-shell, XWayland, an optional GPU (GBM+EGL) render path alongside the default software one, fake (headless) monitors, and a Phase-2 multi-cursor primitive (pinning a virtual pointer to one window) |
+| X11 | Working - reparenting WM with a drawn title bar (buttons, drag, resize, right-click window menu), feature-audited for parity with the Wayland backend |
 | Windows | Designed, not built (no Windows target in dev sandbox) |
 | macOS | Designed, not built (no macOS target in dev sandbox) |
 
 Full detail, including exactly what's real vs. stubbed and why, is in
-[`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md). Crate
-layout and design rationale are in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+[`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) --
+note that some of its own detail (test counts, specifically) predates
+this rewrite's later growth; `docs/TODO.md` is the actively-maintained
+list of what's pending, with `cargo test --workspace` as the actual
+current count. Crate layout and design rationale are in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); a survey against
+comparable compositors and full desktop environments is in
+[`docs/FEATURE_GAP.md`](docs/FEATURE_GAP.md).
 
 ## Building
 
