@@ -167,6 +167,24 @@ impl CompState {
                 head.ages = [0, 0];
             }
         }
+        // See `UdevState::last_cursor_head`'s own doc comment: neither reset
+        // above notices the pointer crossing from one monitor to another,
+        // so that head's own vacated cursor-sized region was left entirely
+        // to `OutputDamageTracker`'s own diffing - reported live as an
+        // intermittent cursor "ghost" briefly left behind on the monitor
+        // just departed. Only the head being *left* needs the forced
+        // repaint; the one being entered draws a genuinely new element
+        // there this frame regardless, which diffs correctly on its own.
+        let current_cursor_head = udev.heads.iter().position(|h| {
+            let local = (udev.pointer_pos.x as i32 - h.location.x, udev.pointer_pos.y as i32 - h.location.y);
+            local.0 >= 0 && local.1 >= 0 && local.0 < h.size.0 && local.1 < h.size.1
+        });
+        if !locked && udev.last_cursor_head != current_cursor_head {
+            if let Some(old) = udev.last_cursor_head.and_then(|i| udev.heads.get_mut(i)) {
+                old.ages = [0, 0];
+            }
+            udev.last_cursor_head = current_cursor_head;
+        }
         // A head whose page-flip event never arrives (kernel-dropped, or a
         // DRM event this driver never sends for reasons this backend has no
         // visibility into) would otherwise sit in `flip_pending` forever:

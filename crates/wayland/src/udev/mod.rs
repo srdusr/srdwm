@@ -278,6 +278,28 @@ pub(crate) struct UdevState {
     /// `None` before the first frame, same reasoning as `last_rendered_
     /// workspace` above (renders fully regardless).
     pub(crate) last_rendered_layout: Option<u64>,
+    /// Index into `heads` of whichever head the pointer was actually drawn
+    /// on last frame (`None` before the first frame, or if it was on none
+    /// of them). Compared each frame in `render_udev_frame`, same pattern
+    /// as `last_rendered_workspace`/`last_rendered_layout` above, so that
+    /// when the pointer crosses from one monitor to another the head it
+    /// just *left* gets its own `ages` forced back to `[0, 0]` too.
+    ///
+    /// Needed because neither of those two other resets notices this
+    /// transition at all: no window moved, and the workspace didn't
+    /// change, so both stay silent while the cursor sprite simply drops
+    /// out of that head's `custom_elements` list from one frame to the
+    /// next. That leaves the departing head's vacated cursor-sized region
+    /// resting entirely on `OutputDamageTracker`'s own element diffing --
+    /// already documented, for the same "an element disappeared" shape of
+    /// bug on a window vacating part of the screen, as not reliable on its
+    /// own (see `layout_signature`'s own doc comment above `render_udev_
+    /// frame`). Reported live as an intermittent cursor "ghost" briefly
+    /// left behind right after moving the pointer between monitors --
+    /// intermittent because it depends on whatever else that head's own
+    /// diffing already had queued that frame, exactly like the window
+    /// case did.
+    pub(crate) last_cursor_head: Option<usize>,
     /// Set only when `SRDWM_GPU=1` and `gpu::probe` succeeds on this
     /// hardware - see that function's own doc comment for exactly what
     /// it does and does not do yet. `None` (the default, every session

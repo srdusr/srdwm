@@ -170,6 +170,7 @@ impl UdevPlatform {
             disabled_connectors: std::collections::HashSet::new(),
             last_rendered_workspace: None,
             last_rendered_layout: None,
+            last_cursor_head: None,
             gpu: gpu_context,
         };
 

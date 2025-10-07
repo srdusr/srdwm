@@ -13,6 +13,16 @@ that has the full story. Keep this list current as items close or open;
 update the source doc's own entry too, don't let this drift into a
 second stale copy the way `PANEL_SUPPORT_TODO.md` did.
 
+## Real bug, root-caused and fixed: the cursor itself leaves a "ghost" briefly when crossing between monitors (2026-08-27)
+
+Reported live, separately from the secondary-cursor ghost above (same word, different bug - this one is the user's own single, real cursor): "sometimes I recognize ghosting cursor when moving between monitors."
+
+`render_udev_frame` already has two defensive resets that force a head's `ages` back to `[0, 0]` (a full repaint, bypassing damage-diffing) on a workspace switch and on any window move/resize/open/close/restack - both added previously for the exact same underlying shape of bug: `OutputDamageTracker`'s own element-level diffing "evidently doesn't always catch a vacated region on its own" (see `layout_signature`'s own doc comment, added for a window that left a stale titlebar fragment behind after un-maximizing). Neither reset covers the pointer crossing from one monitor to another: no window moved and the workspace didn't change, so the head being *left* just silently drops its cursor element from `custom_elements` one frame to the next, with nothing forcing that head to notice and repaint over it. Intermittent for the same reason the window case was: it depends on whatever else that head's own diffing already had queued that frame.
+
+Fixed with the same pattern already established for the other two cases: new `UdevState::last_cursor_head` (`Option<usize>`, the head index the pointer was actually drawn on last frame, found the same way `cursor::render_elements` itself bounds-checks). Compared each frame in `render_udev_frame`; when it changes, only the *old* head gets `ages = [0, 0]` forced - the newly-entered head draws a genuinely new element there this frame regardless, which the existing diffing already handles correctly on its own, so resetting it too would just be wasted work every time the mouse crosses a boundary.
+
+Full workspace build/test/clippy clean. Not yet live-verified - needs a restart and a real cross-monitor mouse move to confirm, same as everything else in this session.
+
 ## Real bug, root-caused and fixed: an uncontrollable "ghost" secondary cursor, on by default (2026-08-27)
 
 Reported live: "I see two cursors on screen and I can't even control the other one/shouldn't really auto show. It's more of like if I use two inputs at same time or for agents to use one without interrupting me." Multi-cursor Phase 1 (`UdevState::secondary_cursors`) drew one extra cursor sprite per physical libinput pointer device that had ever reported a position, unconditionally, with no way to turn it off and no way to know which physical device it belonged to.
