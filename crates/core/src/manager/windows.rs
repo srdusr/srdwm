@@ -28,14 +28,6 @@ impl WindowManager {
         window.corner_radius = self.theme.default_corner_radius;
         window.decorated = self.theme.default_decorated && !likely_draws_own_titlebar(&window.app_id);
         let actions = self.rules.iter().find(|r| r.matcher.matches(&window)).map(|r| r.actions.clone());
-        log::warn!(
-            "DECO-DIAG add_window id={id} app_id={:?} title={:?} rules_count={} actions_found={} decorated_before_actions={}",
-            window.app_id,
-            window.title,
-            self.rules.len(),
-            actions.is_some(),
-            window.decorated
-        );
         // See `Window::rules_applied`'s doc comment: a native Wayland window
         // still has empty title/app_id at this point, so a real (if
         // inconclusive) match attempt needs to wait for `reapply_rules_if_pending`.
@@ -212,21 +204,9 @@ impl WindowManager {
     pub fn reapply_rules_if_pending(&mut self, id: WindowId) -> bool {
         let Some(window) = self.windows.get(&id) else { return false };
         if window.rules_applied || (window.title.is_empty() && window.app_id.is_empty()) {
-            log::warn!(
-                "DECO-DIAG reapply_rules_if_pending id={id} SKIPPED rules_applied={} app_id={:?} title={:?}",
-                window.rules_applied,
-                window.app_id,
-                window.title
-            );
             return false;
         }
         let actions = self.rules.iter().find(|r| r.matcher.matches(window)).map(|r| r.actions.clone());
-        log::warn!(
-            "DECO-DIAG reapply_rules_if_pending id={id} app_id={:?} actions_found={} actions_decorated={:?}",
-            window.app_id,
-            actions.is_some(),
-            actions.as_ref().and_then(|a| a.decorated)
-        );
         let Some(window) = self.windows.get_mut(&id) else { return false };
         window.rules_applied = true;
         // `add_window`'s matching fallback only ever sees this once
@@ -246,7 +226,6 @@ impl WindowManager {
         if let Some(decorated) = actions.decorated {
             window.decorated = decorated;
         }
-        log::warn!("DECO-DIAG reapply_rules_if_pending id={id} FINAL window.decorated={}", window.decorated);
         if let Some(color) = actions.border_color {
             window.border_color = color;
         }

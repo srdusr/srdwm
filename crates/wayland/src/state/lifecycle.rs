@@ -156,11 +156,6 @@ impl CompState {
             traffic_light_buttons: theme.traffic_light_buttons,
             is_dialog,
         };
-        log::warn!(
-            "DECO-DIAG redraw_decoration_buffer id={id} w.decorated={} early_return={}",
-            w.decorated,
-            self.decoration_signatures.get(&id) == Some(&signature)
-        );
         if self.decoration_signatures.get(&id) == Some(&signature) {
             return;
         }

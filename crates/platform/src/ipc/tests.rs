@@ -426,6 +426,77 @@ fn set_output_enabled_with_neither_name_nor_a_resolvable_id_errors() {
 }
 
 #[test]
+fn set_monitor_split_accepts_a_name_directly_and_applies_immediately() {
+    // Unlike `set_output_position`/`set_output_enabled`, this one is a
+    // plain `WindowManager` mutation with nothing to drain - the very
+    // next `monitor_split` read already reflects it.
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+    wm.borrow_mut().set_monitors(vec![srdwm_core::Monitor::new(0, "eDP-1", srdwm_core::Rect::new(0, 0, 1920, 1080))]);
+
+    let mut client = UnixStream::connect(&server.path).unwrap();
+    let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+    client.write_all(b"{\"cmd\":\"set_monitor_split\",\"name\":\"eDP-1\",\"parts\":2,\"rows\":false}\n").unwrap();
+    server.poll(&wm);
+    let _ = read_line(&mut reader);
+
+    let split = wm.borrow().monitor_split("eDP-1").unwrap();
+    assert_eq!(split.parts, 2);
+    assert!(!split.rows);
+}
+
+#[test]
+fn set_monitor_split_resolves_an_id_to_its_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+    wm.borrow_mut().set_monitors(vec![srdwm_core::Monitor::new(3, "HDMI-A-1", srdwm_core::Rect::new(0, 0, 1920, 1080))]);
+
+    let mut client = UnixStream::connect(&server.path).unwrap();
+    let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+    client.write_all(b"{\"cmd\":\"set_monitor_split\",\"id\":3,\"parts\":3,\"rows\":true}\n").unwrap();
+    server.poll(&wm);
+    let _ = read_line(&mut reader);
+
+    let split = wm.borrow().monitor_split("HDMI-A-1").unwrap();
+    assert_eq!(split.parts, 3);
+    assert!(split.rows);
+}
+
+#[test]
+fn set_monitor_split_with_one_part_clears_an_existing_split() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+    wm.borrow_mut().set_monitors(vec![srdwm_core::Monitor::new(0, "eDP-1", srdwm_core::Rect::new(0, 0, 1920, 1080))]);
+    wm.borrow_mut().set_monitor_split("eDP-1".to_string(), 2, false);
+
+    let mut client = UnixStream::connect(&server.path).unwrap();
+    let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+    client.write_all(b"{\"cmd\":\"set_monitor_split\",\"name\":\"eDP-1\",\"parts\":1}\n").unwrap();
+    server.poll(&wm);
+    let _ = read_line(&mut reader);
+
+    assert!(wm.borrow().monitor_split("eDP-1").is_none());
+}
+
+#[test]
+fn set_monitor_split_with_neither_name_nor_a_resolvable_id_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+
+    let mut client = UnixStream::connect(&server.path).unwrap();
+    let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+    client.write_all(b"{\"cmd\":\"set_monitor_split\",\"parts\":2}\n").unwrap();
+    server.poll(&wm);
+    let line = read_line(&mut reader);
+
+    assert!(line.contains(r#""error""#));
+}
+
+#[test]
 fn monitors_query_lists_a_disabled_output_alongside_live_ones() {
     // What the AGS peer session asked for directly: a disabled output
     // must not just vanish from `srd monitors` - it needs a row

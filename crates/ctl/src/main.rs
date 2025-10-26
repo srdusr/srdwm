@@ -43,6 +43,12 @@
 //!                                    disabled output stops presenting
 //!                                    and its `wl_output` global goes away
 //!                                    until re-enabled
+//!   srd dispatch set output split NAME|ID PARTS [rows|columns]   divides
+//!                                    one real output into PARTS logical
+//!                                    monitors for placement/tiling --
+//!                                    columns (default) side by side,
+//!                                    rows stacked; PARTS <= 1 clears an
+//!                                    existing split. Live, no restart.
 //!   srd set border_width 3          live theme values, applied immediately
 //!   srd set border_color '#cba6f7'  (hex string)
 //!   srd set corner_radius 10
@@ -294,9 +300,9 @@ fn build_dispatch(args: &[String]) -> Result<String, String> {
         // back.
         "set" => {
             if args.get(1).map(String::as_str) != Some("output") {
-                return Err(format!("'set' only supports 'output position'/'output enabled' - {usage_hint}"));
+                return Err(format!("'set' only supports 'output position'/'output enabled'/'output split' - {usage_hint}"));
             }
-            let noun = args.get(2).ok_or("'set output' needs a target: position or enabled")?;
+            let noun = args.get(2).ok_or("'set output' needs a target: position, enabled or split")?;
             let target = args.get(3).ok_or("'set output' needs a monitor name or id")?;
             match noun.as_str() {
                 "position" => {
@@ -316,6 +322,25 @@ fn build_dispatch(args: &[String]) -> Result<String, String> {
                     match target.parse::<u64>() {
                         Ok(id) => Ok(format!(r#"{{"cmd":"set_output_enabled","id":{id},"enabled":{enabled}}}"#)),
                         Err(_) => Ok(format!(r#"{{"cmd":"set_output_enabled","name":"{target}","enabled":{enabled}}}"#)),
+                    }
+                }
+                // `srd dispatch set output split <name|id> <parts> [rows|columns]`
+                // - the live equivalent of `srd.monitor.split(name, parts,
+                // direction)` in Lua config, which previously only ever took
+                // effect at config load/reload. `parts <= 1` clears an
+                // existing split. `columns` (side-by-side, splitting width)
+                // is the default when the direction is omitted, matching the
+                // Lua function's own default.
+                "split" => {
+                    let parts: u64 = args.get(4).ok_or("'set output split' needs a part count")?.parse().map_err(|_| "parts must be a number".to_string())?;
+                    let rows = match args.get(5).map(String::as_str) {
+                        None | Some("columns") => false,
+                        Some("rows") => true,
+                        Some(other) => return Err(format!("'set output split' direction must be 'rows' or 'columns', got '{other}'")),
+                    };
+                    match target.parse::<u64>() {
+                        Ok(id) => Ok(format!(r#"{{"cmd":"set_monitor_split","id":{id},"parts":{parts},"rows":{rows}}}"#)),
+                        Err(_) => Ok(format!(r#"{{"cmd":"set_monitor_split","name":"{target}","parts":{parts},"rows":{rows}}}"#)),
                     }
                 }
                 _ => Err(format!("unknown 'set output' target '{noun}' - {usage_hint}")),
@@ -385,6 +410,7 @@ fn print_usage() {
     eprintln!("  srd dispatch cycle keyboard layout");
     eprintln!("  srd dispatch set output position <name|id> <x> <y>");
     eprintln!("  srd dispatch set output enabled <name|id> <true|false>");
+    eprintln!("  srd dispatch set output split <name|id> <parts> [rows|columns]");
     eprintln!("  srd dispatch pin input <pid> <window-id>");
     eprintln!("  srd dispatch unpin input <pid>");
     eprintln!("  srd dispatch create fake-monitor <name> <width>x<height>");
@@ -500,6 +526,31 @@ mod tests {
             build_request(&args(&["dispatch", "set", "output", "enabled", "HDMI-A-1", "true"])).unwrap(),
             r#"{"cmd":"set_output_enabled","name":"HDMI-A-1","enabled":true}"#
         );
+    }
+
+    #[test]
+    fn set_output_split_accepts_a_numeric_id_and_a_name() {
+        assert_eq!(build_request(&args(&["dispatch", "set", "output", "split", "1", "2"])).unwrap(), r#"{"cmd":"set_monitor_split","id":1,"parts":2,"rows":false}"#);
+        assert_eq!(
+            build_request(&args(&["dispatch", "set", "output", "split", "HDMI-A-1", "3", "rows"])).unwrap(),
+            r#"{"cmd":"set_monitor_split","name":"HDMI-A-1","parts":3,"rows":true}"#
+        );
+    }
+
+    #[test]
+    fn set_output_split_defaults_direction_to_columns() {
+        assert_eq!(build_request(&args(&["dispatch", "set", "output", "split", "eDP-1", "2", "columns"])).unwrap(), r#"{"cmd":"set_monitor_split","name":"eDP-1","parts":2,"rows":false}"#);
+    }
+
+    #[test]
+    fn set_output_split_rejects_an_unknown_direction() {
+        assert!(build_request(&args(&["dispatch", "set", "output", "split", "eDP-1", "2", "sideways"])).is_err());
+    }
+
+    #[test]
+    fn set_output_split_needs_a_part_count() {
+        assert!(build_request(&args(&["dispatch", "set", "output", "split", "eDP-1"])).is_err());
+        assert!(build_request(&args(&["dispatch", "set", "output", "split", "eDP-1", "not-a-number"])).is_err());
     }
 
     #[test]

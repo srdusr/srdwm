@@ -219,7 +219,6 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
         // already reads serves both, same as every other dispatch arm.
         "activate_workspace" => {
             let Some(id) = id else { return (err("missing id"), false) };
-            let before = wm.borrow().current_workspace();
             // `switch_workspace_on_monitor` falls straight through to the
             // ordinary shared-mode `switch_workspace` when `workspace.
             // per_monitor` is off, so this is the one call site that works
@@ -239,9 +238,6 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
                     .unwrap_or(0);
                 wm.switch_workspace_on_monitor(id as srdwm_core::WorkspaceId, monitor);
             }
-            let after = wm.borrow().current_workspace();
-            let known: Vec<_> = wm.borrow().workspaces().iter().map(|w| w.id).collect();
-            log::warn!("WS-IPC-DIAG requested_id={id} before={before} after={after} known_ids={known:?}");
             (ok(), true)
         }
         // `{"cmd":"set_output_position","id":<monitor id>,"x":<i32>,"y":<i32>}`
@@ -320,6 +316,34 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
                 return (err("missing enabled"), false);
             };
             wm.borrow_mut().request_output_enabled(name, enabled);
+            (ok(), true)
+        }
+        // `{"cmd":"set_monitor_split","id"|"name":...,"parts":<u32>,
+        // "rows":<bool, optional, default false>}` - the live CLI/IPC path
+        // for `srd.monitor.split(name, parts, direction)` (`crates/config/
+        // src/engine/general.rs`'s own `fn_monitor_split`), which until now
+        // only ever ran once at config load. `WindowManager::
+        // set_monitor_split` just mutates `monitor_splits`, and every
+        // backend's own `monitors()` already reads that map fresh on every
+        // single call (see the udev platform's own `monitors()`) - so,
+        // unlike `set_output_position`/`set_output_enabled` above, this
+        // needs no queue-and-drain at all: the very next `monitors()` query
+        // already reflects it. `parts` <= 1 clears an existing split, same
+        // as the Lua function. Same "resolve id to a name first" fallback
+        // `set_output_enabled` above already uses, since a caller working
+        // from a numeric id shouldn't have to look the name up itself
+        // first just to turn around and split it.
+        "set_monitor_split" => {
+            let name = match req.get("name").and_then(|v| v.as_str()) {
+                Some(name) => Some(name.to_string()),
+                None => id.and_then(|id| wm.borrow().monitors().iter().find(|m| m.id == id as srdwm_core::MonitorId).map(|m| m.name.clone())),
+            };
+            let Some(name) = name else { return (err("missing name, or an id matching a currently-connected monitor"), false) };
+            let Some(parts) = req.get("parts").and_then(|v| v.as_u64()) else {
+                return (err("missing parts"), false);
+            };
+            let rows = req.get("rows").and_then(|v| v.as_bool()).unwrap_or(false);
+            wm.borrow_mut().set_monitor_split(name, parts as u32, rows);
             (ok(), true)
         }
         // `{"cmd":"capture_workspace","id":<workspace id>,"path":<string>,

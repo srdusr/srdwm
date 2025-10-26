@@ -90,7 +90,6 @@ impl CompState {
             let zone_before = map.non_exclusive_zone();
             map.unmap_layer(&layer);
             let zone_after = map.non_exclusive_zone();
-            log::warn!("LAYER-VIS-DIAG unmapped namespace={:?} zone_before={zone_before:?} zone_after={zone_after:?}", layer.namespace());
             if zone_after != zone_before {
                 self.pending.borrow_mut().push(CoreEvent::MonitorAdded(srdwm_core::Monitor::new(0, "", srdwm_core::Rect::new(0, 0, 0, 0))));
             }
