@@ -864,6 +864,7 @@ impl Platform for UdevPlatform {
             m.full_geometry = full;
             m.maximize_geometry = full;
             m.primary = false;
+            m.is_virtual = true;
             out.push(m);
             next_id += 1;
         }

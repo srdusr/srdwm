@@ -65,11 +65,41 @@ pub struct Monitor {
     /// other than `1.0`) traced back to exactly this missing piece of
     /// information.
     pub scale: f64,
+    /// `true` for a fully virtual/headless output created by `srd dispatch
+    /// create fake-monitor` (`crates/wayland/src/udev/virtual_heads.rs`) --
+    /// a real, independent `wl_output` global with no DRM connector behind
+    /// it. `false` for every ordinary connected output, split part
+    /// included (`split` and `is_virtual` are independent: a split part is
+    /// still a real output's own rectangle, not a second `wl_output`).
+    ///
+    /// Requested directly by the AGS peer session after a fake monitor's
+    /// `wl_output` caused a real live incident: a fake output looks like an
+    /// ordinary new monitor to any client watching the core Wayland
+    /// registry (not just `wlr-output-management-v1`, which already
+    /// deliberately excludes it - see `virtual_heads.rs`'s own module doc
+    /// comment), so AGS's own remembered-layout restore treated it as a
+    /// real hotplug and repositioned the *real* monitor to make room for
+    /// it, twice, once per fake monitor created. AGS's own fix was a
+    /// name-pattern match (`/^FAKE-/i`) since nothing else in `srd
+    /// monitors`' output let it tell a fake output apart from a real one --
+    /// this field is the real discriminator that match was standing in for.
+    pub is_virtual: bool,
 }
 
 impl Monitor {
     pub fn new(id: MonitorId, name: impl Into<String>, geometry: Rect) -> Self {
-        Self { id, name: name.into(), geometry, full_geometry: geometry, maximize_geometry: geometry, refresh_rate_mhz: 60_000, primary: false, split: false, scale: 1.0 }
+        Self {
+            id,
+            name: name.into(),
+            geometry,
+            full_geometry: geometry,
+            maximize_geometry: geometry,
+            refresh_rate_mhz: 60_000,
+            primary: false,
+            split: false,
+            scale: 1.0,
+            is_virtual: false,
+        }
     }
 }
 

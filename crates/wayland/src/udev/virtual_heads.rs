@@ -90,6 +90,23 @@ impl CompState {
         output.set_preferred(mode);
         let global = output.create_global::<CompState>(&self.dh);
 
+        // Also registered in `self.outputs` (mirroring `bring_up_head`'s own
+        // `entry` for a real head), not just `udev.virtual_heads` - without
+        // this, `output_for_wl` (which only ever searches `self.outputs`)
+        // can never resolve *this* output's own `wl_output` back to
+        // anything, so any client naming it in a `zwlr_layer_shell_v1::
+        // get_layer_surface` request (a per-monitor bar/panel, concretely)
+        // silently falls through `new_layer_surface`'s "or land on the
+        // primary output" fallback instead - landing a bar meant for this
+        // fake monitor on the real primary one, stacking its exclusive
+        // zone on top of whatever real bar is already reserving space
+        // there. Confirmed live: a second fake monitor's own bar attempt
+        // was exactly what pushed the real monitor's reserved top strip up
+        // by another zone's worth, on top of the real bar's own - reported
+        // as the real monitor's position drifting after a fake monitor
+        // appeared, which was actually its *usable* (bar-shrunk) area
+        // shrinking further, not its true position moving at all.
+        self.outputs.push(crate::state::OutputEntry { output: output.clone(), location });
         self.udev.as_mut().unwrap().virtual_heads.push(VirtualHead { name, output, global, size: (width, height), location });
         // Payload discarded unread - `main.rs`'s own handler for this
         // event just re-queries the whole monitor list, same as a real
@@ -111,6 +128,10 @@ impl CompState {
         };
         let head = udev.virtual_heads.remove(index);
         self.dh.remove_global::<CompState>(head.global);
+        // Mirrors `create_virtual_head`'s own registration - see that
+        // function's doc comment for why this output was in `self.outputs`
+        // at all.
+        self.outputs.retain(|e| e.output != head.output);
         self.pending.borrow_mut().push(CoreEvent::MonitorRemoved(0));
         Ok(())
     }

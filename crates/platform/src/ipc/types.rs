@@ -288,6 +288,21 @@ pub(crate) struct MonitorInfo {
     // actually displaying. See `WorkspaceInfo::monitor` for the same fact
     // indexed from the other direction.
     pub(crate) active_workspace: usize,
+    // `true` for a fully virtual/headless output (`srd dispatch create
+    // fake-monitor`) - a real `wl_output` global with no DRM connector
+    // behind it. Requested directly by the AGS peer session after a fake
+    // monitor's `wl_output` caused a real live incident: it looks like an
+    // ordinary new physical monitor to any client watching the core
+    // Wayland registry (unlike `wlr-output-management-v1`, which already
+    // excludes it), so AGS's own remembered-layout restore treated one
+    // appearing as a real hotplug and repositioned the *real* monitor to
+    // make room for it. Before this field existed, AGS's only option was
+    // matching the name against `^FAKE-` - this is the real
+    // discriminator that pattern was standing in for. `#[serde(rename)]`
+    // rather than a field literally named `virtual` because that word is
+    // a reserved identifier in Rust.
+    #[serde(rename = "virtual")]
+    pub(crate) is_virtual: bool,
 }
 
 /// Pushed to every subscriber (and used as `subscribe`'s own initial
@@ -446,6 +461,7 @@ pub(crate) fn monitor_snapshot(wm: &std::rc::Rc<std::cell::RefCell<WindowManager
         split: m.split,
         scale: m.scale,
         active_workspace: wm.workspace_for_monitor(m.id),
+        is_virtual: m.is_virtual,
     });
     // Disabled-but-still-connected outputs, appended rather than merged in
     // by name - see `MonitorInfo::enabled`'s own doc comment for why
@@ -482,6 +498,10 @@ pub(crate) fn monitor_snapshot(wm: &std::rc::Rc<std::cell::RefCell<WindowManager
         // "shows nothing, not tracked" the same way `id: u32::MAX` above
         // is a deliberate not-a-real-value sentinel for this same entry.
         active_workspace: 0,
+        // A fake monitor is never administratively disabled/re-enabled --
+        // see `virtual_heads.rs`'s own module doc comment - so this
+        // branch (disabled-but-still-connected outputs) can never be one.
+        is_virtual: false,
     });
     live.chain(disabled).collect()
 }

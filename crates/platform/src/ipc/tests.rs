@@ -497,6 +497,30 @@ fn set_monitor_split_with_neither_name_nor_a_resolvable_id_errors() {
 }
 
 #[test]
+fn monitors_query_marks_a_virtual_output_so_a_client_does_not_treat_it_as_a_real_hotplug() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+    let real = srdwm_core::Monitor::new(0, "eDP-1", srdwm_core::Rect::new(0, 0, 1920, 1080));
+    let mut fake = srdwm_core::Monitor::new(1, "FAKE-1", srdwm_core::Rect::new(1920, 0, 1920, 1080));
+    fake.is_virtual = true;
+    wm.borrow_mut().set_monitors(vec![real, fake]);
+
+    let mut client = UnixStream::connect(&server.path).unwrap();
+    let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
+    client.write_all(b"{\"cmd\":\"monitors\"}\n").unwrap();
+    server.poll(&wm);
+    let line = read_line(&mut reader);
+
+    let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+    let monitors = parsed["monitors"].as_array().unwrap();
+    let real = monitors.iter().find(|m| m["name"] == "eDP-1").unwrap();
+    let fake = monitors.iter().find(|m| m["name"] == "FAKE-1").unwrap();
+    assert_eq!(real["virtual"], false, "a real output must not be marked virtual");
+    assert_eq!(fake["virtual"], true, "a fake monitor must be marked virtual so a client can tell it apart from a real hotplug");
+}
+
+#[test]
 fn monitors_query_lists_a_disabled_output_alongside_live_ones() {
     // What the AGS peer session asked for directly: a disabled output
     // must not just vanish from `srd monitors` - it needs a row
