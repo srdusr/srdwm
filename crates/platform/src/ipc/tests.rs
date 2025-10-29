@@ -426,10 +426,15 @@ fn set_output_enabled_with_neither_name_nor_a_resolvable_id_errors() {
 }
 
 #[test]
-fn set_monitor_split_accepts_a_name_directly_and_applies_immediately() {
-    // Unlike `set_output_position`/`set_output_enabled`, this one is a
-    // plain `WindowManager` mutation with nothing to drain - the very
-    // next `monitor_split` read already reflects it.
+fn set_monitor_split_accepts_a_name_directly_and_queues_a_request() {
+    // Queued, not applied directly - see `WindowManager::monitor_split_
+    // requests`'s own doc comment for why a direct mutation here left
+    // `srd monitors` reporting the stale, unsplit layout indefinitely
+    // (nothing re-triggers `monitors`' own passive cache). Only the
+    // backend that owns real output hardware can call `set_monitor_split`
+    // and push the matching recompute event, so this test - run from the
+    // platform crate alone, with no such backend - can only observe the
+    // queued request, not the applied state.
     let dir = tempfile::tempdir().unwrap();
     let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
     let wm = Rc::new(RefCell::new(WindowManager::new()));
@@ -441,9 +446,7 @@ fn set_monitor_split_accepts_a_name_directly_and_applies_immediately() {
     server.poll(&wm);
     let _ = read_line(&mut reader);
 
-    let split = wm.borrow().monitor_split("eDP-1").unwrap();
-    assert_eq!(split.parts, 2);
-    assert!(!split.rows);
+    assert_eq!(wm.borrow_mut().drain_monitor_split_requests(), vec![("eDP-1".to_string(), 2, false)]);
 }
 
 #[test]
@@ -459,26 +462,35 @@ fn set_monitor_split_resolves_an_id_to_its_name() {
     server.poll(&wm);
     let _ = read_line(&mut reader);
 
-    let split = wm.borrow().monitor_split("HDMI-A-1").unwrap();
-    assert_eq!(split.parts, 3);
-    assert!(split.rows);
+    assert_eq!(wm.borrow_mut().drain_monitor_split_requests(), vec![("HDMI-A-1".to_string(), 3, true)]);
 }
 
 #[test]
-fn set_monitor_split_with_one_part_clears_an_existing_split() {
+fn set_monitor_split_replaces_a_still_pending_request_for_the_same_name() {
+    // Same "last write wins per name" semantics as `request_output_
+    // position` - only the latest requested split for a given output
+    // matters if several arrive before the backend's next drain.
     let dir = tempfile::tempdir().unwrap();
     let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
     let wm = Rc::new(RefCell::new(WindowManager::new()));
     wm.borrow_mut().set_monitors(vec![srdwm_core::Monitor::new(0, "eDP-1", srdwm_core::Rect::new(0, 0, 1920, 1080))]);
-    wm.borrow_mut().set_monitor_split("eDP-1".to_string(), 2, false);
 
     let mut client = UnixStream::connect(&server.path).unwrap();
     let mut reader = std::io::BufReader::new(client.try_clone().unwrap());
-    client.write_all(b"{\"cmd\":\"set_monitor_split\",\"name\":\"eDP-1\",\"parts\":1}\n").unwrap();
+    client.write_all(b"{\"cmd\":\"set_monitor_split\",\"name\":\"eDP-1\",\"parts\":2,\"rows\":false}\n").unwrap();
     server.poll(&wm);
     let _ = read_line(&mut reader);
 
-    assert!(wm.borrow().monitor_split("eDP-1").is_none());
+    // A fresh connection - each `srd dispatch` is its own one-shot socket
+    // connection in practice, not a second write on an already-answered
+    // one (which the server closes after replying).
+    let mut client2 = UnixStream::connect(&server.path).unwrap();
+    let mut reader2 = std::io::BufReader::new(client2.try_clone().unwrap());
+    client2.write_all(b"{\"cmd\":\"set_monitor_split\",\"name\":\"eDP-1\",\"parts\":1}\n").unwrap();
+    server.poll(&wm);
+    let _ = read_line(&mut reader2);
+
+    assert_eq!(wm.borrow_mut().drain_monitor_split_requests(), vec![("eDP-1".to_string(), 1, false)]);
 }
 
 #[test]

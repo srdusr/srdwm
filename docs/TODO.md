@@ -13,6 +13,14 @@ that has the full story. Keep this list current as items close or open;
 update the source doc's own entry too, don't let this drift into a
 second stale copy the way `PANEL_SUPPORT_TODO.md` did.
 
+## Real bug in the same-day monitor-split live-exposure: `srd monitors` never reflected it (2026-08-27)
+
+Tried it live for the user right after shipping it: `srd dispatch set output split eDP-1 2 columns` returned `{"ok":true}`, but the very next `srd monitors` still showed one whole, unsplit output. Root cause: `WindowManager::monitors` is a passive cache, only refreshed when a backend re-queries and calls `set_monitors` again (a real hotplug, or another request's own drain site pushing a `MonitorAdded` "just go recompute" event - see `output_position_requests`' own drain site, which already does exactly this after applying a position). The IPC handler called `set_monitor_split` directly, mutating the split map correctly but never triggering that requery - the same class of bug `output_position_requests` was already built to avoid, just missed when this feature was added.
+
+Fixed by making it a proper queued cross-boundary request like every other backend-owned effect on this socket: new `WindowManager::request_monitor_split`/`drain_monitor_split_requests` (`monitor_split_requests`, replace-not-accumulate per name, same as `request_output_position`), IPC dispatch now queues instead of mutating directly, and the udev backend's own poll drains it, applies via `set_monitor_split`, and pushes the same recompute event `set_output_position`'s drain site does. `srd.monitor.split`'s Lua config-time path is untouched - it runs before the very first startup `monitors()` query, so it never had this staleness problem to begin with.
+
+Full workspace build/test/clippy clean (34 platform tests). Live-verified this time before calling it done, not just build-clean - exactly the mistake this entry itself is about.
+
 ## Fake-monitor incident, root-caused and fixed jointly with the AGS peer session (2026-08-27)
 
 Follow-up to the incident entry directly below. `dotfiles-1a` (AGS) confirmed from AGS's own session log (`~/.local/state/wm-session-*.log` - not `~/.cache/ags/ags.log`, which was stale) that the X-position jump was AGS's own remembered "extend-left" layout restore firing twice, once per fake monitor appearing (`arrange()` places the primary at 0,0 and walks the rest `left -= width`, then normalizes - correct behavior for a *real* second monitor; the only fault was a fake one being in the arrangeable set at all). Fixed on AGS's side: `readArrangeable()` now filters `!m.split && !m.virtual`. Their match was keyed on connector *name*, not index, ruling out the index-shift half of my own original theory.

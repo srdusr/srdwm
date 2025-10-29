@@ -603,6 +603,19 @@ impl Platform for UdevPlatform {
                 self.pending.borrow_mut().push(CoreEvent::MonitorAdded(srdwm_core::Monitor::new(0, "", srdwm_core::Rect::new(0, 0, 0, 0))));
             }
         }
+        // Applies any `srd dispatch set output split` IPC requests queued
+        // since the last poll - see `WindowManager::monitor_split_
+        // requests`'s own doc comment for why this needs the same "apply,
+        // then push a recompute event" shape `set_output_position`'s own
+        // drain just above uses, rather than `set_monitor_split` being
+        // called straight from the IPC dispatch handler.
+        let split_requests = self.state.wm.borrow_mut().drain_monitor_split_requests();
+        if !split_requests.is_empty() {
+            for (name, parts, rows) in split_requests {
+                self.state.wm.borrow_mut().set_monitor_split(name, parts, rows);
+            }
+            self.pending.borrow_mut().push(CoreEvent::MonitorAdded(srdwm_core::Monitor::new(0, "", srdwm_core::Rect::new(0, 0, 0, 0))));
+        }
         // Applies any `srd set_output_enabled` IPC requests queued since
         // the last poll - `disable_connector_by_name`/`enable_connector_
         // by_name` already push their own `MonitorRemoved`/`MonitorAdded`

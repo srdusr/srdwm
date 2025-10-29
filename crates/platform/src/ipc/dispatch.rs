@@ -322,17 +322,17 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
         // "rows":<bool, optional, default false>}` - the live CLI/IPC path
         // for `srd.monitor.split(name, parts, direction)` (`crates/config/
         // src/engine/general.rs`'s own `fn_monitor_split`), which until now
-        // only ever ran once at config load. `WindowManager::
-        // set_monitor_split` just mutates `monitor_splits`, and every
-        // backend's own `monitors()` already reads that map fresh on every
-        // single call (see the udev platform's own `monitors()`) - so,
-        // unlike `set_output_position`/`set_output_enabled` above, this
-        // needs no queue-and-drain at all: the very next `monitors()` query
-        // already reflects it. `parts` <= 1 clears an existing split, same
-        // as the Lua function. Same "resolve id to a name first" fallback
-        // `set_output_enabled` above already uses, since a caller working
-        // from a numeric id shouldn't have to look the name up itself
-        // first just to turn around and split it.
+        // only ever ran once at config load. Queued via `request_monitor_
+        // split`, same cross-boundary "core has no way to trigger its own
+        // requery" reasoning as `set_output_position` above - see
+        // `WindowManager::monitor_split_requests`'s own doc comment for the
+        // real, live-reproduced staleness bug that came from calling
+        // `set_monitor_split` directly here on a first attempt. `parts` <=
+        // 1 clears an existing split, same as the Lua function. Same
+        // "resolve id to a name first" fallback `set_output_enabled` above
+        // already uses, since a caller working from a numeric id shouldn't
+        // have to look the name up itself first just to turn around and
+        // split it.
         "set_monitor_split" => {
             let name = match req.get("name").and_then(|v| v.as_str()) {
                 Some(name) => Some(name.to_string()),
@@ -343,7 +343,7 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
                 return (err("missing parts"), false);
             };
             let rows = req.get("rows").and_then(|v| v.as_bool()).unwrap_or(false);
-            wm.borrow_mut().set_monitor_split(name, parts as u32, rows);
+            wm.borrow_mut().request_monitor_split(name, parts as u32, rows);
             (ok(), true)
         }
         // `{"cmd":"capture_workspace","id":<workspace id>,"path":<string>,

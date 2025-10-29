@@ -103,6 +103,22 @@ pub struct WindowManager {
     /// [`MonitorSplit`]'s own doc comment for what this deliberately does
     /// and does not give a client (no new `wl_output`).
     monitor_splits: HashMap<String, MonitorSplit>,
+    /// Same cross-boundary-request pattern as `output_position_requests`
+    /// above - an IPC `set_monitor_split` dispatch (the live CLI/IPC path
+    /// for `srd.monitor.split`) mutating `monitor_splits` directly is not
+    /// enough on its own: `monitors` above is a passive cache, only
+    /// refreshed when a backend re-queries and calls `set_monitors` again
+    /// (a real hotplug, or another queued request's own drain site pushing
+    /// the same "just go recompute" `MonitorAdded` event - see `output_
+    /// position_requests`' own drain site for the exact precedent). A
+    /// direct mutation with nothing to trigger that requery left `srd
+    /// monitors` reporting the pre-split layout indefinitely, live-
+    /// reproduced the first time this was tried: `{"ok":true}` came back,
+    /// but the very next `srd monitors` still showed one whole, unsplit
+    /// output. Queued here instead so the backend's own drain site can
+    /// apply the split *and* push that same recompute signal, exactly like
+    /// `output_position_requests` already does.
+    monitor_split_requests: Vec<(String, u32, bool)>,
     /// `srd.monitor.scale(name, factor)` requests, by connector name --
     /// read once by a backend when it brings a head up (startup, hotplug,
     /// or re-enable), so a physically large, low-DPI monitor can run
@@ -454,6 +470,7 @@ impl WindowManager {
             output_enable_requests: Vec::new(),
             disabled_monitors: HashMap::new(),
             monitor_splits: HashMap::new(),
+            monitor_split_requests: Vec::new(),
             monitor_scales: HashMap::new(),
             lock_requested: false,
             capture_requests: Vec::new(),

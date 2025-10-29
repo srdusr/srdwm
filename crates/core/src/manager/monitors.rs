@@ -233,6 +233,24 @@ impl WindowManager {
         self.monitor_splits.get(name).copied()
     }
 
+    /// Queues a live `srd dispatch set output split` request - see
+    /// `monitor_split_requests`' own doc comment for why this can't just
+    /// call `set_monitor_split` directly from the IPC dispatch handler.
+    /// Same "replace, don't accumulate" per-name semantics as `request_
+    /// output_position`.
+    pub fn request_monitor_split(&mut self, name: String, parts: u32, rows: bool) {
+        self.monitor_split_requests.retain(|(existing, _, _)| *existing != name);
+        self.monitor_split_requests.push((name, parts, rows));
+    }
+
+    /// [`Self::drain_output_position_requests`]'s counterpart for split
+    /// requests - the backend applies each via `set_monitor_split` and
+    /// pushes its own "just go recompute" event afterward, same as that
+    /// function's own drain site.
+    pub fn drain_monitor_split_requests(&mut self) -> Vec<(String, u32, bool)> {
+        std::mem::take(&mut self.monitor_split_requests)
+    }
+
     /// `srd.monitor.scale(name, factor)` - a backend applies this the
     /// next time it brings connector `name`'s head up (startup, hotplug,
     /// or re-enable). `factor <= 0.0` clears any existing override rather
