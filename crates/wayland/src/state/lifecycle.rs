@@ -301,6 +301,11 @@ impl CompState {
             self.close_snap_flyout();
         }
         self.wm.borrow_mut().remove_window(id);
+        // Persists whatever `remove_window` just snapshotted into
+        // `remembered_geometry` - see that function's own doc comment for
+        // why a window closing, not just a manual drag/resize release,
+        // needs to reach disk too.
+        crate::window_memory::save_all(self.wm.borrow().all_remembered_geometry());
         self.pending.borrow_mut().push(CoreEvent::WindowDestroyed(id));
         foreign_toplevel::window_closed(self, id);
         // `remove_window` may have picked a new focused window on its own

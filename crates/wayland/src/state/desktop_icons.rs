@@ -72,22 +72,16 @@ impl CompState {
         self.desktop_icon_buffers.clear();
     }
 
-    /// One grid origin per monitor icons should mirror onto: every enabled
-    /// monitor when `general.desktop_icons_all_monitors` is on (the
-    /// default - see that field's own doc comment), otherwise just the
-    /// primary monitor's, matching the original single-monitor behaviour.
-    /// Sorted by monitor id so the list (and therefore which origin
-    /// `icon_at` matches first) is stable call to call, not at the mercy of
-    /// `WindowManager::monitors()`'s own iteration order.
+    /// One grid origin per monitor icons should mirror onto - see
+    /// `icon_origins_for`'s own doc comment for the actual selection
+    /// logic. Sorted by monitor id first so the list (and therefore which
+    /// origin `icon_at` matches first) is stable call to call, not at the
+    /// mercy of `WindowManager::monitors()`'s own iteration order.
     fn desktop_icon_origins(&self) -> Vec<(i32, i32)> {
         let wm = self.wm.borrow();
         let mut monitors = wm.monitors().to_vec();
         monitors.sort_by_key(|m| m.id);
-        if wm.desktop_icons_all_monitors {
-            monitors.iter().map(|m| (m.geometry.x + GRID_MARGIN, m.geometry.y + GRID_MARGIN)).collect()
-        } else {
-            monitors.iter().find(|m| m.primary).map(|m| vec![(m.geometry.x + GRID_MARGIN, m.geometry.y + GRID_MARGIN)]).unwrap_or_default()
-        }
+        icon_origins_for(&monitors, wm.desktop_icons_all_monitors)
     }
 
     /// Re-derives the icon list from the real filesystem (a new/removed
@@ -706,6 +700,47 @@ fn on_path(bin: &str) -> bool {
     std::env::var_os("PATH").map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file())).unwrap_or(false)
 }
 
+/// The actual logic behind [`CompState::desktop_icon_origins`] - pulled
+/// out so it's testable without a real `WindowManager`/`Output`, the same
+/// reasoning `udev/outputs.rs::next_logical_x` already applies. `monitors`
+/// must already be sorted by id.
+///
+/// One origin per real, physically distinct screen when `all_monitors` is
+/// set - not one per `Monitor` entry, which `srd.monitor.split` can
+/// multiply several of out of the *same* real output purely for
+/// placement/tiling purposes (see `Monitor::split`'s own doc comment: "not
+/// a second wl_output, not a second physical connector"). Mirroring the
+/// full icon set onto every split part put two, visually side by side, on
+/// what is still one continuous physical desktop - reported live as
+/// "doesn't look like 2 more monitors, just showing double desktop icons"
+/// the moment a two-way split was tried. A split part's own name is
+/// always `"{connector}-{part}"` (`platform.rs`'s `sub_name`
+/// construction) - recovering the real connector from it and keeping
+/// only the first (lowest-id) part per connector collapses every split
+/// group back to the one real screen it actually is, while a genuinely
+/// separate additional monitor (real or fake, `split == false`) still
+/// gets its own origin exactly as before. When `all_monitors` is unset,
+/// just the primary monitor's origin, matching the original single-
+/// monitor behaviour.
+fn icon_origins_for(monitors: &[srdwm_core::Monitor], all_monitors: bool) -> Vec<(i32, i32)> {
+    if all_monitors {
+        let mut seen_split_connectors = std::collections::HashSet::new();
+        monitors
+            .iter()
+            .filter(|m| {
+                if !m.split {
+                    return true;
+                }
+                let connector = m.name.rsplit_once('-').map(|(base, _)| base).unwrap_or(&m.name);
+                seen_split_connectors.insert(connector.to_string())
+            })
+            .map(|m| (m.geometry.x + GRID_MARGIN, m.geometry.y + GRID_MARGIN))
+            .collect()
+    } else {
+        monitors.iter().find(|m| m.primary).map(|m| vec![(m.geometry.x + GRID_MARGIN, m.geometry.y + GRID_MARGIN)]).unwrap_or_default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,5 +779,51 @@ mod tests {
         occupied.insert((0, 1));
         let (c, r) = nearest_free_cell((0, 0), &occupied);
         assert!(c >= 0 && r >= 0);
+    }
+
+    fn split_part(id: srdwm_core::MonitorId, name: &str, x: i32) -> srdwm_core::Monitor {
+        let mut m = srdwm_core::Monitor::new(id, name, srdwm_core::Rect::new(x, 0, 960, 1080));
+        m.split = true;
+        m
+    }
+
+    #[test]
+    fn a_two_way_split_screen_gets_only_one_icon_origin_not_two() {
+        // The live-reported bug: "doesn't look like 2 more monitors, just
+        // showing double desktop icons" - a split screen is still one
+        // physical desktop, so mirroring the icon column onto both halves
+        // read as a visual duplication bug, not a second monitor.
+        let monitors = vec![split_part(0, "eDP-1-1", 0), split_part(1, "eDP-1-2", 960)];
+        let origins = icon_origins_for(&monitors, true);
+        assert_eq!(origins.len(), 1, "a split screen must contribute exactly one icon origin, not one per split part");
+        assert_eq!(origins[0], (GRID_MARGIN, GRID_MARGIN), "the one origin kept must be the first (lowest-id) split part's");
+    }
+
+    #[test]
+    fn a_split_screen_plus_a_genuinely_separate_monitor_gets_two_origins() {
+        let mut real_second = srdwm_core::Monitor::new(2, "HDMI-A-1", srdwm_core::Rect::new(1920, 0, 1920, 1080));
+        real_second.split = false;
+        let monitors = vec![split_part(0, "eDP-1-1", 0), split_part(1, "eDP-1-2", 960), real_second];
+        let origins = icon_origins_for(&monitors, true);
+        assert_eq!(origins.len(), 2, "a genuinely separate monitor must still get its own origin alongside the split screen's one");
+    }
+
+    #[test]
+    fn two_different_split_connectors_each_get_their_own_origin() {
+        // Guards the grouping logic against merging two *different* real
+        // outputs that both happen to be split, not just deduplicating one
+        // connector's own parts.
+        let monitors = vec![split_part(0, "eDP-1-1", 0), split_part(1, "eDP-1-2", 960), split_part(2, "HDMI-A-1-1", 1920), split_part(3, "HDMI-A-1-2", 2880)];
+        let origins = icon_origins_for(&monitors, true);
+        assert_eq!(origins.len(), 2, "each split connector is its own physical screen and must get its own origin");
+    }
+
+    #[test]
+    fn without_all_monitors_only_the_primary_gets_an_origin_even_when_split() {
+        let mut a = split_part(0, "eDP-1-1", 0);
+        a.primary = true;
+        let b = split_part(1, "eDP-1-2", 960);
+        let origins = icon_origins_for(&[a, b], false);
+        assert_eq!(origins, vec![(GRID_MARGIN, GRID_MARGIN)]);
     }
 }

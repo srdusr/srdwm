@@ -363,6 +363,35 @@
     }
 
     #[test]
+    fn closing_a_window_remembers_its_geometry_even_if_it_was_never_dragged_or_resized() {
+        // Real report: "windows don't remember their placement/size" --
+        // true for any window the user never manually touched, since only
+        // `end_drag`/`end_resize` used to write `remembered_geometry` at
+        // all. A window that was simply placed by SmartPlacement, looked
+        // at, and closed had nothing recorded, so reopening it always fell
+        // back to a fresh placement - indistinguishable from the memory
+        // feature not existing at all for that (extremely common) case.
+        let mut wm = wm_with_monitor();
+        wm.set_layout(wm.current_workspace(), "tiling");
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.app_id = "alacritty".into();
+        w.geometry = Rect::new(321, 111, 444, 222);
+        wm.add_window(w);
+        // Never dragged, never resized - closed exactly as SmartPlacement
+        // left it.
+        wm.remove_window(a);
+
+        let b = wm.alloc_window_id();
+        let mut w2 = Window::new(b, "b");
+        w2.app_id = "alacritty".into();
+        w2.geometry = Rect::new(0, 0, 800, 600);
+        wm.add_window(w2);
+        let placed = wm.window(b).unwrap().geometry;
+        assert_eq!((placed.x, placed.y, placed.width, placed.height), (321, 111, 444, 222), "the next alacritty window must open where/how large the first one was when it closed");
+    }
+
+    #[test]
     fn a_remembered_position_on_a_monitor_that_no_longer_exists_falls_back_to_placement() {
         let mut wm = wm_with_monitor();
         wm.set_layout(wm.current_workspace(), "dynamic");

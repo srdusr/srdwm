@@ -856,7 +856,16 @@ impl Platform for UdevPlatform {
                 // erasing the split it was placed to respect.
                 m.full_geometry = srdwm_core::monitor::split_rect(full, part, parts, rows);
                 m.maximize_geometry = srdwm_core::monitor::split_rect(maximize, part, parts, rows);
-                m.primary = primary_name.as_deref() == Some(name.as_str());
+                // Only the first part of a split connector, not every one
+                // of them - `primary_name` names the *connector*, which
+                // doesn't change across `0..parts`, so this used to mark
+                // every split part primary at once. Two (or more) `Monitor`
+                // entries all claiming `primary: true` broke the "exactly
+                // one primary" assumption every caller of this field
+                // reasonably makes (`desktop_icon_origins`'s own single-
+                // monitor branch, concretely, which just took whichever
+                // `.find(|m| m.primary)` happened to match first).
+                m.primary = part == 0 && primary_name.as_deref() == Some(name.as_str());
                 m.split = parts > 1;
                 m.scale = scale;
                 out.push(m);

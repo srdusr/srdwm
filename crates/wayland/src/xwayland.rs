@@ -759,6 +759,10 @@ impl CompState {
             self.close_snap_flyout();
         }
         self.wm.borrow_mut().remove_window(id);
+        // Same reason as `state/lifecycle.rs`'s native `remove_window`:
+        // persist whatever `remove_window` just snapshotted into
+        // `remembered_geometry`, not just a manual drag/resize release.
+        crate::window_memory::save_all(self.wm.borrow().all_remembered_geometry());
         self.pending.borrow_mut().push(CoreEvent::WindowDestroyed(id));
         crate::foreign_toplevel::window_closed(self, id);
         // Same reason as the equivalent call in `state/lifecycle.rs`'s native

@@ -261,7 +261,30 @@ impl WindowManager {
         if self.focused == Some(id) {
             self.focused = self.order.last().copied();
         }
-        self.windows.remove(&id)
+        let window = self.windows.remove(&id);
+        // Remembers wherever this app's window actually ended up, not just
+        // wherever a manual drag/resize left it (`dragresize.rs`'s own
+        // `end_drag`/`end_resize` sites) - without this, an app the user
+        // never dragged or resized had nothing recorded at all, so closing
+        // and reopening it always fell back to a fresh cascade placement
+        // regardless of where it had actually been sitting. Reported live
+        // as "windows don't remember their placement", indistinguishable
+        // from a broken feature even though the underlying store and its
+        // read side (`WindowManager::add_window`'s own `remembered_
+        // geometry` lookup) were already both correct - this was the one
+        // write path that never fired for an app the user just opens,
+        // looks at, and closes. Same `app_id`-non-empty gate as the
+        // drag/resize sites, and the same reasoning for not also gating on
+        // `floating`: a tiled window's geometry is layout-computed and
+        // simply never consulted again on the read side once `layout_name
+        // == "tiling"`, so remembering it anyway is harmless, not wasted
+        // work worth a special case.
+        if let Some(w) = &window {
+            if !w.app_id.is_empty() {
+                self.remembered_geometry.insert(w.app_id.clone(), (w.geometry.x, w.geometry.y, w.geometry.width, w.geometry.height));
+            }
+        }
+        window
     }
 
     pub fn window(&self, id: WindowId) -> Option<&Window> {
