@@ -194,6 +194,16 @@ pub fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
+/// [`parse_hex_color`]'s exact inverse - `#rrggbb`, lowercase, always six
+/// hex digits (`{:02x}` per channel, so a channel below `0x10` doesn't
+/// collapse to a five-character string). Exists for settings readback: a
+/// caller reading `border_color` back over IPC should get the identical
+/// string shape `srd set border_color` itself accepts, not a different
+/// representation of the same colour.
+pub fn format_hex_color(rgb: (u8, u8, u8)) -> String {
+    format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +223,18 @@ mod tests {
     #[test]
     fn rejects_non_hex_digits() {
         assert_eq!(parse_hex_color("#zzzzzz"), None);
+    }
+
+    #[test]
+    fn format_hex_color_round_trips_through_parse_hex_color() {
+        for rgb in [(0x88, 0xc0, 0xd0), (0, 0, 0), (0xff, 0xff, 0xff), (0x05, 0x0a, 0x0f)] {
+            assert_eq!(parse_hex_color(&format_hex_color(rgb)), Some(rgb));
+        }
+    }
+
+    #[test]
+    fn format_hex_color_pads_low_channel_values() {
+        assert_eq!(format_hex_color((0x05, 0x0a, 0x0f)), "#050a0f");
     }
 
     #[test]

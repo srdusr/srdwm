@@ -705,6 +705,20 @@ impl ResizeEdge {
         r
     }
 
+    /// Whether this edge has a left-hand component (`Left`, `TopLeft`,
+    /// `BottomLeft`) - used by tiling's own master/stack ratio-drag
+    /// detection (`WindowManager::tiling_ratio_drag`) to recognize a stack
+    /// column window's left edge as the same shared boundary a master
+    /// column window's own right edge is.
+    pub fn has_left(self) -> bool {
+        matches!(self, ResizeEdge::Left | ResizeEdge::TopLeft | ResizeEdge::BottomLeft)
+    }
+
+    /// [`Self::has_left`]'s mirror, for `Right`/`TopRight`/`BottomRight`.
+    pub fn has_right(self) -> bool {
+        matches!(self, ResizeEdge::Right | ResizeEdge::TopRight | ResizeEdge::BottomRight)
+    }
+
     /// Re-derives one dimension of `delta_applied` (the result of
     /// `apply_delta`, already reflecting this drag's pointer motion) so
     /// the rect holds `ratio` (`width, height`) - `Window::aspect_ratio`'s

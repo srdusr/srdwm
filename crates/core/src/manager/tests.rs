@@ -288,6 +288,108 @@
     }
 
     #[test]
+    fn dragging_the_master_columns_right_edge_grows_master_ratio_live() {
+        // Live report: "tiling needs a lot of work" - dragging a tiled
+        // window's border used to write raw geometry that the very next
+        // `arrange_workspace` call silently discarded. Two windows: window
+        // `a` is the sole master (index 0 < master_count 1), `b` is the
+        // whole stack.
+        let mut wm = wm_with_monitor();
+        wm.set_layout(wm.current_workspace(), "tiling");
+        wm.tiling.gap_outer = 0;
+        wm.tiling.gap_inner = 0;
+        wm.tiling.master_ratio = 0.5;
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let b = wm.alloc_window_id();
+        wm.add_window(Window::new(b, "b"));
+
+        let before = wm.window(a).unwrap().geometry.width;
+        wm.start_resize(a, ResizeEdge::Right, 0, 0);
+        wm.update_resize(200, 0); // dragged 200px to the right
+        let after = wm.window(a).unwrap().geometry.width;
+        assert!(after > before, "the master column must visibly grow while dragging its own right edge");
+        assert!(wm.tiling.master_ratio > 0.5, "master_ratio itself must have grown, not just this one window's rect");
+        // The stack window must have shrunk by the matching amount --
+        // this is a real ratio change, not a floating-style resize that
+        // only touched the grabbed window.
+        assert!(wm.window(b).unwrap().geometry.width < 960);
+    }
+
+    #[test]
+    fn dragging_a_stack_windows_left_edge_adjusts_the_same_shared_boundary() {
+        // The mirror case: grabbing the *stack* column's own left edge is
+        // the same physical boundary as the master column's right edge,
+        // approached from the other side.
+        let mut wm = wm_with_monitor();
+        wm.set_layout(wm.current_workspace(), "tiling");
+        wm.tiling.gap_outer = 0;
+        wm.tiling.gap_inner = 0;
+        wm.tiling.master_ratio = 0.5;
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let b = wm.alloc_window_id();
+        wm.add_window(Window::new(b, "b"));
+
+        wm.start_resize(b, ResizeEdge::Left, 0, 0);
+        wm.update_resize(200, 0); // dragged the shared boundary right
+        assert!(wm.tiling.master_ratio > 0.5, "master must grow when the boundary is dragged right, regardless of which side initiated it");
+    }
+
+    #[test]
+    fn dragging_a_floating_windows_edge_never_touches_master_ratio() {
+        let mut wm = wm_with_monitor();
+        wm.set_layout(wm.current_workspace(), "tiling");
+        wm.tiling.master_ratio = 0.5;
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "a");
+        w.floating = true;
+        w.geometry = Rect::new(100, 100, 300, 200);
+        wm.add_window(w);
+
+        wm.start_resize(a, ResizeEdge::Right, 0, 0);
+        wm.update_resize(200, 0);
+        assert_eq!(wm.tiling.master_ratio, 0.5, "a floating window's own resize must behave exactly as before - no tiling ratio involved");
+        assert_eq!(wm.window(a).unwrap().geometry.width, 500, "the floating window itself must still resize normally");
+    }
+
+    #[test]
+    fn dragging_a_tiled_windows_vertical_edge_does_not_touch_master_ratio() {
+        // Only the shared master/stack *horizontal* boundary is a ratio
+        // drag - a vertical edge has no equivalent concept in this
+        // layout (stack windows split height evenly, with no per-window
+        // override), so it must fall through to the ordinary (if
+        // ultimately overwritten) geometry path rather than doing nothing
+        // useful either way.
+        let mut wm = wm_with_monitor();
+        wm.set_layout(wm.current_workspace(), "tiling");
+        wm.tiling.master_ratio = 0.5;
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let b = wm.alloc_window_id();
+        wm.add_window(Window::new(b, "b"));
+
+        wm.start_resize(a, ResizeEdge::Bottom, 0, 0);
+        wm.update_resize(0, 100);
+        assert_eq!(wm.tiling.master_ratio, 0.5);
+    }
+
+    #[test]
+    fn dragging_the_only_windows_edge_with_no_stack_does_not_touch_master_ratio() {
+        // A lone master window has nothing on the other side of any
+        // boundary - there is no stack to trade width with.
+        let mut wm = wm_with_monitor();
+        wm.set_layout(wm.current_workspace(), "tiling");
+        wm.tiling.master_ratio = 0.5;
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+
+        wm.start_resize(a, ResizeEdge::Right, 0, 0);
+        wm.update_resize(200, 0);
+        assert_eq!(wm.tiling.master_ratio, 0.5);
+    }
+
+    #[test]
     fn ending_a_resize_remembers_the_new_size_for_the_apps_next_window() {
         let mut wm = wm_with_monitor();
         // Tiling layout, so `add_window` skips `SmartPlacement`'s grid/

@@ -32,6 +32,38 @@ impl WindowManager {
     pub fn drain_pin_input_requests(&mut self) -> Vec<(i32, Option<WindowId>)> {
         std::mem::take(&mut self.pin_input_requests)
     }
+
+    /// Records `pid`'s *actual current* pin state, once the Wayland
+    /// backend has genuinely applied it (`CompState::
+    /// set_virtual_pointer_pin`) - not the request queue above, which is
+    /// drained and forgotten the instant the backend picks it up. Without
+    /// this there was no readback path at all: an IPC caller could ask to
+    /// pin a window blind, but never confirm the pin actually took, or ask
+    /// "is pid X pinned to anything right now" later. Flagged directly by
+    /// the AGS peer session as exactly this gap.
+    pub fn set_pinned_window(&mut self, pid: i32, window: Option<WindowId>) {
+        match window {
+            Some(w) => {
+                self.pinned_windows.insert(pid, w);
+            }
+            None => {
+                self.pinned_windows.remove(&pid);
+            }
+        }
+    }
+
+    /// `pid`'s currently pinned window, if any - the read side of
+    /// `set_pinned_window`.
+    pub fn pinned_window(&self, pid: i32) -> Option<WindowId> {
+        self.pinned_windows.get(&pid).copied()
+    }
+
+    /// Every currently pinned pid and its window - what the IPC
+    /// `"pinned_inputs"` query lists in full, rather than requiring a
+    /// caller to already know which pids to ask about individually.
+    pub fn all_pinned_windows(&self) -> impl Iterator<Item = (i32, WindowId)> + '_ {
+        self.pinned_windows.iter().map(|(&pid, &w)| (pid, w))
+    }
 }
 
 #[cfg(test)]

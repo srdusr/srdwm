@@ -28,6 +28,14 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
                 reading_mode: wm.color_filter == srdwm_core::ColorFilter::ReadingMode,
                 phone_mode: wm.phone_mode,
                 multi_cursor: wm.multi_cursor_enabled,
+                border_width: wm.theme.default_border_width,
+                border_color: srdwm_core::format_hex_color(wm.theme.default_border_color),
+                corner_radius: wm.theme.default_corner_radius,
+                decoration_mode_server: wm.theme.default_decorated,
+                gap_inner: wm.tiling.gap_inner,
+                gap_outer: wm.tiling.gap_outer,
+                master_ratio: wm.tiling.master_ratio,
+                master_count: wm.tiling.master_count,
             };
             (serde_json::to_vec(&settings).unwrap_or_default(), false)
         }
@@ -126,6 +134,14 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
             };
             wm.borrow_mut().request_pin_input(pid as i32, id);
             (ok(), true)
+        }
+        // `{"cmd":"pinned_inputs"}` - every pid currently pinned and which
+        // window, read from `WindowManager::all_pinned_windows` (the
+        // backend's own confirmation that a `pin_input` request was
+        // genuinely applied, not the one-shot request queue itself).
+        "pinned_inputs" => {
+            let pinned: Vec<PinnedInputInfo> = wm.borrow().all_pinned_windows().map(|(pid, id)| PinnedInputInfo { pid, id }).collect();
+            (serde_json::to_vec(&PinnedInputsResponse { pinned }).unwrap_or_default(), false)
         }
         // `{"cmd":"create_fake_monitor","name":<string>,"width":<u32>,
         // "height":<u32>}` - a fully virtual `wl_output` with no real
@@ -496,6 +512,35 @@ fn handle_set(req: &serde_json::Value, wm: &std::rc::Rc<std::cell::RefCell<Windo
         "gap_outer" => {
             let Some(v) = value.and_then(|v| v.as_u64()) else { return (err("gap_outer needs a numeric value"), false) };
             wm.borrow_mut().tiling.gap_outer = v as u32;
+            (ok(), true)
+        }
+        // `srd set master_ratio <0.0..1.0>` / `srd set master_count <n>` --
+        // the two `TilingConfig` fields a resize-drag on the master/stack
+        // boundary (`WindowManager::adjust_master_ratio_for_drag`) already
+        // live-adjusts interactively; this is the same thing for a
+        // keybinding or script instead of a mouse drag, e.g. dwm's
+        // `mod+h`/`mod+l` grow/shrink-master or `mod+i`/`mod+d` add/remove-
+        // a-master-window conventions. Unlike `gap_inner`/`gap_outer`
+        // above, which accept "takes effect whenever the workspace next
+        // re-arranges anyway" (a cosmetic preference under no time
+        // pressure), this re-arranges the current workspace immediately --
+        // a keybind pressed to grow the master column is expected to show
+        // the result at once, the same instant feedback the drag path
+        // already gives.
+        "master_ratio" => {
+            let Some(v) = value.and_then(|v| v.as_f64()) else { return (err("master_ratio needs a numeric value"), false) };
+            let mut wm = wm.borrow_mut();
+            wm.tiling.master_ratio = (v as f32).clamp(0.1, 0.9);
+            let current = wm.current_workspace();
+            wm.arrange_workspace(current);
+            (ok(), true)
+        }
+        "master_count" => {
+            let Some(v) = value.and_then(|v| v.as_u64()) else { return (err("master_count needs a numeric value"), false) };
+            let mut wm = wm.borrow_mut();
+            wm.tiling.master_count = (v as usize).max(1);
+            let current = wm.current_workspace();
+            wm.arrange_workspace(current);
             (ok(), true)
         }
         "shadows" => {

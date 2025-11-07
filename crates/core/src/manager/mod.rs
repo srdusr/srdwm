@@ -49,6 +49,23 @@ struct ResizeState {
     start_x: i32,
     start_y: i32,
     orig: Rect,
+    /// `self.tiling.master_ratio` at the moment this resize started --
+    /// unconditionally captured (cheap, one `f32` copy) even for a resize
+    /// that turns out not to touch it, the same way `orig` itself is
+    /// captured regardless of whether the drag ends up floating or tiled.
+    /// See `WindowManager::adjust_master_ratio_for_drag`'s own doc comment
+    /// for why a live tiling resize needs its own *starting* ratio, not
+    /// just the live one mutated in place tick by tick.
+    orig_master_ratio: f32,
+    /// `WindowManager::tiling_ratio_drag`'s result, decided once here,
+    /// *before* `start_resize` calls `focus_window` - `Some(membership)`
+    /// for a tiling master/stack ratio drag, `None` for an ordinary
+    /// (floating, or non-boundary-edge) resize. See that method's own doc
+    /// comment for why this has to be captured now rather than
+    /// re-derived later: focusing the target re-stacks it in `self.order`,
+    /// the exact list membership is read from, and re-deriving after that
+    /// point silently answers for the wrong window.
+    ratio_drag_ids: Option<Vec<WindowId>>,
 }
 
 /// The platform-independent core of srdwm: owns window/workspace/monitor
@@ -80,6 +97,12 @@ pub struct WindowManager {
     /// ever learn) to a specific window. See `input_pin.rs`'s own doc
     /// comment.
     pin_input_requests: Vec<(i32, Option<WindowId>)>,
+    /// `pid`'s *actual current* pin state, as last reported by `Comp
+    /// State::set_virtual_pointer_pin` once it's genuinely applied --
+    /// distinct from `pin_input_requests` above, which is a one-shot queue
+    /// drained and forgotten the moment the backend picks it up. See
+    /// `set_pinned_window`'s own doc comment.
+    pinned_windows: HashMap<i32, WindowId>,
     /// Same cross-boundary-request pattern, for fake (fully virtual, no
     /// real hardware) monitors - see `fake_monitor.rs`'s own doc comment
     /// and `crates/wayland/src/udev/virtual_heads.rs`'s module doc
@@ -465,6 +488,7 @@ impl WindowManager {
             monitors: Vec::new(),
             output_position_requests: Vec::new(),
             pin_input_requests: Vec::new(),
+            pinned_windows: HashMap::new(),
             create_fake_monitor_requests: Vec::new(),
             remove_fake_monitor_requests: Vec::new(),
             output_enable_requests: Vec::new(),

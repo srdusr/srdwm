@@ -735,3 +735,89 @@ fn a_oneshot_clients_request_still_closes_the_connection_as_before() {
         Err(e) => assert_eq!(e.kind(), ErrorKind::WouldBlock),
     }
 }
+
+#[test]
+fn settings_reports_the_readback_fields_flagged_as_missing() {
+    // Confirms the whole batch at once rather than one test per field --
+    // these were all added together for the same reason (a settings
+    // panel could set any of them blind but never read the current value
+    // back).
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+
+    let mut client = UnixStream::connect(&server.path).unwrap();
+    client.write_all(b"{\"cmd\":\"settings\"}\n").unwrap();
+    server.poll(&wm);
+    let line = read_line(&mut std::io::BufReader::new(client));
+    let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+    for field in ["border_width", "border_color", "corner_radius", "decoration_mode_server", "gap_inner", "gap_outer", "master_ratio", "master_count"] {
+        assert!(parsed.get(field).is_some(), "settings response is missing '{field}'");
+    }
+    assert_eq!(parsed["border_color"].as_str().unwrap().chars().next(), Some('#'), "border_color must be a hex string, matching what srd set border_color itself accepts");
+}
+
+#[test]
+fn set_master_ratio_is_reflected_immediately_by_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+    wm.borrow_mut().set_monitors(vec![srdwm_core::Monitor::new(0, "eDP-1", srdwm_core::Rect::new(0, 0, 1920, 1080))]);
+
+    let mut set_client = UnixStream::connect(&server.path).unwrap();
+    set_client.write_all(b"{\"cmd\":\"set\",\"key\":\"master_ratio\",\"value\":0.7}\n").unwrap();
+    server.poll(&wm);
+    let _ = read_line(&mut std::io::BufReader::new(set_client));
+
+    let mut settings_client = UnixStream::connect(&server.path).unwrap();
+    settings_client.write_all(b"{\"cmd\":\"settings\"}\n").unwrap();
+    server.poll(&wm);
+    let line = read_line(&mut std::io::BufReader::new(settings_client));
+    assert!(line.contains(r#""master_ratio":0.7"#));
+}
+
+#[test]
+fn set_master_ratio_clamps_to_a_sane_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+
+    let mut client = UnixStream::connect(&server.path).unwrap();
+    client.write_all(b"{\"cmd\":\"set\",\"key\":\"master_ratio\",\"value\":1.5}\n").unwrap();
+    server.poll(&wm);
+    let _ = read_line(&mut std::io::BufReader::new(client));
+
+    assert_eq!(wm.borrow().tiling.master_ratio, 0.9, "a value past the sane range must clamp, not be accepted verbatim");
+}
+
+#[test]
+fn pinned_inputs_lists_nothing_before_any_pin_is_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+
+    let mut client = UnixStream::connect(&server.path).unwrap();
+    client.write_all(b"{\"cmd\":\"pinned_inputs\"}\n").unwrap();
+    server.poll(&wm);
+    let line = read_line(&mut std::io::BufReader::new(client));
+    assert_eq!(line.trim_end(), r#"{"pinned":[]}"#);
+}
+
+#[test]
+fn pinned_inputs_reports_a_pin_once_the_backend_has_applied_it() {
+    // `pin_input` only ever queues a *request* - `WindowManager::
+    // set_pinned_window` is the backend's own confirmation that it was
+    // genuinely applied, called directly here to simulate that (the real
+    // caller is `CompState::set_virtual_pointer_pin` in the wayland
+    // crate, unreachable from a platform-crate test).
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+    wm.borrow_mut().set_pinned_window(12345, Some(7));
+
+    let mut client = UnixStream::connect(&server.path).unwrap();
+    client.write_all(b"{\"cmd\":\"pinned_inputs\"}\n").unwrap();
+    server.poll(&wm);
+    let line = read_line(&mut std::io::BufReader::new(client));
+    assert_eq!(line.trim_end(), r#"{"pinned":[{"pid":12345,"id":7}]}"#);
+}

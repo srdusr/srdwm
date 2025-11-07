@@ -354,6 +354,11 @@ impl CompState {
     /// later way `set_output_position` already is (`WindowManager::drain_
     /// pin_input_requests`).
     pub(crate) fn set_virtual_pointer_pin(&mut self, pid: i32, window: Option<WindowId>) {
+        // Real, applied state - not just the request that led here - so
+        // an IPC caller can read back "is pid X pinned to a window right
+        // now" instead of only ever writing blind. See `WindowManager::
+        // set_pinned_window`'s own doc comment.
+        self.wm.borrow_mut().set_pinned_window(pid, window);
         self.virtual_pointers.retain(|p| p.is_alive());
         let matching: Vec<ZwlrVirtualPointerV1> = self
             .virtual_pointers

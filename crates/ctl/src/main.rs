@@ -145,6 +145,8 @@ fn build_request(args: &[String]) -> Result<String, String> {
         Some("monitors") => Ok(r#"{"cmd":"monitors"}"#.to_string()),
         Some("workspaces") => Ok(r#"{"cmd":"workspaces"}"#.to_string()),
         Some("settings") => Ok(r#"{"cmd":"settings"}"#.to_string()),
+        Some("pinned") if args.get(1).map(String::as_str) == Some("inputs") => Ok(r#"{"cmd":"pinned_inputs"}"#.to_string()),
+        Some("pinned") => Err("did you mean 'srd pinned inputs'?".to_string()),
         Some("keyboard") if args.get(1).map(String::as_str) == Some("layout") => Ok(r#"{"cmd":"keyboard_layout"}"#.to_string()),
         Some("keyboard") => Err("did you mean 'srd keyboard layout'?".to_string()),
         Some("subscribe") => Ok(r#"{"cmd":"subscribe"}"#.to_string()),
@@ -184,13 +186,14 @@ fn build_request(args: &[String]) -> Result<String, String> {
         // as booleans at all, not a string it then has to reject.
         Some("set") => {
             let key = args.get(1).ok_or(
-                "set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/shadows/rounded_corners/animations/night_light/reading_mode/phone_mode/multi_cursor/decoration_mode)",
+                "set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/master_ratio/master_count/shadows/rounded_corners/animations/night_light/reading_mode/phone_mode/multi_cursor/decoration_mode)",
             )?;
             let raw = args.get(2).ok_or("set needs a value")?;
             let value = match key.as_str() {
-                "border_width" | "corner_radius" | "gap_inner" | "gap_outer" => {
+                "border_width" | "corner_radius" | "gap_inner" | "gap_outer" | "master_count" => {
                     raw.parse::<u64>().map_err(|_| format!("{key} needs a numeric value"))?.to_string()
                 }
+                "master_ratio" => raw.parse::<f64>().map_err(|_| format!("{key} needs a numeric value"))?.to_string(),
                 "shadows" | "rounded_corners" | "animations" | "night_light" | "reading_mode" | "phone_mode" | "multi_cursor" => match raw.as_str() {
                     "true" | "false" => raw.clone(),
                     _ => return Err(format!("{key} needs 'true' or 'false'")),
@@ -394,6 +397,7 @@ fn print_usage() {
     eprintln!("  srd monitors");
     eprintln!("  srd workspaces");
     eprintln!("  srd settings");
+    eprintln!("  srd pinned inputs");
     eprintln!("  srd keyboard layout");
     eprintln!("  srd subscribe");
     eprintln!("  srd dispatch focus <id>");
@@ -653,6 +657,24 @@ mod tests {
     #[test]
     fn settings_query_needs_no_further_arguments() {
         assert_eq!(build_request(&args(&["settings"])).unwrap(), r#"{"cmd":"settings"}"#);
+    }
+
+    #[test]
+    fn pinned_inputs_query_reads_as_two_words() {
+        assert_eq!(build_request(&args(&["pinned", "inputs"])).unwrap(), r#"{"cmd":"pinned_inputs"}"#);
+        assert!(build_request(&args(&["pinned"])).is_err());
+    }
+
+    #[test]
+    fn set_master_ratio_accepts_a_fractional_value() {
+        assert_eq!(build_request(&args(&["set", "master_ratio", "0.65"])).unwrap(), r#"{"cmd":"set","key":"master_ratio","value":0.65}"#);
+        assert!(build_request(&args(&["set", "master_ratio", "not-a-number"])).is_err());
+    }
+
+    #[test]
+    fn set_master_count_accepts_a_plain_integer() {
+        assert_eq!(build_request(&args(&["set", "master_count", "2"])).unwrap(), r#"{"cmd":"set","key":"master_count","value":2}"#);
+        assert!(build_request(&args(&["set", "master_count", "not-a-number"])).is_err());
     }
 }
 

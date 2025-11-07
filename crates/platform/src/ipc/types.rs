@@ -127,6 +127,26 @@ pub(crate) struct WorkspacesResponse {
     pub(crate) workspaces: Vec<WorkspaceInfo>,
 }
 
+/// One `pid`/pinned-window pair - `WindowManager::all_pinned_windows`'s
+/// own doc comment. `id` matches the plain `WindowId` every other
+/// dispatch already reads/writes, not a separate type.
+#[derive(Serialize)]
+pub(crate) struct PinnedInputInfo {
+    pub(crate) pid: i32,
+    pub(crate) id: WindowId,
+}
+
+/// `"pinned_inputs"`'s one-shot reply - every pid Multi-cursor Phase 2
+/// (`srd dispatch pin input`) currently has pinned to a window, and which
+/// one. Added because pinning had no readback at all: a caller could ask
+/// to pin a window blind, but never confirm the pin actually took, or
+/// list what's pinned right now without already knowing which pids to
+/// ask about.
+#[derive(Serialize)]
+pub(crate) struct PinnedInputsResponse {
+    pub(crate) pinned: Vec<PinnedInputInfo>,
+}
+
 /// `"settings"`'s one-shot reply - the live-settable toggles `"set"`
 /// accepts, so a migrated toggle script (night-light, reading-mode,
 /// hypr-performance-profile) can read current state back instead of
@@ -150,6 +170,34 @@ pub(crate) struct SettingsResponse {
     pub(crate) phone_mode: bool,
     /// `WindowManager::multi_cursor_enabled`'s own doc comment.
     pub(crate) multi_cursor: bool,
+    /// The theme/tiling values `srd set` can already change live
+    /// (`border_width`, `border_color`, `corner_radius`, `decoration_
+    /// mode`, `gap_inner`, `gap_outer`, `master_ratio`, `master_count`)
+    /// had no way to read the *current* value back at all - a settings
+    /// panel could set any of these blind, but not honestly show its own
+    /// control's starting position, or confirm a set actually took.
+    /// Flagged directly by the AGS peer session as the common shape behind
+    /// several separate gaps at once: "a control whose value cannot be
+    /// read back is a control that lies on every restart."
+    pub(crate) border_width: u32,
+    /// `#rrggbb`, matching the exact string shape `srd set border_color`
+    /// itself accepts (`srdwm_core::parse_hex_color`'s own format) - a
+    /// caller can feed this straight back into another `set` unchanged.
+    pub(crate) border_color: String,
+    pub(crate) corner_radius: u32,
+    /// `true` when new windows default to a server-drawn titlebar
+    /// (`general.decoration_mode`/`srd set decoration_mode`'s own "server"
+    /// value), `false` for "client" (CSD-only default).
+    pub(crate) decoration_mode_server: bool,
+    pub(crate) gap_inner: u32,
+    pub(crate) gap_outer: u32,
+    /// `TilingConfig::master_ratio`/`master_count` - see `WindowManager::
+    /// adjust_master_ratio_for_drag`'s own doc comment for the live
+    /// interactive path (a resize-drag on the master/stack boundary) that
+    /// also mutates this, in addition to `srd set master_ratio`/
+    /// `master_count`.
+    pub(crate) master_ratio: f32,
+    pub(crate) master_count: usize,
 }
 
 /// `"keyboard_layout"`'s one-shot reply shape - the active XKB layout's

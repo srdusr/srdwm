@@ -114,21 +114,48 @@ impl WindowManager {
 
     pub fn start_resize(&mut self, id: WindowId, edge: ResizeEdge, x: i32, y: i32) {
         if let Some(w) = self.windows.get(&id) {
-            self.resize = Some(ResizeState { window: id, edge, start_x: x, start_y: y, orig: w.geometry });
+            // Decided *before* `focus_window` below re-stacks `id` --
+            // see `tiling_ratio_drag`'s own doc comment for why that
+            // order is load-bearing, not stylistic.
+            let ratio_drag_ids = self.tiling_ratio_drag(id, edge);
+            let orig = w.geometry;
+            self.resize = Some(ResizeState { window: id, edge, start_x: x, start_y: y, orig, orig_master_ratio: self.tiling.master_ratio, ratio_drag_ids });
             self.focus_window(id);
         }
     }
 
     pub fn update_resize(&mut self, x: i32, y: i32) {
-        let Some(r) = &self.resize else { return };
-        let (dx, dy) = (x - r.start_x, y - r.start_y);
-        let mut new_geom = r.edge.apply_delta(r.orig, dx, dy, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+        // Copied/cloned out rather than kept as a live `&self.resize`
+        // borrow - the tiling branch below needs `&mut self`, which
+        // can't coexist with a borrow of the field it's reading.
+        let Some((window, edge, start_x, start_y, orig, orig_master_ratio, ratio_drag_ids)) =
+            self.resize.as_ref().map(|r| (r.window, r.edge, r.start_x, r.start_y, r.orig, r.orig_master_ratio, r.ratio_drag_ids.clone()))
+        else {
+            return;
+        };
+        let (dx, dy) = (x - start_x, y - start_y);
+        // Tiling's master/stack boundary is a live *ratio* the whole
+        // column split is computed from, not one window's own rect - see
+        // `adjust_master_ratio_for_drag`'s own doc comment for why a plain
+        // geometry write here would just be silently discarded by the very
+        // next `arrange_workspace` call anyway (reported live as "tiling
+        // needs a lot of work": dragging a tiled window's border looked
+        // like it resized, then snapped back the moment anything else
+        // triggered a re-arrange). `ratio_drag_ids` was decided once, at
+        // `start_resize` time, against the pre-focus membership - see
+        // `tiling_ratio_drag`'s own doc comment for why that snapshot
+        // (not a live re-derivation) is what has to be used here.
+        if let Some(ids) = ratio_drag_ids {
+            self.adjust_master_ratio_for_drag(window, &ids, dx, orig_master_ratio);
+            return;
+        }
+        let mut new_geom = edge.apply_delta(orig, dx, dy, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
         // `Window::aspect_ratio`'s own doc comment: a locked-ratio window
         // (the "phone monitor" case, concretely) re-derives one dimension
         // from the other here, on top of the ordinary delta above, rather
         // than needing a second, separate resize code path.
-        if let Some(ratio) = self.windows.get(&r.window).and_then(|w| w.aspect_ratio) {
-            new_geom = r.edge.apply_aspect_ratio(new_geom, ratio, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+        if let Some(ratio) = self.windows.get(&window).and_then(|w| w.aspect_ratio) {
+            new_geom = edge.apply_aspect_ratio(new_geom, ratio, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
         }
         // Same live `w.monitor` correction as `update_drag`'s own doc
         // comment explains - a resize can cross a monitor boundary at
@@ -137,10 +164,121 @@ impl WindowManager {
         // lookup doesn't care which kind of geometry change put the
         // window there.
         let now_on = self.monitors.iter().find(|m| m.geometry.overlaps(&new_geom)).map(|m| m.id);
-        if let Some(w) = self.windows.get_mut(&r.window) {
+        if let Some(w) = self.windows.get_mut(&window) {
             w.geometry = new_geom;
             if let Some(now_on_id) = now_on {
                 w.monitor = now_on_id;
+            }
+        }
+    }
+
+    /// Whether resizing `id` along `edge` should live-adjust `self.tiling.
+    /// master_ratio` instead of writing raw window geometry: `id` must be
+    /// a non-floating, non-fullscreen member of a `"tiling"`-layout
+    /// workspace's own master/stack arrangement, there must actually be a
+    /// stack column to trade width with (a lone master-only window has
+    /// nothing on the other side of the drag), and `edge` must be the
+    /// shared boundary line between the two columns - the master
+    /// column's own right edge, or any stack column window's own left
+    /// edge, since both name the same physical boundary approached from
+    /// either side. Anything else (a vertical edge, a floating window, a
+    /// window under `dynamic`) falls through to the ordinary geometry
+    /// resize unchanged.
+    ///
+    /// **Must be called before `focus_window` runs for this same
+    /// interaction** - `start_resize`'s own call site is the only correct
+    /// place, and the returned membership snapshot is what `start_resize`
+    /// caches into `ResizeState` for `adjust_master_ratio_for_drag` to
+    /// apply the layout against later, rather than that method re-deriving
+    /// membership itself from `self.order` at *its* own, later point in
+    /// time. `focus_window` raises its target to the *end* of `self.order`
+    /// (`raise_window`), the exact list this membership is read from - so
+    /// merely grabbing a master window to resize it re-stacks it into what
+    /// looks like the stack's own last slot an instant later, and anything
+    /// that re-derives membership after that point (including a first
+    /// version of this whole feature that called `WindowManager::
+    /// arrange_workspace` from inside the drag, which reads `self.order`
+    /// itself fresh every time) silently applies the resulting ratio
+    /// change to the *wrong* column: the window that's actually being
+    /// dragged shrinks while its neighbour grows, backwards from what the
+    /// mouse is doing. Caught by this method's own test coverage's fuller
+    /// assertion (checking the *other* window's width too, not just the
+    /// grabbed one), not by inspection.
+    fn tiling_ratio_drag(&self, id: WindowId, edge: ResizeEdge) -> Option<Vec<WindowId>> {
+        if !(edge.has_left() || edge.has_right()) {
+            return None;
+        }
+        let w = self.windows.get(&id)?;
+        if w.floating || w.fullscreen {
+            return None;
+        }
+        if self.workspace(w.workspace).map(|ws| ws.layout.as_str()) != Some("tiling") {
+            return None;
+        }
+        // Mirrors `arrange_workspace`'s own grouping exactly - the same
+        // window set, same order, is what decides which windows are
+        // "master" vs "stack" there, so this has to agree with it or the
+        // ratio drag would trigger (or fail to) inconsistently with what
+        // is actually on screen.
+        let ids: Vec<WindowId> = self
+            .order
+            .iter()
+            .copied()
+            .filter(|&oid| self.windows.get(&oid).is_some_and(|ow| ow.workspace == w.workspace && ow.monitor == w.monitor && !ow.minimized && !ow.floating && !ow.fullscreen))
+            .collect();
+        let pos = ids.iter().position(|&oid| oid == id)?;
+        let master_count = self.tiling.master_count.max(1).min(ids.len());
+        if ids.len() <= master_count {
+            return None;
+        }
+        ((pos < master_count && edge.has_right()) || (pos >= master_count && edge.has_left())).then_some(ids)
+    }
+
+    /// Applies a tiling ratio-drag's raw pixel delta `dx` (positive =
+    /// dragged right = master column grows) against `orig_ratio` --
+    /// `ResizeState::orig_master_ratio`, the ratio as it was when this
+    /// resize *started*, not `self.tiling.master_ratio`'s own live value --
+    /// the same "cumulative delta against a fixed starting snapshot"
+    /// shape `update_drag`/`update_resize`'s own geometry math already
+    /// uses for `orig`. Using the live value instead would compound: every
+    /// tick would add the *whole* cumulative `dx` on top of whatever the
+    /// previous tick already added, not just that tick's own incremental
+    /// motion.
+    ///
+    /// Re-arranges every window in `ids` immediately against the new
+    /// ratio, not just the grabbed one - the entire point of this being a
+    /// *ratio* rather than one window's own rect is that every master and
+    /// every stack window visibly resizes together, the same live
+    /// feedback dwm/i3/Hyprland all give while dragging this exact
+    /// boundary.
+    ///
+    /// Applies `MasterStackLayout` directly against `ids` - the frozen
+    /// pre-focus snapshot `tiling_ratio_drag` returned - rather than
+    /// calling `arrange_workspace`, which re-derives its own window list
+    /// from `self.order` fresh every time it runs. By the time this method
+    /// runs, `start_resize`'s own `focus_window` call has already raised
+    /// `id` to the end of `self.order`; re-deriving membership from that
+    /// live order here would silently apply the ratio change to
+    /// whichever window *now* occupies the position `id` used to be in,
+    /// not to `id` and its real neighbours - the exact bug this
+    /// snapshot-based approach exists to avoid (see `tiling_ratio_drag`'s
+    /// own doc comment for the full story, including how a first,
+    /// `arrange_workspace`-based version of this method got caught by
+    /// this file's own tests).
+    fn adjust_master_ratio_for_drag(&mut self, id: WindowId, ids: &[WindowId], dx: i32, orig_ratio: f32) {
+        let Some(w) = self.windows.get(&id) else { return };
+        let Some(monitor) = self.monitor_for(w.monitor).cloned() else { return };
+        let area_width = monitor.geometry.inset(self.tiling.gap_outer).width.max(1);
+        let delta_ratio = dx as f32 / area_width as f32;
+        // Clamped well short of 0.0/1.0 - either extreme would hand one
+        // column all (or none) of the width, which `MasterStackLayout`
+        // itself never guards against (a `0`-width stack column is a
+        // degenerate, not-actually-tiled state, not a valid extreme of
+        // the slider).
+        self.tiling.master_ratio = (orig_ratio + delta_ratio).clamp(0.1, 0.9);
+        for (placed_id, rect) in MasterStackLayout.arrange(ids, &monitor, &self.tiling) {
+            if let Some(w) = self.windows.get_mut(&placed_id) {
+                w.geometry = rect;
             }
         }
     }
