@@ -2,7 +2,7 @@
 
 SRDWM is a modern, cross-platform window manager that provides a unified window management experience across Linux (X11/Wayland), Windows, and macOS. It features smart window placement, togglable decorations, and easy switching between tiling and floating layouts.
 
-## 🌟 Features
+## Features
 
 ### **Cross-Platform Support**
 - **Linux X11**: Full server-side decoration control with frame windows
@@ -28,7 +28,7 @@ SRDWM is a modern, cross-platform window manager that provides a unified window 
 - **Platform-specific keybindings** and settings
 - **Theme and decoration customization**
 
-## 📋 Requirements
+## Requirements
 
 ### **Linux (X11)**
 ```bash
@@ -77,7 +77,7 @@ brew install cmake lua pkg-config
 xcode-select --install
 ```
 
-## 🚀 Installation
+## Installation
 
 ### **Quick Start (Linux/macOS)**
 ```bash
@@ -145,7 +145,7 @@ make -j$(sysctl -n hw.ncpu)
 sudo make install
 ```
 
-## ⚙️ Configuration
+## Configuration
 
 ### **Basic Configuration**
 
@@ -258,7 +258,7 @@ if srd.get_platform() == "macos" then
 end
 ```
 
-## 🎮 Usage
+## Usage
 
 ### **Starting SRDWM**
 
@@ -305,7 +305,7 @@ srdwm
 - **Dynamic**: Smart placement with Windows 11-style algorithms
 - **Floating**: Free-form window placement
 
-## 🧪 Testing
+## Testing
 
 ### **Running Tests**
 
@@ -364,14 +364,14 @@ For full package lists per platform see `DEPENDENCIES.md`.
 
 Wayland is enabled by default with a stub backend for compatibility. Switch to the real wlroots backend with `-DUSE_WAYLAND_STUB=OFF` (or `--real-wayland` in `scripts/bootstrap.sh`) once dependencies are installed.
 
-## 📚 Documentation
+## Documentation
 
 - [API Documentation](docs/api.md)
 - [Configuration Guide](docs/configuration.md)
 - [Platform Implementation](docs/platforms.md)
 - [Contributing Guide](CONTRIBUTING.md)
 
-## 🧭 Installed binary and desktop sessions
+## Installed binary and desktop sessions
 
 - The installed binary is named `srdwm` (a compatibility symlink `SRDWM` is also created in the same directory).
 - Desktop session files are installed so you can pick SRDWM at login:
@@ -390,7 +390,7 @@ cmake --build build -j
 sudo cmake --install build --prefix /usr/local
 ```
 
-## 🔗 Using SRDWM from another CMake project
+## Using SRDWM from another CMake project
 
 After installing SRDWM (e.g., `sudo cmake --install build --prefix /usr/local` on Linux/macOS), you can consume it in another CMake project via `find_package` and link to the exported target.
 
@@ -417,7 +417,7 @@ Notes:
   ```
 - The exported package config internally requires Lua (handled by the SRDWM package config).
 
-## 🤝 Contributing
+## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
@@ -443,24 +443,20 @@ make -j$(nproc)
 ctest
 ```
 
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **Hyprland** for Wayland compositor inspiration
 - **DWM** for X11 window management concepts
 - **i3** for tiling layout ideas
 - **Windows 11** for smart placement algorithms
 
-## 📞 Support
+## Support
 
 - **Issues**: [GitHub Issues](https://github.com/srdusr/srdwm/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/srdusr/srdwm/discussions)
 - **Wiki**: [GitHub Wiki](https://github.com/srdusr/srdwm/wiki)
 
----
+## License
 
-**SRDWM** - Cross-platform window management made simple! 🚀
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
