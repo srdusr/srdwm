@@ -103,18 +103,28 @@ impl Platform for X11Platform {
         // shrunk by, a titlebar that `redraw_decoration` (below) is
         // correctly not drawing at all, leaving a blank strip and the
         // frame visibly not matching what's inside it.
-        let decorated = self.wm.borrow().window(window).map(|w| w.decorated).unwrap_or(true);
+        let (decorated, border_width) = {
+            let wm = self.wm.borrow();
+            let w = wm.window(window);
+            (w.map(|w| w.decorated).unwrap_or(true), w.map(|w| w.border_width).unwrap_or(0))
+        };
         let band = if decorated { TITLEBAR_HEIGHT } else { 0 };
+        // See `frame_geometry_for`'s own doc comment: X11's native border
+        // is drawn outside a window's declared size, so configuring the
+        // frame at `geometry` verbatim with a nonzero border pushed the
+        // frame's true on-screen footprint past every edge of what
+        // `geometry` actually promised - reported live (found by the
+        // aegis peer session testing srdwm's own strut handling) as a
+        // maximized window sitting 4-8px past the right and bottom screen
+        // edges.
+        let (frame_x, frame_y, frame_w, frame_h) = frame_geometry_for(geometry, border_width);
         self.conn
-            .configure_window(
-                frame_id,
-                &ConfigureWindowAux::new().x(geometry.x).y(geometry.y).width(geometry.width).height(geometry.height),
-            )
+            .configure_window(frame_id, &ConfigureWindowAux::new().x(frame_x).y(frame_y).width(frame_w).height(frame_h))
             .map_err(err)?;
         self.conn
             .configure_window(
                 client_id,
-                &ConfigureWindowAux::new().x(0).y(band as i32).width(geometry.width).height(geometry.height.saturating_sub(band)),
+                &ConfigureWindowAux::new().x(0).y(band as i32).width(frame_w).height(frame_h.saturating_sub(band)),
             )
             .map_err(err)?;
         self.conn.flush().map_err(err)?;

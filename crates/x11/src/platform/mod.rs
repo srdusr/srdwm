@@ -149,6 +149,29 @@ fn rgb_to_pixel((r, g, b): (u8, u8, u8)) -> u32 {
     ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
 }
 
+/// The actual arithmetic behind `Platform::apply_geometry`'s frame
+/// placement - pulled out so it's testable without a real X11
+/// connection, the same reasoning `modmask_for_keycode_in_mod_slots`
+/// above already gets.
+///
+/// X11's native `border_width` window attribute is drawn OUTSIDE a
+/// window's own declared width/height, on all four sides, by the X
+/// server itself - unlike every other backend's own border (rendered as
+/// ordinary pixels *inside* the allocated geometry rect, Wayland's
+/// `decoration.rs`, concretely). `geometry` is the true, already-decided
+/// on-screen rect (`Window::maximize_geometry`'s own doc comment); this
+/// shifts the *configured* origin inward and the *configured* size down
+/// by `border_width` on both axes so the window's real, visible footprint
+/// (native border included) still lands exactly on `geometry`, instead of
+/// spilling `border_width` pixels past every edge of it. Returns
+/// `(frame_x, frame_y, frame_width, frame_height)` - the caller applies
+/// `band` (the titlebar reservation) on top of `frame_height` separately,
+/// same as before this existed.
+fn frame_geometry_for(geometry: Rect, border_width: u32) -> (i32, i32, u32, u32) {
+    let bw = border_width as i32;
+    (geometry.x + bw, geometry.y + bw, geometry.width.saturating_sub(2 * border_width), geometry.height.saturating_sub(2 * border_width))
+}
+
 pub struct X11Platform {
     conn: RustConnection,
     root: XWindow,

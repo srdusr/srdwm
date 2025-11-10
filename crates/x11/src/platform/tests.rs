@@ -95,3 +95,35 @@
         let usable = usable_rect(full, (1920, 1080), std::iter::empty());
         assert_eq!(usable, full);
     }
+
+    #[test]
+    fn zero_border_width_leaves_the_frame_geometry_unchanged() {
+        let geom = Rect::new(0, 0, 1920, 1080);
+        assert_eq!(frame_geometry_for(geom, 0), (0, 0, 1920, 1080));
+    }
+
+    #[test]
+    fn a_real_border_width_keeps_the_true_footprint_equal_to_the_requested_geometry() {
+        // Live-reported bug: a maximized window with a native X11 border
+        // sat 2*border_width pixels past the right/bottom edges, since the
+        // border draws outside the configured width/height. The true
+        // on-screen footprint - configured origin minus the border on the
+        // near side, configured size plus the border on both sides - must
+        // reproduce the original geometry exactly.
+        let geom = Rect::new(100, 50, 1920, 1080);
+        let (x, y, w, h) = frame_geometry_for(geom, 4);
+        assert_eq!((x - 4, y - 4, w + 8, h + 8), (geom.x, geom.y, geom.width, geom.height));
+    }
+
+    #[test]
+    fn a_maximized_window_no_longer_overhangs_the_monitor_with_a_real_border() {
+        // The exact live scenario: a window maximized to fill the whole
+        // monitor must not visually extend past it just because it also
+        // has a nonzero border.
+        let monitor = Rect::new(0, 0, 1920, 1080);
+        let (x, y, w, h) = frame_geometry_for(monitor, 4);
+        assert_eq!(x - 4, 0, "left edge (including border) must not sit left of the monitor");
+        assert_eq!(y - 4, 0, "top edge (including border) must not sit above the monitor");
+        assert_eq!(x + w as i32 + 4, 1920, "right edge (including border) must not overhang the monitor");
+        assert_eq!(y + h as i32 + 4, 1080, "bottom edge (including border) must not overhang the monitor");
+    }
