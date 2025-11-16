@@ -186,7 +186,7 @@ fn build_request(args: &[String]) -> Result<String, String> {
         // as booleans at all, not a string it then has to reject.
         Some("set") => {
             let key = args.get(1).ok_or(
-                "set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/master_ratio/master_count/shadows/rounded_corners/animations/night_light/reading_mode/phone_mode/multi_cursor/decoration_mode)",
+                "set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/master_ratio/master_count/shadows/rounded_corners/animations/night_light/reading_mode/phone_mode/multi_cursor/per_monitor/decoration_mode/button_style/button_side/button_order/title_centered/button_glyph_always/desktop_icons/desktop_icons_all_monitors)",
             )?;
             let raw = args.get(2).ok_or("set needs a value")?;
             let value = match key.as_str() {
@@ -194,7 +194,8 @@ fn build_request(args: &[String]) -> Result<String, String> {
                     raw.parse::<u64>().map_err(|_| format!("{key} needs a numeric value"))?.to_string()
                 }
                 "master_ratio" => raw.parse::<f64>().map_err(|_| format!("{key} needs a numeric value"))?.to_string(),
-                "shadows" | "rounded_corners" | "animations" | "night_light" | "reading_mode" | "phone_mode" | "multi_cursor" => match raw.as_str() {
+                "shadows" | "rounded_corners" | "animations" | "night_light" | "reading_mode" | "phone_mode" | "multi_cursor" | "per_monitor" | "title_centered" | "button_glyph_always"
+                | "desktop_icons" | "desktop_icons_all_monitors" => match raw.as_str() {
                     "true" | "false" => raw.clone(),
                     _ => return Err(format!("{key} needs 'true' or 'false'")),
                 },
@@ -202,7 +203,15 @@ fn build_request(args: &[String]) -> Result<String, String> {
                     "server" | "client" => format!("{:?}", raw),
                     _ => return Err(format!("{key} needs 'server' or 'client'")),
                 },
-                "border_color" => format!("{:?}", raw),
+                "button_style" => match raw.as_str() {
+                    "traffic_lights" | "traditional" => format!("{:?}", raw),
+                    _ => return Err(format!("{key} needs 'traffic_lights' or 'traditional'")),
+                },
+                "button_side" => match raw.as_str() {
+                    "left" | "right" => format!("{:?}", raw),
+                    _ => return Err(format!("{key} needs 'left' or 'right'")),
+                },
+                "border_color" | "button_order" => format!("{:?}", raw),
                 _ => return Err(format!("unknown set key '{key}'")),
             };
             Ok(format!(r#"{{"cmd":"set","key":"{key}","value":{value}}}"#))
@@ -432,7 +441,17 @@ fn print_usage() {
     eprintln!("  srd set reading_mode <true|false>");
     eprintln!("  srd set phone_mode <true|false>");
     eprintln!("  srd set multi_cursor <true|false>");
+    eprintln!("  srd set per_monitor <true|false>");
+    eprintln!("  srd set master_ratio <0.1-0.9>");
+    eprintln!("  srd set master_count <n>");
     eprintln!("  srd set decoration_mode <server|client>");
+    eprintln!("  srd set button_style <traffic_lights|traditional>");
+    eprintln!("  srd set button_side <left|right>");
+    eprintln!("  srd set button_order <close,minimize,maximize order>");
+    eprintln!("  srd set title_centered <true|false>");
+    eprintln!("  srd set button_glyph_always <true|false>");
+    eprintln!("  srd set desktop_icons <true|false>");
+    eprintln!("  srd set desktop_icons_all_monitors <true|false>");
 }
 
 #[cfg(test)]
@@ -675,6 +694,37 @@ mod tests {
     fn set_master_count_accepts_a_plain_integer() {
         assert_eq!(build_request(&args(&["set", "master_count", "2"])).unwrap(), r#"{"cmd":"set","key":"master_count","value":2}"#);
         assert!(build_request(&args(&["set", "master_count", "not-a-number"])).is_err());
+    }
+
+    #[test]
+    fn set_per_monitor_accepts_only_true_or_false() {
+        assert_eq!(build_request(&args(&["set", "per_monitor", "true"])).unwrap(), r#"{"cmd":"set","key":"per_monitor","value":true}"#);
+        assert_eq!(build_request(&args(&["set", "per_monitor", "false"])).unwrap(), r#"{"cmd":"set","key":"per_monitor","value":false}"#);
+        assert!(build_request(&args(&["set", "per_monitor", "maybe"])).is_err());
+    }
+
+    #[test]
+    fn set_button_style_accepts_only_the_two_known_values() {
+        assert_eq!(build_request(&args(&["set", "button_style", "traditional"])).unwrap(), r#"{"cmd":"set","key":"button_style","value":"traditional"}"#);
+        assert_eq!(build_request(&args(&["set", "button_style", "traffic_lights"])).unwrap(), r#"{"cmd":"set","key":"button_style","value":"traffic_lights"}"#);
+        assert!(build_request(&args(&["set", "button_style", "square"])).is_err());
+    }
+
+    #[test]
+    fn set_button_side_accepts_only_left_or_right() {
+        assert_eq!(build_request(&args(&["set", "button_side", "right"])).unwrap(), r#"{"cmd":"set","key":"button_side","value":"right"}"#);
+        assert!(build_request(&args(&["set", "button_side", "top"])).is_err());
+    }
+
+    #[test]
+    fn set_button_order_passes_the_string_through() {
+        assert_eq!(build_request(&args(&["set", "button_order", "close,minimize,maximize"])).unwrap(), r#"{"cmd":"set","key":"button_order","value":"close,minimize,maximize"}"#);
+    }
+
+    #[test]
+    fn set_desktop_icons_accepts_only_true_or_false() {
+        assert_eq!(build_request(&args(&["set", "desktop_icons", "false"])).unwrap(), r#"{"cmd":"set","key":"desktop_icons","value":false}"#);
+        assert!(build_request(&args(&["set", "desktop_icons", "maybe"])).is_err());
     }
 }
 

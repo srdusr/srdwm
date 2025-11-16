@@ -838,6 +838,23 @@ pub fn parse_button_order(s: &str) -> Option<ButtonOrder> {
     Some(order)
 }
 
+/// [`parse_button_order`]'s exact inverse - `"close,minimize,maximize"`,
+/// lowercase, comma-separated in the order the buttons actually render.
+/// Exists for settings readback, same reasoning as `format_hex_color`:
+/// a caller reading `button_order` back over IPC should get the identical
+/// string shape `srd set button_order` itself accepts.
+pub fn format_button_order(order: ButtonOrder) -> String {
+    order
+        .iter()
+        .map(|b| match b {
+            TitlebarButton::Close => "close",
+            TitlebarButton::Minimize => "minimize",
+            TitlebarButton::Maximize => "maximize",
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 #[cfg(test)]
 mod button_order_tests {
     use super::*;
@@ -866,6 +883,21 @@ mod button_order_tests {
     #[test]
     fn rejects_a_duplicated_button() {
         assert_eq!(parse_button_order("close,close,maximize"), None);
+    }
+
+    #[test]
+    fn format_button_order_round_trips_through_parse_button_order() {
+        for order in [
+            [TitlebarButton::Close, TitlebarButton::Minimize, TitlebarButton::Maximize],
+            [TitlebarButton::Maximize, TitlebarButton::Minimize, TitlebarButton::Close],
+        ] {
+            assert_eq!(parse_button_order(&format_button_order(order)), Some(order));
+        }
+    }
+
+    #[test]
+    fn format_button_order_matches_the_exact_shape_set_accepts() {
+        assert_eq!(format_button_order([TitlebarButton::Close, TitlebarButton::Minimize, TitlebarButton::Maximize]), "close,minimize,maximize");
     }
 
     #[test]

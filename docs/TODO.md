@@ -1,5 +1,19 @@
 # TODO / planned features - master checklist
 
+## workspace.per_monitor, titlebar buttons, and desktop icons: live srd set + readback (2026-08-28)
+
+Closed the rest of the "config-file only" gaps named directly in the AGS capability survey.
+
+`workspace.per_monitor` (shared vs Hyprland/niri-style independent per-monitor workspace sets) now has a live `srd set per_monitor <bool>` path. Safe to flip live with no reconciliation step: `monitor_workspaces` (the per-monitor override map) starts empty and any monitor with no entry in it already falls back to `current_workspace` regardless of mode, so turning the mode on changes nothing visually until a monitor's workspace is independently switched for the first time, and turning it back off just resumes every monitor showing the one shared value they'd already fall back to individually.
+
+Titlebar button style/side/order (`theme.decorations.title_bar.button_style`/`button_side`/`button_order`) and desktop icons (`general.desktop_icons`/`desktop_icons_all_monitors`) all get the same treatment: `srd set button_style <traffic_lights|traditional>`, `button_side <left|right>`, `button_order "close,minimize,maximize"`, `title_centered`/`button_glyph_always <bool>`, `desktop_icons`/`desktop_icons_all_monitors <bool>`. The two desktop-icon ones are immediately visible either way (`ensure_desktop_icons`/`desktop_icon_origins` both read their fields fresh on every dirty tick); the theme/titlebar ones only affect windows created (or redecorated) after the call, same documented scope `decoration_mode` already has - retroactively repainting every already-open window's titlebar needs a redraw-buffer invalidation this backend-agnostic crate has no way to trigger itself.
+
+New `srdwm_core::format_button_order` is `parse_button_order`'s exact inverse, so `button_order`'s readback is the identical comma-separated string shape `srd set` itself accepts, not a different representation of the same three-button ordering.
+
+`SettingsResponse` gained all eight new fields (`per_monitor`, `button_style`, `button_side`, `button_order` - `null` until explicitly set, since there's no live path back to the built-in per-side default - `title_centered`, `button_glyph_always`, `desktop_icons`, `desktop_icons_all_monitors`), closing the survey's readback gap for every item it named as config-only.
+
+Full workspace build/test/clippy clean (233 core / 43 platform / 40 ctl tests, all up from before).
+
 ## Monitor scale: investigated a live path, parked rather than built (2026-08-28)
 
 `srd.monitor.split` got a live IPC path this session; `srd.monitor.scale` was the obvious next candidate, also flagged PARTIAL in the earlier AGS-capability survey. Investigated what a live path would actually require: `WindowManager::monitor_scale` is read by exactly two functions, `disable_connector_by_name`/`enable_connector_by_name` (`udev/outputs.rs`) - the only two places that ever bring a head up or down at all. There is no third, lighter-weight "just reconfigure the mode in place" path; applying a changed scale live means calling both, back to back, which is a real disable-then-re-enable cycle on the actual physical connector - the same real screen blank a genuine unplug/replug already causes, not a silent in-place change.

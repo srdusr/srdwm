@@ -751,7 +751,24 @@ fn settings_reports_the_readback_fields_flagged_as_missing() {
     server.poll(&wm);
     let line = read_line(&mut std::io::BufReader::new(client));
     let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
-    for field in ["border_width", "border_color", "corner_radius", "decoration_mode_server", "gap_inner", "gap_outer", "master_ratio", "master_count"] {
+    for field in [
+        "border_width",
+        "border_color",
+        "corner_radius",
+        "decoration_mode_server",
+        "gap_inner",
+        "gap_outer",
+        "master_ratio",
+        "master_count",
+        "per_monitor",
+        "button_style",
+        "button_side",
+        "button_order",
+        "title_centered",
+        "button_glyph_always",
+        "desktop_icons",
+        "desktop_icons_all_monitors",
+    ] {
         assert!(parsed.get(field).is_some(), "settings response is missing '{field}'");
     }
     assert_eq!(parsed["border_color"].as_str().unwrap().chars().next(), Some('#'), "border_color must be a hex string, matching what srd set border_color itself accepts");
@@ -788,6 +805,84 @@ fn set_master_ratio_clamps_to_a_sane_range() {
     let _ = read_line(&mut std::io::BufReader::new(client));
 
     assert_eq!(wm.borrow().tiling.master_ratio, 0.9, "a value past the sane range must clamp, not be accepted verbatim");
+}
+
+#[test]
+fn set_per_monitor_is_reflected_immediately_by_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+
+    let mut set_client = UnixStream::connect(&server.path).unwrap();
+    set_client.write_all(b"{\"cmd\":\"set\",\"key\":\"per_monitor\",\"value\":true}\n").unwrap();
+    server.poll(&wm);
+    let _ = read_line(&mut std::io::BufReader::new(set_client));
+
+    let mut settings_client = UnixStream::connect(&server.path).unwrap();
+    settings_client.write_all(b"{\"cmd\":\"settings\"}\n").unwrap();
+    server.poll(&wm);
+    let line = read_line(&mut std::io::BufReader::new(settings_client));
+    assert!(line.contains(r#""per_monitor":true"#));
+}
+
+#[test]
+fn button_and_desktop_icon_settings_are_readable_and_live_settable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+
+    for (key, value) in [
+        ("button_style", "\"traditional\""),
+        ("button_side", "\"left\""),
+        ("button_order", "\"maximize,minimize,close\""),
+        ("title_centered", "true"),
+        ("button_glyph_always", "true"),
+        ("desktop_icons", "false"),
+        ("desktop_icons_all_monitors", "false"),
+    ] {
+        let mut client = UnixStream::connect(&server.path).unwrap();
+        client.write_all(format!("{{\"cmd\":\"set\",\"key\":\"{key}\",\"value\":{value}}}\n").as_bytes()).unwrap();
+        server.poll(&wm);
+        let _ = read_line(&mut std::io::BufReader::new(client));
+    }
+
+    let mut settings_client = UnixStream::connect(&server.path).unwrap();
+    settings_client.write_all(b"{\"cmd\":\"settings\"}\n").unwrap();
+    server.poll(&wm);
+    let line = read_line(&mut std::io::BufReader::new(settings_client));
+    assert!(line.contains(r#""button_style":"traditional""#));
+    assert!(line.contains(r#""button_side":"left""#));
+    assert!(line.contains(r#""button_order":"maximize,minimize,close""#));
+    assert!(line.contains(r#""title_centered":true"#));
+    assert!(line.contains(r#""button_glyph_always":true"#));
+    assert!(line.contains(r#""desktop_icons":false"#));
+    assert!(line.contains(r#""desktop_icons_all_monitors":false"#));
+}
+
+#[test]
+fn button_order_is_null_until_explicitly_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+
+    let mut client = UnixStream::connect(&server.path).unwrap();
+    client.write_all(b"{\"cmd\":\"settings\"}\n").unwrap();
+    server.poll(&wm);
+    let line = read_line(&mut std::io::BufReader::new(client));
+    assert!(line.contains(r#""button_order":null"#));
+}
+
+#[test]
+fn set_button_order_rejects_an_invalid_ordering() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
+    let wm = Rc::new(RefCell::new(WindowManager::new()));
+
+    let mut client = UnixStream::connect(&server.path).unwrap();
+    client.write_all(b"{\"cmd\":\"set\",\"key\":\"button_order\",\"value\":\"close,close,maximize\"}\n").unwrap();
+    server.poll(&wm);
+    let line = read_line(&mut std::io::BufReader::new(client));
+    assert!(line.contains(r#""error""#));
 }
 
 #[test]

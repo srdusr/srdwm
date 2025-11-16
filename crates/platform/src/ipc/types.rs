@@ -198,6 +198,24 @@ pub(crate) struct SettingsResponse {
     /// `master_count`.
     pub(crate) master_ratio: f32,
     pub(crate) master_count: usize,
+    /// `WindowManager::per_monitor_workspaces`'s own doc comment - `srd
+    /// set per_monitor <bool>`'s readback.
+    pub(crate) per_monitor: bool,
+    /// `ThemeConfig::traffic_light_buttons`'s readback, as the same
+    /// `"traffic_lights"`/`"traditional"` string `srd set button_style`
+    /// itself accepts.
+    pub(crate) button_style: String,
+    /// `ThemeConfig::buttons_left`'s readback, as `"left"`/`"right"`.
+    pub(crate) button_side: String,
+    /// `ThemeConfig::button_order`'s readback - `null` when unset (the
+    /// built-in default for whichever side `button_side` selects), the
+    /// same `"close,minimize,maximize"` string shape `srd set button_
+    /// order` accepts otherwise.
+    pub(crate) button_order: Option<String>,
+    pub(crate) title_centered: bool,
+    pub(crate) button_glyph_always: bool,
+    pub(crate) desktop_icons: bool,
+    pub(crate) desktop_icons_all_monitors: bool,
 }
 
 /// `"keyboard_layout"`'s one-shot reply shape - the active XKB layout's

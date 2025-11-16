@@ -36,6 +36,14 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
                 gap_outer: wm.tiling.gap_outer,
                 master_ratio: wm.tiling.master_ratio,
                 master_count: wm.tiling.master_count,
+                per_monitor: wm.per_monitor_workspaces,
+                button_style: if wm.theme.traffic_light_buttons { "traffic_lights" } else { "traditional" }.to_string(),
+                button_side: if wm.theme.buttons_left { "left" } else { "right" }.to_string(),
+                button_order: wm.theme.button_order.map(srdwm_core::format_button_order),
+                title_centered: wm.theme.title_centered,
+                button_glyph_always: wm.theme.button_glyph_always,
+                desktop_icons: wm.desktop_icons_enabled,
+                desktop_icons_all_monitors: wm.desktop_icons_all_monitors,
             };
             (serde_json::to_vec(&settings).unwrap_or_default(), false)
         }
@@ -498,6 +506,86 @@ fn handle_set(req: &serde_json::Value, wm: &std::rc::Rc<std::cell::RefCell<Windo
             wm.borrow_mut().theme.default_decorated = mode != "client";
             (ok(), true)
         }
+        // `srd set button_style <traffic_lights|traditional>` - live
+        // equivalent of `theme.decorations.title_bar.button_style`
+        // (`ThemeConfig::traffic_light_buttons`), previously config-file/
+        // restart-only. Same "only affects windows created (or
+        // redecorated) after this call" scope as `decoration_mode` above
+        // - retroactively repainting every already-open window's titlebar
+        // is real, separate work (a redraw-buffer invalidation this
+        // backend-agnostic crate has no way to trigger itself).
+        "button_style" => {
+            let Some(v) = value.and_then(|v| v.as_str()) else { return (err("button_style needs \"traffic_lights\" or \"traditional\""), false) };
+            if v != "traffic_lights" && v != "traditional" {
+                return (err("button_style needs \"traffic_lights\" or \"traditional\""), false);
+            }
+            wm.borrow_mut().theme.traffic_light_buttons = v == "traffic_lights";
+            (ok(), true)
+        }
+        // `srd set button_side <left|right>` - live equivalent of `theme.
+        // decorations.title_bar.button_side`. Same scope note as
+        // `button_style` above.
+        "button_side" => {
+            let Some(v) = value.and_then(|v| v.as_str()) else { return (err("button_side needs \"left\" or \"right\""), false) };
+            if v != "left" && v != "right" {
+                return (err("button_side needs \"left\" or \"right\""), false);
+            }
+            wm.borrow_mut().theme.buttons_left = v == "left";
+            (ok(), true)
+        }
+        // `srd set button_order "close,minimize,maximize"` - live
+        // equivalent of `theme.decorations.title_bar.button_order`.
+        // `None` (the built-in default order for whichever side `button_
+        // side` selects) is not reachable through this live path - only
+        // a config reload clears an explicit override back to that,
+        // matching the same asymmetry `rounded_corners`'s own live toggle
+        // already has (an explicit live `Some`/`Some` only, never back to
+        // an unset default).
+        "button_order" => {
+            let Some(raw) = value.and_then(|v| v.as_str()) else { return (err("button_order needs a string value"), false) };
+            let Some(order) = srdwm_core::parse_button_order(raw) else {
+                return (err("button_order must name close, minimize and maximize exactly once each, comma-separated"), false);
+            };
+            wm.borrow_mut().theme.button_order = Some(order);
+            (ok(), true)
+        }
+        // `srd set title_centered <bool>` - live equivalent of `theme.
+        // decorations.title_bar.title_centered`.
+        "title_centered" => {
+            let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("title_centered needs a boolean value"), false) };
+            wm.borrow_mut().theme.title_centered = v;
+            (ok(), true)
+        }
+        // `srd set button_glyph_always <bool>` - live equivalent of
+        // `theme.decorations.title_bar.button_glyph_always` (GNOME/Adwaita's
+        // "always visible" convention vs classic macOS's "hidden until
+        // hover").
+        "button_glyph_always" => {
+            let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("button_glyph_always needs a boolean value"), false) };
+            wm.borrow_mut().theme.button_glyph_always = v;
+            (ok(), true)
+        }
+        // `srd set desktop_icons <bool>` - live equivalent of `general.
+        // desktop_icons`. Unlike the theme keys above, this one *is*
+        // immediately visible either way: `ensure_desktop_icons`'s own
+        // early `if !self.wm.borrow().desktop_icons_enabled { return }`
+        // check runs on every dirty tick, so turning icons off actually
+        // stops drawing them (and back on redraws them) on this compositor's
+        // very next redraw, not just for icons created after the call.
+        "desktop_icons" => {
+            let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("desktop_icons needs a boolean value"), false) };
+            wm.borrow_mut().desktop_icons_enabled = v;
+            (ok(), true)
+        }
+        // `srd set desktop_icons_all_monitors <bool>` - live equivalent
+        // of `general.desktop_icons_all_monitors`. Same immediacy as
+        // `desktop_icons` above - `desktop_icon_origins` (this session's
+        // own split-screen fix) reads this fresh every call.
+        "desktop_icons_all_monitors" => {
+            let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("desktop_icons_all_monitors needs a boolean value"), false) };
+            wm.borrow_mut().desktop_icons_all_monitors = v;
+            (ok(), true)
+        }
         // Tiling-only: `arrange_workspace` skips floating/fullscreen
         // windows regardless, and under `"dynamic"` (the no-op default
         // layout) nothing reads `tiling.gap_*` at all - so setting these
@@ -586,6 +674,23 @@ fn handle_set(req: &serde_json::Value, wm: &std::rc::Rc<std::cell::RefCell<Windo
         "phone_mode" => {
             let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("phone_mode needs a boolean value"), false) };
             wm.borrow_mut().phone_mode = v;
+            (ok(), true)
+        }
+        // `srd set per_monitor <bool>` - live equivalent of `workspace.
+        // per_monitor`, previously restart-only (flagged in the same
+        // capability survey monitor split/scale were). Safe to flip live
+        // with no reconciliation step needed: `monitor_workspaces` (the
+        // per-monitor override map) starts empty and a monitor with no
+        // entry in it always falls back to `current_workspace` regardless
+        // of mode (`WindowManager::workspace_for_monitor`'s own doc
+        // comment) - so turning this *on* changes nothing visually until
+        // a monitor's workspace is switched independently for the first
+        // time, and turning it back *off* simply resumes every monitor
+        // showing `current_workspace`, the same shared value they'd
+        // already fall back to individually.
+        "per_monitor" => {
+            let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("per_monitor needs a boolean value"), false) };
+            wm.borrow_mut().per_monitor_workspaces = v;
             (ok(), true)
         }
         // `srd set multi_cursor <bool>` - live equivalent of `general.

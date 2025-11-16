@@ -24,7 +24,7 @@ pub use regex::Regex;
 pub use rules::{WindowMatch, WindowRule, WindowRuleActions};
 pub use theme::{format_hex_color, parse_hex_color, ThemeConfig};
 pub use window::{
-    classify_menu_source, parse_button_order, ButtonOrder, GlobalMenu, MenuSource, ResizeEdge, TitlebarButton, TitlebarHit, Window, WindowId,
+    classify_menu_source, format_button_order, parse_button_order, ButtonOrder, GlobalMenu, MenuSource, ResizeEdge, TitlebarButton, TitlebarHit, Window, WindowId,
     BUTTON_CLUSTER_MARGIN, BUTTON_PITCH, RESIZE_MARGIN, TITLEBAR_HEIGHT,
 };
 pub use workspace::{Workspace, WorkspaceId};
