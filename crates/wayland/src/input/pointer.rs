@@ -485,9 +485,16 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
     const BTN_MIDDLE: u32 = 0x112;
     let serial = SERIAL_COUNTER.next_serial();
 
-    // Locked: forward the click to the lock surface (it may have a button or
-    // a text field) but never let it focus, raise, drag, or close a window.
+    // Locked: srdwm's own native lock UI has no real `wl_surface` to
+    // dispatch a pointer event to - its on-screen keyboard is hit-tested
+    // directly instead, on a left-button press, before falling through to
+    // the generic forward-to-lock-surface path below (which still applies
+    // for an external `LockSurface`-based locker, or a native lock with
+    // the keyboard hidden/absent).
     if state.lock.locked {
+        if pressed && button == BTN_LEFT && state.lock.native.is_some() && state.native_lock_click(pos) {
+            return;
+        }
         if let Some(pointer) = state.seat.get_pointer() {
             let button_state = if pressed { BackendButtonState::Pressed } else { BackendButtonState::Released };
             pointer.button(state, &ButtonEvent { serial, time, button, state: button_state });

@@ -486,6 +486,42 @@ either order, though `"traffic_lights"` paired with `button_side =
 (Windows/GNOME) are the two ready-made combinations `config/srd/
 themes.lua` ships (`macos` and `traditional` presets respectively).
 
+### Lock Screen (`theme.lock.*`)
+
+srdwm's own built-in session-lock UI (`srd dispatch lock`), not a config
+table - each key is a flat `srd.set` value, read once when the lock
+engages:
+
+```lua
+srd.set("theme.lock.box_bg", "#2e3440")             -- Default: Nord dark
+srd.set("theme.lock.box_border", "#88c0d0")         -- Default: Nord blue
+srd.set("theme.lock.text_color", "#eceff4")         -- Default: Nord light
+srd.set("theme.lock.error_color", "#bf616a")        -- Default: Nord red
+srd.set("theme.lock.corner_radius", 10)             -- Default: 10
+srd.set("theme.lock.blur_radius", 20)               -- Default: 20 (0 disables blur)
+srd.set("theme.lock.dot_char", "\u{25cf}")          -- Default: "\u{25cf}" (a filled circle)
+srd.set("theme.lock.show_caps_lock", true)          -- Default: true
+srd.set("theme.lock.show_failed_attempts", true)    -- Default: true
+srd.set("theme.lock.fail_message", "Wrong password") - Default: "Wrong password"
+srd.set("theme.lock.show_clock", true)              -- Default: true
+srd.set("theme.lock.show_keyboard", true)           -- Default: true
+srd.set("theme.lock.avatar_bg", "#88c0d0")          -- Default: Nord blue, matches box_border
+```
+
+`show_clock` adds a large time/date readout above the password box, plus a
+circular avatar (the username's first letter) and the username itself --
+the set of things a mainstream lock screen (GNOME, macOS, Windows) shows.
+Setting it to `false` reduces the lock screen to just the password box.
+
+`show_keyboard` adds an on-screen keyboard below the password box, for a
+session with no physical keyboard reachable (a touchscreen device). A real
+physical keyboard still works identically either way; this only adds a
+second input method, it never replaces the first. Tapping `Shift` toggles
+between the lowercase and uppercase/symbol rows.
+
+`avatar_bg` sets the avatar circle's fill colour. It defaults to the same
+value as `box_border` rather than a third independent colour to track.
+
 ### Getting a full macOS look
 
 `apply(macos)` in `config/srd/themes.lua` covers everything srdwm itself

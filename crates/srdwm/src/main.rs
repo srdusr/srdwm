@@ -298,6 +298,11 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     if let Some(ch) = engine.get_string("theme.lock.dot_char", &lock.dot_char.to_string()).chars().next() {
         lock.dot_char = ch;
     }
+    lock.show_clock = engine.get_bool("theme.lock.show_clock", lock.show_clock);
+    lock.show_keyboard = engine.get_bool("theme.lock.show_keyboard", lock.show_keyboard);
+    if let Some(rgb) = srdwm_core::parse_hex_color(&engine.get_string("theme.lock.avatar_bg", "#88c0d0")) {
+        lock.avatar_bg = rgb;
+    }
 
     let mut wm = wm.borrow_mut();
     wm.tiling.gap_inner = gap;

@@ -44,7 +44,7 @@ pub(crate) use color::{mix_rgb, rgb_to_bgra};
 pub(crate) use corners::{round_bottom_corners, round_top_corners};
 pub(crate) use font::{blit_glyph, find_system_font, FONT_PIXELS, TEXT_LEFT_PADDING};
 pub use shadow::{shadow_bitmap, shadow_rect};
-pub(crate) use shadow::SHADOW_MAX_ALPHA;
+pub(crate) use shadow::{SHADOW_MAX_ALPHA, SHADOW_SIZE};
 pub use titlebar::render_titlebar;
 
 /// Default corner radius, in pixels, applied to a window at creation
@@ -389,7 +389,7 @@ pub(crate) fn render_desktop_icon(
 /// canvas), so there's no premultiplication to get right here - straight
 /// and premultiplied colour are identical at full opacity.
 #[allow(clippy::too_many_arguments)]
-fn fill_rect(buf: &mut [u8], width: usize, height: usize, x0: i32, y0: i32, x1: i32, y1: i32, color: (u8, u8, u8), alpha: u8) {
+pub(crate) fn fill_rect(buf: &mut [u8], width: usize, height: usize, x0: i32, y0: i32, x1: i32, y1: i32, color: (u8, u8, u8), alpha: u8) {
     let px = rgb_to_bgra(color, alpha);
     for y in y0.max(0)..y1.min(height as i32) {
         for x in x0.max(0)..x1.min(width as i32) {
@@ -410,7 +410,7 @@ fn fill_rect(buf: &mut [u8], width: usize, height: usize, x0: i32, y0: i32, x1: 
 /// partial-alpha pixel is a real, previously-hit correctness bug here, not
 /// a style choice.
 #[allow(clippy::too_many_arguments)]
-fn blit_glyph_on_transparent(buf: &mut [u8], width: usize, height: usize, glyph_x: i32, glyph_y: i32, metrics: &fontdue::Metrics, coverage: &[u8], color: (u8, u8, u8)) {
+pub(crate) fn blit_glyph_on_transparent(buf: &mut [u8], width: usize, height: usize, glyph_x: i32, glyph_y: i32, metrics: &fontdue::Metrics, coverage: &[u8], color: (u8, u8, u8)) {
     for row in 0..metrics.height {
         let y = glyph_y + row as i32;
         if y < 0 || y as usize >= height {

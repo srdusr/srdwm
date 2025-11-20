@@ -2514,6 +2514,7 @@ name = "srdwm-wayland"
 version = "0.1.0"
 dependencies = [
  "fontdue",
+ "libc",
  "log",
  "memmap2",
  "pixman",

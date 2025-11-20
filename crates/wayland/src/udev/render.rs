@@ -243,6 +243,10 @@ impl CompState {
             let native_bg = self.native_lock_background(&output.name()).cloned();
             let native_ui = self.native_lock_ui().map(|(buf, size)| (buf.clone(), size));
             let native_needs_capture = self.native_lock_needs_capture(&output.name());
+            let native_header = self.native_lock_header().map(|(buf, size)| (buf.clone(), size));
+            let native_shadow = self.native_lock_shadow().cloned();
+            let native_keyboard = self.native_lock_keyboard().map(|(buf, size)| (buf.clone(), size));
+            let native_shake_offset = self.native_lock_shake_offset();
 
             // Content/decoration elements are built per head: both need the
             // renderer, and geometry is translated into head-local space.
@@ -1102,7 +1106,15 @@ impl CompState {
             };
             let native_elements = if locked && is_native {
                 let size = udev.heads[index].size;
-                crate::native_lock::native_lock_render_elements(native_bg.as_ref(), native_ui.as_ref().map(|(b, s)| (b, *s)), size, &mut udev.renderer)
+                let frame = crate::native_lock::NativeLockFrame {
+                    background: native_bg.as_ref(),
+                    header: native_header.as_ref().map(|(b, s)| (b, *s)),
+                    shadow: native_shadow.as_ref(),
+                    ui: native_ui.as_ref().map(|(b, s)| (b, *s)),
+                    keyboard: native_keyboard.as_ref().map(|(b, s)| (b, *s)),
+                    shake_offset: native_shake_offset,
+                };
+                crate::native_lock::native_lock_render_elements(frame, size, &mut udev.renderer)
             } else {
                 Vec::new()
             };

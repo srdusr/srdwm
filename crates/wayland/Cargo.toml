@@ -55,6 +55,12 @@ xkbcommon = { version = "0.8", features = ["wayland"] }
 resvg = "0.48.1"
 usvg = "0.48.1"
 tiny-skia = "0.12.0"
+# `native_lock.rs`'s own clock/date: `libc::localtime_r` gives the
+# system's real local time (respecting `/etc/localtime`/`TZ`), which
+# `std::time` alone has no way to do (`SystemTime` is UTC-only). Already
+# a transitive dependency of this crate (smithay itself depends on it),
+# just not previously used directly.
+libc = "0.2"
 
 [dependencies.smithay]
 version = "0.7"

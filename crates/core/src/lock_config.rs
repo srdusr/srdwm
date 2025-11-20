@@ -34,6 +34,25 @@ pub struct LockConfig {
     pub show_caps_lock: bool,
     pub show_failed_attempts: bool,
     pub fail_message: String,
+    /// A large time+date readout above the password box, plus a circular
+    /// initial-letter avatar and the username - the set of things every
+    /// mainstream lock screen (GNOME, macOS, Windows) shows and this one
+    /// didn't, reported live as the box on its own "looks ugly/AI-like".
+    /// `true` by default; `false` reduces the lock screen to just the
+    /// password box, the previous look, for anyone who'd rather not have
+    /// the time visible on a locked screen.
+    pub show_clock: bool,
+    /// An on-screen keyboard below the password box, for a session with no
+    /// physical keyboard reachable (a touchscreen device, primarily) --
+    /// see `native_lock.rs`'s own `render_keyboard`/`keyboard_hit_test`.
+    /// `true` by default; a real physical keyboard still works identically
+    /// either way, so this only ever adds a second input method, never
+    /// removes the first.
+    pub show_keyboard: bool,
+    /// The avatar circle's fill colour - defaults to `box_border` (the
+    /// same accent every other lock-screen element already uses) rather
+    /// than a third independent colour to keep track of.
+    pub avatar_bg: (u8, u8, u8),
 }
 
 impl Default for LockConfig {
@@ -49,6 +68,9 @@ impl Default for LockConfig {
             show_caps_lock: true,
             show_failed_attempts: true,
             fail_message: "Wrong password".to_string(),
+            show_clock: true,
+            show_keyboard: true,
+            avatar_bg: (0x88, 0xc0, 0xd0), // Nord blue, matches box_border
         }
     }
 }

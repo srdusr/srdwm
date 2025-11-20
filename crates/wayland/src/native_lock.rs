@@ -37,6 +37,38 @@ use smithay::backend::renderer::{ImportAll, ImportMem, Renderer};
 use smithay::utils::Transform;
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, TryRecvError};
+use std::time::{Duration, Instant};
+
+/// Vertical gap between the header (clock/date/avatar), the password box,
+/// and the on-screen keyboard - one shared constant so `lock_stack_
+/// layout` (used at both render and click-hit-test time) and the eye
+/// can't disagree with each other.
+const SECTION_GAP: i32 = 20;
+
+/// How long a wrong-password shake plays for, and how far it moves the
+/// box/shadow at its peak - see `shake_offset`'s own doc comment for the
+/// motion itself. Short and small: this is feedback, not an animation to
+/// watch, matching how briefly a real macOS/GNOME lock screen shakes its
+/// own password field.
+const SHAKE_DURATION: Duration = Duration::from_millis(400);
+const SHAKE_AMPLITUDE: f32 = 10.0;
+
+/// One key on the on-screen keyboard - see `render_keyboard`'s own doc
+/// comment for the layout this is built from.
+pub(crate) struct VirtualKey {
+    /// Position and size within the keyboard's own buffer, logical
+    /// pixels - what `keyboard_hit_test` compares a click against once
+    /// it's translated the click into this same local space.
+    rect: (i32, i32, i32, i32),
+    /// Fed straight to `native_lock_key` as its own `name` parameter --
+    /// `"BackSpace"`/`"Return"`/`"Shift"` for the three keys that aren't
+    /// plain character entry, empty for every other key (which instead
+    /// carries its character in `utf8_lower`/`utf8_upper`, exactly the
+    /// way a real keysym's resolved UTF-8 already does).
+    name: &'static str,
+    utf8_lower: &'static str,
+    utf8_upper: &'static str,
+}
 
 /// `srd.lock`'s live state - see this module's own doc comment for the
 /// lifecycle. Constructed by `begin`, lives on `SessionLock::native` for
@@ -55,6 +87,32 @@ pub(crate) struct NativeLock {
     /// already use, not rebuilt every frame.
     ui_buffer: Option<MemoryRenderBuffer>,
     ui_size: (i32, i32),
+    /// The box's drop shadow - built and cached alongside `ui_buffer`
+    /// (same invalidation: both go stale together, since the shadow's
+    /// size is derived from the box's own), positioned `SHADOW_SIZE`
+    /// pixels up/left of wherever the box itself renders.
+    shadow_buffer: Option<MemoryRenderBuffer>,
+    /// The clock/date/avatar/username header shown above the password
+    /// box - see `render_header_box`'s own doc comment. Cached
+    /// separately from `ui_buffer`/rebuilt every render call rather than
+    /// only on a state change, since the clock's own text changes once a
+    /// minute with nothing else here to signal that - cheap enough
+    /// (a handful of glyphs, once per output per frame) that a real
+    /// dirty-check isn't worth the bookkeeping.
+    header_buffer: Option<MemoryRenderBuffer>,
+    header_size: (i32, i32),
+    /// The on-screen keyboard, if `LockConfig::show_keyboard` is on --
+    /// `None` when the feature is off, same as every other optional
+    /// section here. Rebuilt when `shift` toggles (the labels' case
+    /// changes) or the theme changes, same invalidation trigger as
+    /// `ui_buffer`.
+    keyboard_buffer: Option<MemoryRenderBuffer>,
+    keyboard_size: (i32, i32),
+    /// Each key's own clickable rect (in the keyboard buffer's local
+    /// space) and what it types - `keyboard_hit_test`'s own lookup
+    /// table, rebuilt alongside `keyboard_buffer` (the two must always
+    /// agree on where each key actually is).
+    keyboard_keys: Vec<VirtualKey>,
     username: String,
     password: String,
     failed_attempts: u32,
@@ -65,6 +123,17 @@ pub(crate) struct NativeLock {
     /// it (`ModifiersState::caps_lock`, read in `crate::input`'s locked-
     /// keyboard branch), so there is no separate query needed.
     caps_lock: bool,
+    /// The on-screen keyboard's own shift state - independent of
+    /// `caps_lock` above (a real keyboard's own hardware state) since a
+    /// touchscreen session with no physical keyboard at all still needs
+    /// a way to type an uppercase letter. Toggled by clicking the
+    /// keyboard's own Shift key (`native_lock_key`'s `"Shift"` arm).
+    shift: bool,
+    /// When the most recent wrong-password shake started, if one is
+    /// still playing - see `shake_offset`'s own doc comment. `None`
+    /// once `SHAKE_DURATION` has elapsed, so steady-state rendering
+    /// doesn't keep computing an animation that's already finished.
+    shake_start: Option<Instant>,
     auth_rx: Option<Receiver<bool>>,
 }
 
@@ -75,6 +144,36 @@ pub(crate) struct NativeLock {
 /// secure by construction, not a special case to handle.
 fn current_username() -> String {
     std::env::var("USER").unwrap_or_default()
+}
+
+impl NativeLock {
+    /// Builds a fresh, empty lock state - pulled out to one place now
+    /// that the struct has grown past the two or three fields it started
+    /// with, so `begin_native_lock`'s two call sites (headless vs. the
+    /// normal case) can't drift out of agreement on what "fresh" means.
+    fn new(pending_capture: std::collections::HashSet<String>) -> Self {
+        Self {
+            pending_capture,
+            backgrounds: HashMap::new(),
+            ui_buffer: None,
+            ui_size: (0, 0),
+            shadow_buffer: None,
+            header_buffer: None,
+            header_size: (0, 0),
+            keyboard_buffer: None,
+            keyboard_size: (0, 0),
+            keyboard_keys: Vec::new(),
+            username: current_username(),
+            password: String::new(),
+            failed_attempts: 0,
+            show_error: false,
+            checking: false,
+            caps_lock: false,
+            shift: false,
+            shake_start: None,
+            auth_rx: None,
+        }
+    }
 }
 
 impl CompState {
@@ -99,36 +198,12 @@ impl CompState {
             // No real output to capture from (headless/test invocation) --
             // lock immediately with an empty backdrop rather than waiting
             // forever for a capture that can never arrive.
-            self.lock.native = Some(NativeLock {
-                pending_capture,
-                backgrounds: HashMap::new(),
-                ui_buffer: None,
-                ui_size: (0, 0),
-                username: current_username(),
-                password: String::new(),
-                failed_attempts: 0,
-                show_error: false,
-                checking: false,
-                caps_lock: false,
-                auth_rx: None,
-            });
+            self.lock.native = Some(NativeLock::new(pending_capture));
             self.lock.locked = true;
             self.set_keyboard_focus(None);
             return;
         }
-        self.lock.native = Some(NativeLock {
-            pending_capture,
-            backgrounds: HashMap::new(),
-            ui_buffer: None,
-            ui_size: (0, 0),
-            username: current_username(),
-            password: String::new(),
-            failed_attempts: 0,
-            show_error: false,
-            checking: false,
-            caps_lock: false,
-            auth_rx: None,
-        });
+        self.lock.native = Some(NativeLock::new(pending_capture));
     }
 
     /// A backend just captured and blurred `output_name`'s current
@@ -167,10 +242,12 @@ impl CompState {
         self.lock.native.as_ref().is_some_and(|n| n.pending_capture.contains(output_name))
     }
 
-    /// The password-entry box, rebuilding it first if the visible state
-    /// changed since the last render. `None` while a native lock isn't
-    /// actually engaged yet (still waiting on captures) - nothing should
-    /// render the UI box before `state.lock.locked` is true regardless.
+    /// The password-entry box, rebuilding it first (along with its drop
+    /// shadow - see `shadow_buffer`'s own doc comment) if the visible
+    /// state changed since the last render. `None` while a native lock
+    /// isn't actually engaged yet (still waiting on captures) - nothing
+    /// should render the UI box before `state.lock.locked` is true
+    /// regardless.
     pub(crate) fn native_lock_ui(&mut self) -> Option<(&MemoryRenderBuffer, (i32, i32))> {
         if !self.lock.locked {
             return None;
@@ -181,8 +258,78 @@ impl CompState {
             let (data, size) = render_ui_box(native, &theme);
             native.ui_buffer = Some(MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, size, 1, Transform::Normal, None));
             native.ui_size = size;
+            let shadow_data = crate::decoration::shadow_bitmap(size.0.max(0) as u32, size.1.max(0) as u32, theme.corner_radius, crate::decoration::SHADOW_MAX_ALPHA);
+            let shadow_size = crate::decoration::shadow_rect(srdwm_core::Rect::new(0, 0, size.0.max(0) as u32, size.1.max(0) as u32));
+            native.shadow_buffer = Some(MemoryRenderBuffer::from_slice(&shadow_data, Fourcc::Argb8888, (shadow_size.width as i32, shadow_size.height as i32), 1, Transform::Normal, None));
         }
         native.ui_buffer.as_ref().map(|b| (b, native.ui_size))
+    }
+
+    /// The box's own drop shadow, sized `SHADOW_SIZE` larger than
+    /// `native_lock_ui`'s own buffer on every side - always built
+    /// alongside it (see that method's own body), so this is `Some` iff
+    /// the UI box itself is.
+    pub(crate) fn native_lock_shadow(&self) -> Option<&MemoryRenderBuffer> {
+        self.lock.native.as_ref()?.shadow_buffer.as_ref()
+    }
+
+    /// The clock/date/avatar/username header shown above the password
+    /// box - `None` when `LockConfig::show_clock` is off, same "cached,
+    /// rebuild on demand" shape as `native_lock_ui`. Unlike that method,
+    /// this rebuilds unconditionally rather than only on a state change:
+    /// see `header_buffer`'s own doc comment for why (the clock's own
+    /// text is real wall-clock time, which changes with nothing else here
+    /// to signal it).
+    pub(crate) fn native_lock_header(&mut self) -> Option<(&MemoryRenderBuffer, (i32, i32))> {
+        if !self.lock.locked {
+            return None;
+        }
+        let theme = self.wm.borrow().lock.clone();
+        if !theme.show_clock {
+            return None;
+        }
+        let native = self.lock.native.as_mut()?;
+        let (data, size) = render_header_box(native, &theme);
+        native.header_buffer = Some(MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, size, 1, Transform::Normal, None));
+        native.header_size = size;
+        native.header_buffer.as_ref().map(|b| (b, native.header_size))
+    }
+
+    /// The on-screen keyboard, if `LockConfig::show_keyboard` is on --
+    /// same "cached, rebuild when the visible state changes" shape as
+    /// `native_lock_ui` (the labels' case changes when `shift` toggles).
+    pub(crate) fn native_lock_keyboard(&mut self) -> Option<(&MemoryRenderBuffer, (i32, i32))> {
+        if !self.lock.locked {
+            return None;
+        }
+        let theme = self.wm.borrow().lock.clone();
+        if !theme.show_keyboard {
+            return None;
+        }
+        let native = self.lock.native.as_mut()?;
+        if native.keyboard_buffer.is_none() {
+            let (data, size, keys) = render_keyboard(native, &theme);
+            native.keyboard_buffer = Some(MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, size, 1, Transform::Normal, None));
+            native.keyboard_size = size;
+            native.keyboard_keys = keys;
+        }
+        native.keyboard_buffer.as_ref().map(|b| (b, native.keyboard_size))
+    }
+
+    /// How far, right now, the password box (and its shadow) should be
+    /// shifted horizontally for a wrong-password shake - see
+    /// `shake_offset`'s own doc comment for the actual motion. `0.0` when
+    /// no shake is playing, including the common case (nothing has ever
+    /// failed this lock session) and once `SHAKE_DURATION` has elapsed.
+    pub(crate) fn native_lock_shake_offset(&mut self) -> f32 {
+        let Some(native) = self.lock.native.as_mut() else { return 0.0 };
+        let Some(start) = native.shake_start else { return 0.0 };
+        let elapsed = start.elapsed();
+        if elapsed >= SHAKE_DURATION {
+            native.shake_start = None;
+            return 0.0;
+        }
+        shake_offset(elapsed)
     }
 
     /// Routes one key press to the native lock's own input handling --
@@ -196,6 +343,18 @@ impl CompState {
         if native.checking {
             // An auth attempt is already in flight - ignore further
             // input rather than queuing a second overlapping PAM call.
+            return;
+        }
+        // The on-screen keyboard's own Shift key - a sentinel `name`
+        // `keyboard_hit_test` sends, never a value a real keysym resolves
+        // to (`"Shift_L"`/`"Shift_R"` are the real xkb names for the
+        // physical key, a different string). Toggles the keyboard's own
+        // case for the *next* letter typed through it; doesn't touch the
+        // password itself, so it invalidates `keyboard_buffer` (the
+        // labels' case changes) rather than `ui_buffer`.
+        if name == "Shift" {
+            native.shift = !native.shift;
+            native.keyboard_buffer = None;
             return;
         }
         native.show_error = false;
@@ -234,6 +393,55 @@ impl CompState {
         native.ui_buffer = None;
     }
 
+    /// Routes one pointer click to the on-screen keyboard, if the native
+    /// lock has one and the click landed on one of its keys - called
+    /// from `crate::input::handle_pointer_button`'s own locked branch
+    /// whenever `state.lock.native.is_some()`. `pos` is the same global-
+    /// space point every other pointer handler already works in;
+    /// `crate::state::CompState::output_at` resolves which output (and so
+    /// which origin to subtract) the click actually landed on, the same
+    /// way hit-testing anywhere else in this compositor already does.
+    /// Returns whether a key was actually hit, purely so the caller can
+    /// decide whether to also forward the click to a lock surface (it
+    /// never should here, but keeps the two call sites symmetric).
+    pub(crate) fn native_lock_click(&mut self, pos: smithay::utils::Point<f64, smithay::utils::Logical>) -> bool {
+        let Some(entry) = self.output_at(pos) else { return false };
+        let (origin, output_size) = (entry.location, entry.size());
+        let output_size = (output_size.w, output_size.h);
+        let theme = self.wm.borrow().lock.clone();
+        let Some(native) = self.lock.native.as_ref() else { return false };
+        if !theme.show_keyboard || native.keyboard_keys.is_empty() {
+            return false;
+        }
+        let (_, _, keyboard_pos) = lock_stack_layout(output_size, theme.show_clock.then_some(native.header_size), native.ui_size, Some(native.keyboard_size));
+        let Some(keyboard_pos) = keyboard_pos else { return false };
+        let local_x = (pos.x - origin.x as f64 - keyboard_pos.0 as f64).round() as i32;
+        let local_y = (pos.y - origin.y as f64 - keyboard_pos.1 as f64).round() as i32;
+        let Some(key) = native.keyboard_keys.iter().find(|k| {
+            let (kx, ky, kw, kh) = k.rect;
+            local_x >= kx && local_x < kx + kw && local_y >= ky && local_y < ky + kh
+        }) else {
+            return false;
+        };
+        let shift_was_on = native.shift;
+        let (name, utf8) = (key.name, if shift_was_on { key.utf8_upper } else { key.utf8_lower });
+        let caps_lock = self.lock.native.as_ref().map(|n| n.caps_lock).unwrap_or(false);
+        self.native_lock_key(name, utf8, caps_lock);
+        // One-shot shift, like a real mobile on-screen keyboard: typing an
+        // actual character while shift was on releases it again, so the
+        // *next* letter isn't uppercase too unless clicked again. Only for
+        // a genuine character key - Shift/BackSpace/Return themselves
+        // (and Shift toggling itself, handled entirely inside `native_
+        // lock_key` already) must not also trigger this.
+        if shift_was_on && name.is_empty() && !utf8.is_empty() {
+            if let Some(native) = self.lock.native.as_mut() {
+                native.shift = false;
+                native.keyboard_buffer = None;
+            }
+        }
+        true
+    }
+
     /// Checks whether a PAM authentication spawned by `native_lock_key`
     /// finished - called once per poll from both backends, same cadence
     /// `drain_lock_request` is drained at. On success, unlocks through
@@ -260,6 +468,7 @@ impl CompState {
                 native.failed_attempts += 1;
                 native.show_error = true;
                 native.ui_buffer = None;
+                native.shake_start = Some(Instant::now());
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
@@ -275,43 +484,90 @@ impl CompState {
                 native.failed_attempts += 1;
                 native.show_error = true;
                 native.ui_buffer = None;
+                native.shake_start = Some(Instant::now());
             }
         }
     }
 }
 
+/// Everything `native_lock_render_elements` needs, extracted from
+/// `CompState` before the caller's own renderer-holding borrow starts --
+/// see that function's own doc comment for why this can't just take
+/// `&mut CompState` directly. One struct instead of five parameters
+/// purely for readability at the (two) call sites; nothing here does any
+/// work of its own.
+pub(crate) struct NativeLockFrame<'a> {
+    pub(crate) background: Option<&'a MemoryRenderBuffer>,
+    pub(crate) header: Option<(&'a MemoryRenderBuffer, (i32, i32))>,
+    pub(crate) shadow: Option<&'a MemoryRenderBuffer>,
+    pub(crate) ui: Option<(&'a MemoryRenderBuffer, (i32, i32))>,
+    pub(crate) keyboard: Option<(&'a MemoryRenderBuffer, (i32, i32))>,
+    /// `CompState::native_lock_shake_offset`'s own doc comment - applied
+    /// to the box and its shadow only, never the header or keyboard.
+    pub(crate) shake_offset: f32,
+}
+
 /// Render elements for a native-locked output: the blurred background (if
-/// this output's capture is ready) with the password box centered over
-/// it. Mirrors `lock::lock_render_elements`'s shape/signature so both
+/// this output's capture is ready), the header (clock/date/avatar), the
+/// password box's drop shadow, the box itself, and the on-screen keyboard
+/// - header/box/keyboard stacked and centered together via `lock_stack_
+/// layout`, the same layout `CompState::native_lock_click` hit-tests
+/// against. Mirrors `lock::lock_render_elements`'s shape/signature so both
 /// backends can call whichever mode applies with the same pattern.
-/// Takes the background/UI buffers by reference rather than `&mut
-/// CompState`, same reasoning `lock::lock_render_elements`'s own doc
-/// comment gives for taking a bare surface instead: both backends' render
-/// loops call this while already holding a field-specific `&mut` borrow
-/// (`self.udev`/the winit backend's own renderer), not a whole-`self`
-/// one, so a caller has to extract these two *before* that borrow starts
-/// (`CompState::native_lock_background`/`native_lock_ui`, cloned - both
-/// are cheap `MemoryRenderBuffer` clones, not a deep pixel copy) and pass
-/// the clones in.
-pub(crate) fn native_lock_render_elements<R>(
-    background: Option<&MemoryRenderBuffer>,
-    ui: Option<(&MemoryRenderBuffer, (i32, i32))>,
-    output_size: (i32, i32),
-    renderer: &mut R,
-) -> Vec<MemoryRenderBufferRenderElement<R>>
+/// Takes every buffer by reference rather than `&mut CompState`, same
+/// reasoning `lock::lock_render_elements`'s own doc comment gives for
+/// taking a bare surface instead: both backends' render loops call this
+/// while already holding a field-specific `&mut` borrow (`self.udev`/the
+/// winit backend's own renderer), not a whole-`self` one, so a caller has
+/// to extract every field of `NativeLockFrame` *before* that borrow
+/// starts (cheap `MemoryRenderBuffer` clones, not a deep pixel copy) and
+/// pass the clones in.
+pub(crate) fn native_lock_render_elements<R>(frame: NativeLockFrame<'_>, output_size: (i32, i32), renderer: &mut R) -> Vec<MemoryRenderBufferRenderElement<R>>
 where
     R: Renderer + ImportAll + ImportMem,
     R::TextureId: Clone + Send + 'static,
 {
     let mut elements = Vec::new();
-    if let Some((ui, ui_size)) = ui {
-        let pos = (((output_size.0 - ui_size.0) / 2) as f64, ((output_size.1 - ui_size.1) / 2) as f64);
+    let ui_size = frame.ui.map(|(_, s)| s).unwrap_or((0, 0));
+    let (header_pos, ui_pos, keyboard_pos) = lock_stack_layout(output_size, frame.header.map(|(_, s)| s), ui_size, frame.keyboard.map(|(_, s)| s));
+    // Header first (topmost) - purely decorative, so draw order against
+    // the box/keyboard below it doesn't matter for correctness, only for
+    // matching every other element list's own "first pushed, first
+    // drawn" convention in this codebase.
+    if let (Some((header, _)), Some(pos)) = (frame.header, header_pos) {
+        match MemoryRenderBufferRenderElement::from_buffer(renderer, (pos.0 as f64, pos.1 as f64), header, None, None, None, Kind::Unspecified) {
+            Ok(elem) => elements.push(elem),
+            Err(e) => log::warn!("native lock: failed to import header buffer: {e}"),
+        }
+    }
+    if let Some((keyboard, _)) = frame.keyboard {
+        if let Some(pos) = keyboard_pos {
+            match MemoryRenderBufferRenderElement::from_buffer(renderer, (pos.0 as f64, pos.1 as f64), keyboard, None, None, None, Kind::Unspecified) {
+                Ok(elem) => elements.push(elem),
+                Err(e) => log::warn!("native lock: failed to import keyboard buffer: {e}"),
+            }
+        }
+    }
+    // The box itself, then its shadow right behind it - both shifted
+    // horizontally by the same wrong-password shake offset, so the
+    // shadow reads as genuinely cast by the box moving rather than a
+    // separate, independently-drifting element.
+    if let Some((ui, _)) = frame.ui {
+        let pos = (ui_pos.0 as f64 + frame.shake_offset as f64, ui_pos.1 as f64);
         match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, ui, None, None, None, Kind::Unspecified) {
             Ok(elem) => elements.push(elem),
             Err(e) => log::warn!("native lock: failed to import UI buffer: {e}"),
         }
     }
-    if let Some(bg) = background {
+    if let Some(shadow) = frame.shadow {
+        let shadow_size = crate::decoration::SHADOW_SIZE as f64;
+        let pos = (ui_pos.0 as f64 - shadow_size + frame.shake_offset as f64, ui_pos.1 as f64 - shadow_size);
+        match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, shadow, None, None, None, Kind::Unspecified) {
+            Ok(elem) => elements.push(elem),
+            Err(e) => log::warn!("native lock: failed to import shadow buffer: {e}"),
+        }
+    }
+    if let Some(bg) = frame.background {
         match MemoryRenderBufferRenderElement::from_buffer(renderer, (0.0, 0.0), bg, None, None, None, Kind::Unspecified) {
             Ok(elem) => elements.push(elem),
             Err(e) => log::warn!("native lock: failed to import background buffer: {e}"),
@@ -349,18 +605,185 @@ where
     Ok(MemoryRenderBuffer::from_slice(&pixels, Fourcc::Xrgb8888, size, 1, Transform::Normal, None))
 }
 
-/// Draws the centered password box: rounded background, a title line, a
-/// row of dots (one per character typed, never the character itself),
-/// and - depending on `LockConfig`/current state - a caps-lock note and
-/// a failed-attempt message. Same rasterization primitives `decoration.rs`
-/// already uses for the titlebar/context-menu/flyout (`find_system_font`/
-/// `blit_glyph`/`rgb_to_bgra`), promoted to `pub(crate)` there rather than
-/// duplicated here.
+/// Where the header, the password box, and the on-screen keyboard each
+/// land: stacked top-to-bottom with `SECTION_GAP` between whichever
+/// sections are actually present, each individually centered on `output_
+/// size.0`. Shared, byte-for-byte, by the render path (`native_lock_
+/// render_elements`) and the click-hit-test path (`CompState::native_
+/// lock_click`) so a key's on-screen position and its own clickable rect
+/// can never silently disagree - the same "one function, two callers"
+/// shape `udev/outputs.rs::next_logical_x` already established for
+/// exactly this kind of layout-math-shared-with-a-consumer problem.
+///
+/// `header_size`/`keyboard_size` are `None` when that section is turned
+/// off (`LockConfig::show_clock`/`show_keyboard`) or (for the keyboard
+/// specifically, from the click path) simply hasn't rendered yet this
+/// lock session - `ui_size` alone is never optional, since the password
+/// box is the one section that always exists.
+///
+/// Returns each section's own top-left corner in `output_size`'s own
+/// coordinate space - `None` for a section that was passed in as `None`.
+#[allow(clippy::type_complexity)]
+fn lock_stack_layout(output_size: (i32, i32), header_size: Option<(i32, i32)>, ui_size: (i32, i32), keyboard_size: Option<(i32, i32)>) -> (Option<(i32, i32)>, (i32, i32), Option<(i32, i32)>) {
+    let header_h = header_size.map(|(_, h)| h + SECTION_GAP).unwrap_or(0);
+    let keyboard_h = keyboard_size.map(|(_, h)| h + SECTION_GAP).unwrap_or(0);
+    let total_h = header_h + ui_size.1 + keyboard_h;
+    let top = (output_size.1 - total_h) / 2;
+    let center_x = |w: i32| (output_size.0 - w) / 2;
+    let header_pos = header_size.map(|(w, _)| (center_x(w), top));
+    let ui_top = top + header_h;
+    let ui_pos = (center_x(ui_size.0), ui_top);
+    let keyboard_pos = keyboard_size.map(|(w, _)| (center_x(w), ui_top + ui_size.1 + SECTION_GAP));
+    (header_pos, ui_pos, keyboard_pos)
+}
+
+/// A short, decaying horizontal shake - the wrong-password feedback
+/// every mainstream lock screen (macOS, GNOME, Windows) gives alongside
+/// (not instead of) a text message. A few full oscillations across
+/// `SHAKE_DURATION`, amplitude decaying linearly from `SHAKE_AMPLITUDE`
+/// to `0` - cheap, real motion with no animation state machine needed
+/// beyond the one timestamp `shake_start` already is: this is a pure
+/// function of "how long ago did the shake start", recomputed fresh every
+/// frame, the same "derive from elapsed time, don't store a running
+/// offset" approach `state::WindowAnim` already uses for open/close/move
+/// tweens.
+fn shake_offset(elapsed: Duration) -> f32 {
+    let t = (elapsed.as_secs_f32() / SHAKE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+    let decay = 1.0 - t;
+    const CYCLES: f32 = 3.0;
+    (t * CYCLES * std::f32::consts::TAU).sin() * SHAKE_AMPLITUDE * decay
+}
+
+const WEEKDAY_NAMES: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const MONTH_NAMES: [&str; 12] =
+    ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/// The current wall-clock time and date in the system's real local
+/// timezone - `(hour, minute, weekday, day-of-month, month, year)`,
+/// `weekday` `0..7` (Sunday-based, matching `tm_wday`) for indexing
+/// `WEEKDAY_NAMES` directly. `libc::localtime_r`, not `std::time` alone:
+/// `SystemTime` has no timezone concept at all (UTC only), and a lock
+/// screen showing UTC on a non-UTC machine would just be showing the
+/// wrong time, not a stylistic simplification - this is the one place
+/// in this codebase real wall-clock time reaches the screen at all.
+fn local_time_now() -> (i32, i32, i32, i32, i32, i32) {
+    let now = unsafe { libc::time(std::ptr::null_mut()) };
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // Safety: `now` is a valid `time_t` just obtained from `libc::time`
+    // above (never null, never uninitialized), and `tm` is a plain
+    // repr(C) struct `localtime_r` fully overwrites before this function
+    // ever reads a single field of it - the zeroed value above is never
+    // itself observed.
+    unsafe { libc::localtime_r(&now, &mut tm) };
+    (tm.tm_hour, tm.tm_min, tm.tm_wday, tm.tm_mday, tm.tm_mon + 1, tm.tm_year + 1900)
+}
+
+/// Fills a circle of `radius` centered at `(cx, cy)` with `color` as real
+/// premultiplied-alpha BGRA, antialiased over its own outermost pixel --
+/// the lock screen's own avatar, the one place this codebase draws an
+/// actual disc rather than a rounded rectangle (`round_top_corners`/
+/// `round_bottom_corners` cut a rect's *corners* to an arc; neither fills
+/// a standalone circle, so this is a small, self-contained addition
+/// rather than a reuse of either).
+fn fill_circle_on_transparent(buf: &mut [u8], width: usize, height: usize, cx: i32, cy: i32, radius: i32, color: (u8, u8, u8)) {
+    for y in (cy - radius - 1).max(0)..(cy + radius + 1).min(height as i32) {
+        for x in (cx - radius - 1).max(0)..(cx + radius + 1).min(width as i32) {
+            let (dx, dy) = ((x - cx) as f32, (y - cy) as f32);
+            let dist = (dx * dx + dy * dy).sqrt();
+            let coverage = (radius as f32 - dist).clamp(0.0, 1.0);
+            if coverage <= 0.0 {
+                continue;
+            }
+            let alpha = (255.0 * coverage).round() as u32;
+            let premult = |c: u8| (c as u32 * alpha / 255) as u8;
+            let idx = (y as usize * width + x as usize) * 4;
+            buf[idx..idx + 4].copy_from_slice(&[premult(color.2), premult(color.1), premult(color.0), alpha as u8]);
+        }
+    }
+}
+
+/// The header shown above the password box: a large clock, the date, a
+/// circular initial-letter avatar, and the username - drawn onto an
+/// otherwise fully transparent canvas (`blit_glyph_on_transparent`/
+/// `fill_circle_on_transparent`) so the blurred desktop shows through
+/// everywhere except the glyphs/avatar themselves, the same way a real
+/// macOS/GNOME/Windows lock screen's own clock floats directly over the
+/// wallpaper rather than sitting inside a boxed panel. Unlike `render_ui_
+/// box`, which is a genuinely opaque panel, nothing here is a filled
+/// background at all.
+fn render_header_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8>, (i32, i32)) {
+    use crate::decoration::{blit_glyph_on_transparent, find_system_font, FONT_PIXELS};
+
+    const WIDTH: usize = 420;
+    const HEIGHT: usize = 200;
+    const CLOCK_SIZE: f32 = 52.0;
+    const DATE_SIZE: f32 = FONT_PIXELS;
+    const AVATAR_RADIUS: i32 = 28;
+    let mut buf = vec![0u8; WIDTH * HEIGHT * 4];
+
+    let font = find_system_font();
+    let (hour, minute, weekday, day, month, _year) = local_time_now();
+    let time_str = format!("{hour:02}:{minute:02}");
+    let date_str = format!("{}, {} {day}", WEEKDAY_NAMES[weekday.clamp(0, 6) as usize], MONTH_NAMES[(month - 1).clamp(0, 11) as usize]);
+
+    // A plain function, not a closure capturing `buf` - this needs to
+    // interleave with other direct `buf` mutations (the avatar circle)
+    // between calls, which a capturing closure can't do (it would hold
+    // `buf` borrowed for its own entire lifetime, not just each call).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_centered(buf: &mut [u8], width: usize, height: usize, font: &Option<fontdue::Font>, text: &str, y: f32, size: f32, color: (u8, u8, u8)) {
+        let Some(font) = font else { return };
+        let total_width: f32 = text.chars().map(|ch| font.rasterize(ch, size).0.advance_width).sum();
+        let mut pen_x = (width as f32 - total_width) / 2.0;
+        for ch in text.chars() {
+            if ch.is_control() {
+                continue;
+            }
+            let (metrics, coverage) = font.rasterize(ch, size);
+            if metrics.width > 0 && metrics.height > 0 {
+                let glyph_x = pen_x + metrics.xmin as f32;
+                let glyph_y = y - metrics.height as f32 - metrics.ymin as f32;
+                blit_glyph_on_transparent(buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, color);
+            }
+            pen_x += metrics.advance_width;
+        }
+    }
+
+    draw_centered(&mut buf, WIDTH, HEIGHT, &font, &time_str, 60.0, CLOCK_SIZE, theme.text_color);
+    draw_centered(&mut buf, WIDTH, HEIGHT, &font, &date_str, 84.0, DATE_SIZE, theme.text_color);
+
+    let avatar_cy = 84.0 + 24.0 + AVATAR_RADIUS as f32;
+    fill_circle_on_transparent(&mut buf, WIDTH, HEIGHT, WIDTH as i32 / 2, avatar_cy as i32, AVATAR_RADIUS, theme.avatar_bg);
+    if let Some(font) = &font {
+        let initial = native.username.chars().next().unwrap_or('?').to_ascii_uppercase();
+        let (metrics, coverage) = font.rasterize(initial, AVATAR_RADIUS as f32);
+        let glyph_x = WIDTH as i32 / 2 - metrics.width as i32 / 2;
+        let glyph_y = avatar_cy as i32 - metrics.height as i32 / 2;
+        blit_glyph_on_transparent(&mut buf, WIDTH, HEIGHT, glyph_x, glyph_y, &metrics, &coverage, theme.text_color);
+    }
+
+    let username_y = avatar_cy + AVATAR_RADIUS as f32 + 24.0;
+    draw_centered(&mut buf, WIDTH, HEIGHT, &font, if native.username.is_empty() { "Locked" } else { &native.username }, username_y, DATE_SIZE, theme.text_color);
+
+    (buf, (WIDTH as i32, HEIGHT as i32))
+}
+
+/// Draws the centered password box: rounded background, a row of dots
+/// (one per character typed, never the character itself, or a dimmed
+/// placeholder prompt while empty), and - depending on `LockConfig`/
+/// current state - a caps-lock note and a failed-attempt message. The
+/// username moved to `render_header_box` above; this box is just the
+/// password field now, the way a real lock screen's own field is a
+/// separate element from its clock/avatar, not one panel holding both.
+/// Same rasterization primitives `decoration.rs` already uses for the
+/// titlebar/context-menu/flyout (`find_system_font`/`blit_glyph`/
+/// `rgb_to_bgra`), promoted to `pub(crate)` there rather than duplicated
+/// here.
 fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8>, (i32, i32)) {
     use crate::decoration::{blit_glyph, find_system_font, rgb_to_bgra, round_bottom_corners, round_top_corners, FONT_PIXELS, TEXT_LEFT_PADDING};
 
-    const WIDTH: usize = 360;
-    const HEIGHT: usize = 170;
+    const WIDTH: usize = 340;
+    const HEIGHT: usize = 120;
     let mut buf = vec![0u8; WIDTH * HEIGHT * 4];
     let bg = rgb_to_bgra(theme.box_bg, 255);
     for px in buf.chunks_exact_mut(4) {
@@ -370,10 +793,19 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
     let font = find_system_font();
     let text_color = if native.show_error { theme.error_color } else { theme.text_color };
 
-    let mut draw_line = |text: &str, y: f32, color: (u8, u8, u8)| {
+    // Centered, not left-padded like every other text row this codebase
+    // draws (titlebar, context menu) - those are rows in a wide panel
+    // with other content to align against; this box has nothing else in
+    // it, so a left-padded dot row/placeholder read as randomly offset
+    // rather than deliberately placed. Measures the row's own width first
+    // (the same two-pass "measure, then centre" `render_header_box`'s own
+    // `draw_centered` already does) rather than repeating that closure
+    // here for one extra parameter's difference.
+    let mut draw_line_centered = |text: &str, y: f32, color: (u8, u8, u8)| {
         let Some(font) = &font else { return };
-        let baseline = y;
-        let mut pen_x = TEXT_LEFT_PADDING;
+        let total_width: f32 = text.chars().map(|ch| font.rasterize(ch, FONT_PIXELS).0.advance_width).sum();
+        let start_x = ((WIDTH as f32 - total_width) / 2.0).max(TEXT_LEFT_PADDING);
+        let mut pen_x = start_x;
         for ch in text.chars() {
             if ch.is_control() {
                 continue;
@@ -381,29 +813,35 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
             let (metrics, coverage) = font.rasterize(ch, FONT_PIXELS);
             if metrics.width > 0 && metrics.height > 0 {
                 let glyph_x = pen_x + metrics.xmin as f32;
-                let glyph_y = baseline - metrics.height as f32 - metrics.ymin as f32;
+                let glyph_y = y - metrics.height as f32 - metrics.ymin as f32;
                 blit_glyph(&mut buf, WIDTH, HEIGHT, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, theme.box_bg, color);
             }
             pen_x += metrics.advance_width;
-            if pen_x as usize >= WIDTH {
-                break;
-            }
         }
     };
 
-    draw_line(if native.username.is_empty() { "Locked" } else { &native.username }, 40.0, theme.text_color);
+    // A dimmed placeholder prompt while nothing's been typed yet and
+    // there's no error to show instead - an empty field with nothing in
+    // it at all read as broken/unfinished, the same "looks unpolished"
+    // complaint the box overall got. Real placeholder-text convention
+    // (GNOME, macOS): dimmer than the real text colour, never mistakable
+    // for an actual password once one is entered.
+    if native.password.is_empty() && !native.show_error {
+        let placeholder = crate::decoration::mix_rgb(theme.text_color, theme.box_bg, 0.5);
+        draw_line_centered("Enter Password", 65.0, placeholder);
+    } else {
+        let dots: String = std::iter::repeat_n(theme.dot_char, native.password.chars().count()).collect();
+        draw_line_centered(&dots, 65.0, text_color);
+    }
 
-    let dots: String = std::iter::repeat_n(theme.dot_char, native.password.chars().count()).collect();
-    draw_line(&dots, 90.0, text_color);
-
-    let mut status_y = 130.0;
+    let mut status_y = 100.0;
     if theme.show_caps_lock && native.caps_lock {
-        draw_line("Caps Lock is on", status_y, theme.error_color);
+        draw_line_centered("Caps Lock is on", status_y, theme.error_color);
         status_y += 20.0;
     }
     if theme.show_failed_attempts && native.show_error {
         let message = if native.failed_attempts > 1 { format!("{} ({} attempts)", theme.fail_message, native.failed_attempts) } else { theme.fail_message.clone() };
-        draw_line(&message, status_y, theme.error_color);
+        draw_line_centered(&message, status_y, theme.error_color);
     }
 
     // Border, drawn last so it isn't overdrawn by any fill above --
@@ -438,4 +876,212 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
     round_bottom_corners(&mut buf, WIDTH, HEIGHT, theme.corner_radius, None);
 
     (buf, (WIDTH as i32, HEIGHT as i32))
+}
+
+/// One key's own static data: its label/typed character in each case,
+/// and (for the three keys that aren't plain character entry) the `name`
+/// `native_lock_key` already recognizes. `width` is in units of
+/// `KEY_UNIT` - `1.0` for an ordinary key, wider for Backspace/Return/
+/// Shift/Space, matching a real keyboard's own proportions well enough
+/// to be usable without needing pixel-exact ergonomics for a lock
+/// screen.
+struct KeySpec {
+    lower: &'static str,
+    upper: &'static str,
+    name: &'static str,
+    width: f32,
+}
+
+const fn key(lower: &'static str, upper: &'static str) -> KeySpec {
+    KeySpec { lower, upper, name: "", width: 1.0 }
+}
+const fn wide_key(lower: &'static str, upper: &'static str, name: &'static str, width: f32) -> KeySpec {
+    KeySpec { lower, upper, name, width }
+}
+
+/// A plain, real, usable QWERTY-shaped layout - not a full XKB layout
+/// translation (that needs real integration with this session's own
+/// keymap, a separate and much larger piece of work), but every letter,
+/// digit, the digit row's own shifted symbols (covering the punctuation a
+/// real password most commonly needs), Backspace, Return, Shift, and
+/// Space. Scoped deliberately: a touchscreen session with no physical
+/// keyboard at all needs *a* way to type a real password, not every key
+/// a full desktop keyboard has.
+fn keyboard_rows() -> [Vec<KeySpec>; 5] {
+    [
+        vec![
+            key("1", "!"),
+            key("2", "@"),
+            key("3", "#"),
+            key("4", "$"),
+            key("5", "%"),
+            key("6", "^"),
+            key("7", "&"),
+            key("8", "*"),
+            key("9", "("),
+            key("0", ")"),
+            wide_key("Back", "Back", "BackSpace", 1.6),
+        ],
+        vec![
+            key("q", "Q"),
+            key("w", "W"),
+            key("e", "E"),
+            key("r", "R"),
+            key("t", "T"),
+            key("y", "Y"),
+            key("u", "U"),
+            key("i", "I"),
+            key("o", "O"),
+            key("p", "P"),
+        ],
+        vec![
+            key("a", "A"),
+            key("s", "S"),
+            key("d", "D"),
+            key("f", "F"),
+            key("g", "G"),
+            key("h", "H"),
+            key("j", "J"),
+            key("k", "K"),
+            key("l", "L"),
+            wide_key("Enter", "Enter", "Return", 1.6),
+        ],
+        vec![
+            wide_key("Shift", "Shift", "Shift", 1.6),
+            key("z", "Z"),
+            key("x", "X"),
+            key("c", "C"),
+            key("v", "V"),
+            key("b", "B"),
+            key("n", "N"),
+            key("m", "M"),
+        ],
+        vec![wide_key("Space", "Space", "space", 6.0)],
+    ]
+}
+
+const KEY_UNIT: i32 = 32;
+const KEY_HEIGHT: i32 = 32;
+const KEY_GAP: i32 = 6;
+
+/// Draws the on-screen keyboard (`keyboard_rows`'s own layout) as
+/// individually rounded keycaps on an otherwise transparent canvas --
+/// same "floats over the blurred desktop" treatment `render_header_box`
+/// gives the clock, not a second opaque panel underneath the password
+/// box. Returns the rendered bitmap, its size, and every key's own
+/// clickable rect (in this same buffer's local space) plus what it
+/// types - `CompState::native_lock_click`'s own lookup table, always
+/// rebuilt together with the bitmap so the two can never drift apart.
+fn render_keyboard(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8>, (i32, i32), Vec<VirtualKey>) {
+    use crate::decoration::{blit_glyph_on_transparent, fill_rect, find_system_font, FONT_PIXELS};
+
+    let rows = keyboard_rows();
+    let row_width = |row: &[KeySpec]| -> i32 {
+        let units: f32 = row.iter().map(|k| k.width).sum();
+        (units * KEY_UNIT as f32).round() as i32 + KEY_GAP * (row.len() as i32 - 1)
+    };
+    let width = rows.iter().map(|r| row_width(r)).max().unwrap_or(0).max(1) as usize;
+    let height = (rows.len() as i32 * KEY_HEIGHT + (rows.len() as i32 - 1) * KEY_GAP) as usize;
+    let mut buf = vec![0u8; width * height * 4];
+    let mut keys = Vec::new();
+    let font = find_system_font();
+
+    // Slightly brighter than the password box's own background - a key
+    // cap needs to read as a distinct, pressable surface against the
+    // blurred desktop it's floating over, the same reasoning `theme.
+    // box_bg` itself needs to contrast with an arbitrary, unpredictable
+    // background.
+    let keycap_bg = crate::decoration::mix_rgb(theme.box_bg, theme.text_color, 0.12);
+
+    for (row_idx, row) in rows.iter().enumerate() {
+        let this_row_width = row_width(row);
+        let mut x = (width as i32 - this_row_width) / 2;
+        let y = row_idx as i32 * (KEY_HEIGHT + KEY_GAP);
+        for spec in row {
+            let w = (spec.width * KEY_UNIT as f32).round() as i32;
+            fill_rect(&mut buf, width, height, x, y, x + w, y + KEY_HEIGHT, keycap_bg, 220);
+            let label = if native.shift { spec.upper } else { spec.lower };
+            if let Some(font) = &font {
+                let total_width: f32 = label.chars().map(|ch| font.rasterize(ch, FONT_PIXELS).0.advance_width).sum();
+                let mut pen_x = x as f32 + (w as f32 - total_width) / 2.0;
+                for ch in label.chars() {
+                    let (metrics, coverage) = font.rasterize(ch, FONT_PIXELS);
+                    if metrics.width > 0 && metrics.height > 0 {
+                        let glyph_x = pen_x + metrics.xmin as f32;
+                        let glyph_y = y as f32 + KEY_HEIGHT as f32 / 2.0 + FONT_PIXELS / 2.0 - metrics.height as f32 - metrics.ymin as f32;
+                        blit_glyph_on_transparent(&mut buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, theme.text_color);
+                    }
+                    pen_x += metrics.advance_width;
+                }
+            }
+            keys.push(VirtualKey { rect: (x, y, w, KEY_HEIGHT), name: spec.name, utf8_lower: if spec.name.is_empty() { spec.lower } else { "" }, utf8_upper: if spec.name.is_empty() { spec.upper } else { "" } });
+            x += w + KEY_GAP;
+        }
+    }
+
+    (buf, (width as i32, height as i32), keys)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lock_stack_layout_centers_every_present_section_on_the_output() {
+        let (header_pos, ui_pos, keyboard_pos) = lock_stack_layout((800, 600), Some((400, 100)), (300, 120), Some((500, 200)));
+        let header_pos = header_pos.expect("header was passed as Some");
+        let keyboard_pos = keyboard_pos.expect("keyboard was passed as Some");
+        assert_eq!(header_pos.0, (800 - 400) / 2);
+        assert_eq!(ui_pos.0, (800 - 300) / 2);
+        assert_eq!(keyboard_pos.0, (800 - 500) / 2);
+        // Stacked top to bottom in a fixed order (header, then box, then
+        // keyboard), each separated by exactly one `SECTION_GAP`.
+        assert!(header_pos.1 < ui_pos.1);
+        assert!(ui_pos.1 < keyboard_pos.1);
+        assert_eq!(ui_pos.1 - (header_pos.1 + 100), SECTION_GAP);
+        assert_eq!(keyboard_pos.1 - (ui_pos.1 + 120), SECTION_GAP);
+    }
+
+    #[test]
+    fn lock_stack_layout_omits_absent_sections_and_still_centers_what_remains() {
+        let (header_pos, ui_pos, keyboard_pos) = lock_stack_layout((800, 600), None, (300, 120), None);
+        assert!(header_pos.is_none());
+        assert!(keyboard_pos.is_none());
+        assert_eq!(ui_pos.0, (800 - 300) / 2);
+    }
+
+    #[test]
+    fn shake_offset_is_zero_at_the_very_start_and_the_very_end() {
+        assert_eq!(shake_offset(Duration::ZERO), 0.0);
+        let end = shake_offset(SHAKE_DURATION);
+        assert!(end.abs() < 0.001, "shake should have fully decayed by its own duration, got {end}");
+    }
+
+    #[test]
+    fn shake_offset_stays_within_its_configured_amplitude() {
+        for ms in 0..=(SHAKE_DURATION.as_millis() as u64) {
+            let offset = shake_offset(Duration::from_millis(ms));
+            assert!(offset.abs() <= SHAKE_AMPLITUDE + 0.001, "offset {offset} exceeded amplitude at {ms}ms");
+        }
+    }
+
+    #[test]
+    fn render_keyboard_rows_stay_within_the_reported_bitmap_width() {
+        let (_, (width, _), keys) = render_keyboard(&NativeLock::new(Default::default()), &srdwm_core::LockConfig::default());
+        assert!(!keys.is_empty());
+        for key in &keys {
+            let (x, _, w, _) = key.rect;
+            assert!(x >= 0 && x + w <= width, "key rect {:?} escapes bitmap width {width}", key.rect);
+        }
+    }
+
+    #[test]
+    fn render_keyboard_every_key_has_either_a_name_or_typed_characters() {
+        let (_, _, keys) = render_keyboard(&NativeLock::new(Default::default()), &srdwm_core::LockConfig::default());
+        for key in &keys {
+            let has_name = !key.name.is_empty();
+            let has_chars = !key.utf8_lower.is_empty() || !key.utf8_upper.is_empty();
+            assert!(has_name || has_chars, "key with rect {:?} types nothing and names nothing", key.rect);
+        }
+    }
 }

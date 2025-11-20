@@ -66,7 +66,19 @@ impl WaylandPlatform {
             let name = self.output.name();
             let bg = self.state.native_lock_background(&name).cloned();
             let ui = self.state.native_lock_ui().map(|(buf, s)| (buf.clone(), s));
-            let elements = crate::native_lock::native_lock_render_elements(bg.as_ref(), ui.as_ref().map(|(b, s)| (b, *s)), (size.w, size.h), renderer);
+            let header = self.state.native_lock_header().map(|(buf, s)| (buf.clone(), s));
+            let shadow = self.state.native_lock_shadow().cloned();
+            let keyboard = self.state.native_lock_keyboard().map(|(buf, s)| (buf.clone(), s));
+            let shake_offset = self.state.native_lock_shake_offset();
+            let frame = crate::native_lock::NativeLockFrame {
+                background: bg.as_ref(),
+                header: header.as_ref().map(|(b, s)| (b, *s)),
+                shadow: shadow.as_ref(),
+                ui: ui.as_ref().map(|(b, s)| (b, *s)),
+                keyboard: keyboard.as_ref().map(|(b, s)| (b, *s)),
+                shake_offset,
+            };
+            let elements = crate::native_lock::native_lock_render_elements(frame, (size.w, size.h), renderer);
             self.damage_tracker
                 .render_output(renderer, &mut framebuffer, age, &elements, [0.0, 0.0, 0.0, 1.0])
                 .map_err(err)?;
