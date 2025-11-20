@@ -298,6 +298,64 @@ impl CompState {
                         let content_offset = Point::<i32, Logical>::from((raw_offset.x.max(0), raw_offset.y.max(0)));
                         let pos = (geom.x - origin.x - content_offset.x, geom.y + band - origin.y - content_offset.y);
                         elements.extend(crate::elements::surface_content_elements(&mut gpu.renderer, &surface, pos, w.opacity));
+                        // Border strips (top/bottom) and the titlebar bitmap,
+                        // reusing the exact same cached `MemoryRenderBuffer`s
+                        // the Pixman path already builds in `redraw_
+                        // decoration_buffer` (renderer-agnostic: they're
+                        // plain rasterized pixel buffers, imported here for
+                        // `GlesRenderer` the same generic way `cursor::
+                        // render_elements` already imports the cursor
+                        // bitmap for either renderer). Deliberately simpler
+                        // than the Pixman path in two ways, both documented
+                        // gaps rather than oversights: no occlusion-fragment
+                        // clipping (each window's own border/titlebar draws
+                        // in full, front-to-back painter's-order the same
+                        // as content above - correct when windows don't
+                        // overlap, imprecise when they do), and no left/
+                        // right side strips or shadow yet. `border_curve_
+                        // is_safe` is unconditionally `w.decorated` here,
+                        // not the Pixman path's content-masking-aware
+                        // check, since this path has no content-masking
+                        // concept at all yet (`w.decorated || content_will_
+                        // be_masked` degenerates to just `w.decorated` when
+                        // masking can never succeed).
+                        let border_curve_is_safe = w.decorated;
+                        if w.border_width > 0 {
+                            let strips = decoration::border_strips(geom, w.border_width);
+                            if let Some(buffer) = self.border_top_decorations.get(&id) {
+                                let (row0, rows, shift) = decoration::border_top_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);
+                                let pos = ((strips[0].x - origin.x) as f64, (strips[0].y - origin.y + shift as i32) as f64);
+                                let crop_w = self.decoration_signatures.get(&id).map(|s| s.width + 2 * s.border_width).unwrap_or(strips[0].width).min(strips[0].width);
+                                if strips[0].width > 0 && strips[0].height > 0 {
+                                    let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((crop_w as f64, rows as f64))));
+                                    match MemoryRenderBufferRenderElement::from_buffer(&mut gpu.renderer, pos, buffer, None, src, None, Kind::Unspecified) {
+                                        Ok(elem) => elements.push(crate::elements::OverlayElement::Memory(elem)),
+                                        Err(e) => log::warn!("udev: SRDWM_GPU=1 failed to import top border buffer: {e}"),
+                                    }
+                                }
+                            }
+                            if let Some(buffer) = self.border_bottom_decorations.get(&id) {
+                                let (row0, rows, shift) = decoration::border_bottom_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);
+                                let pos = ((strips[1].x - origin.x) as f64, (strips[1].y - origin.y - shift as i32) as f64);
+                                let crop_w = self.decoration_signatures.get(&id).map(|s| s.width + 2 * s.border_width).unwrap_or(strips[1].width).min(strips[1].width);
+                                if strips[1].width > 0 && strips[1].height > 0 {
+                                    let src = Some(Rectangle::new(Point::from((0.0, row0 as f64)), Size::from((crop_w as f64, rows as f64))));
+                                    match MemoryRenderBufferRenderElement::from_buffer(&mut gpu.renderer, pos, buffer, None, src, None, Kind::Unspecified) {
+                                        Ok(elem) => elements.push(crate::elements::OverlayElement::Memory(elem)),
+                                        Err(e) => log::warn!("udev: SRDWM_GPU=1 failed to import bottom border buffer: {e}"),
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(deco) = self.decorations.get(&id) {
+                            let titlebar_w = self.decoration_signatures.get(&id).map(|s| s.width).unwrap_or(geom.width).min(geom.width);
+                            let pos = ((geom.x - origin.x) as f64, (geom.y - origin.y) as f64);
+                            let src = Some(Rectangle::new(Point::from((0.0, 0.0)), Size::from((titlebar_w as f64, srdwm_core::TITLEBAR_HEIGHT as f64))));
+                            match MemoryRenderBufferRenderElement::from_buffer(&mut gpu.renderer, pos, deco, None, src, None, Kind::Unspecified) {
+                                Ok(elem) => elements.push(crate::elements::OverlayElement::Memory(elem)),
+                                Err(e) => log::warn!("udev: SRDWM_GPU=1 failed to import titlebar buffer: {e}"),
+                            }
+                        }
                     }
                     let clear_color = [0.05, 0.05, 0.08, 1.0];
                     match gpu_output.render_frame(&mut gpu.renderer, &elements, clear_color, smithay::backend::drm::compositor::FrameFlags::DEFAULT) {

@@ -1,5 +1,13 @@
 # TODO / planned features - master checklist
 
+## GPU render path: decorations built after all, on explicit repeated instruction - scoped, not the full port (2026-08-28)
+
+The 2026-08-27 entry below this one explains why a full port of the Pixman path's decoration rendering onto the GPU path was deliberately not attempted blind: no working GPU-capable hardware on this machine to visually confirm a single pixel of it against, on a feature nobody has turned on. That reasoning stands unchanged. Asked directly, twice, to build it anyway rather than leave it - so this is a real implementation, with the same unverified-on-hardware caveat stated as plainly as before, not a walk-back of the original judgment call.
+
+Scoped deliberately smaller than a full port, and documented as such in `gpu.rs`'s own updated module doc comment: border top/bottom strips and the titlebar bitmap now render on the GPU path, reusing the *exact* cached `MemoryRenderBuffer`s the Pixman path already builds in `redraw_decoration_buffer` (renderer-agnostic pixel buffers - importing them for `GlesRenderer` is the same generic call `cursor::render_elements` already makes for either renderer, no new rasterization code). Two things left out on purpose, not by oversight: occlusion-fragment clipping against overlapping windows (each window's own border/titlebar draws in full, front-to-back painter's-order - correct when windows don't overlap, imprecise when they do, real follow-up work) and the left/right border side strips plus the drop shadow. `border_curve_is_safe` is unconditionally `w.decorated` here rather than the Pixman path's content-masking-aware check, since this path has no content-masking/rounding concept at all yet - masking can never succeed, so the two conditions are equivalent.
+
+Full workspace build/test/clippy clean. Explicitly, deliberately **not** visually verified - same reason as before (no GPU-capable hardware here), stated once rather than repeated at length; see the entry below for the full reasoning this inherits.
+
 ## Chrome titlebar gap closed, Nemo popup only partly re-verified (2026-08-28)
 
 Verified the two remaining research items live, in a nested compositor (`WAYLAND_DISPLAY=wayland-1` against the default config - the punch list's own preferred validation method, not the live session), instead of leaving them as unconfirmed guesses.

@@ -6,19 +6,28 @@
 //! percolating-boole.md`, for that phase's own scoping): every head
 //! `initialize_output` succeeds for gets driven, not just the first
 //! (`GpuContext::outputs`), VT-switch pause/activate is wired
-//! (`udev/session.rs`'s `SessionEvent` handlers), and the real cursor and
-//! real window content both render on top of the clear color
-//! (`udev/render.rs`'s own GPU branch). Window content is plain
-//! `surface_content_elements` - square corners, no border or titlebar --
-//! not yet the masked/rounded path the Pixman branch uses (built against
-//! `PixmanRenderer` specifically) or the GLES shader `winit/render.rs`
-//! already has for its own single-output case; decorations (border,
-//! titlebar) are the remaining real gap. Untested on real GPU-enabled
-//! hardware as of this writing - `SRDWM_GPU`/`general.gpu` were both
-//! unset on the machine this was built on, so this compiles, passes the
-//! full test suite, and matches the existing Pixman path's own per-
-//! window geometry logic by inspection, but has not been visually
-//! confirmed against a real compositor session with the flag on.
+//! (`udev/session.rs`'s `SessionEvent` handlers), and the real cursor,
+//! real window content, and now border/titlebar decorations all render
+//! on top of the clear color (`udev/render.rs`'s own GPU branch).
+//! Content is still plain `surface_content_elements` - square corners,
+//! no rounding/masking - not yet the masked/rounded path the Pixman
+//! branch uses (built against `PixmanRenderer` specifically) or the GLES
+//! shader `winit/render.rs` already has for its own single-output case.
+//! Decorations reuse the exact same cached `MemoryRenderBuffer`s the
+//! Pixman path builds (renderer-agnostic pixel buffers, imported here
+//! for `GlesRenderer` the same generic way the cursor bitmap already is)
+//! but deliberately skip two things the Pixman path has: occlusion-
+//! fragment clipping against overlapping windows (each window's own
+//! border/titlebar draws in full, front-to-back painter's-order --
+//! correct when windows don't overlap, imprecise when they do) and
+//! left/right border side strips plus the drop shadow. Real, remaining
+//! scope, not attempted here to keep this addition reviewable against
+//! what it actually changes. Untested on real GPU-enabled hardware as of
+//! this writing - `SRDWM_GPU`/`general.gpu` were both unset on the
+//! machine this was built on, so this compiles, passes the full test
+//! suite, and matches the existing Pixman path's own per-window geometry
+//! logic by inspection, but has not been visually confirmed against a
+//! real compositor session with the flag on.
 
 use std::os::fd::{AsFd, OwnedFd};
 
