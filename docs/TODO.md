@@ -1,5 +1,13 @@
 # TODO / planned features - master checklist
 
+## Chrome titlebar gap closed, Nemo popup only partly re-verified (2026-08-28)
+
+Verified the two remaining research items live, in a nested compositor (`WAYLAND_DISPLAY=wayland-1` against the default config - the punch list's own preferred validation method, not the live session), instead of leaving them as unconfirmed guesses.
+
+**Chrome/Chromium double-titlebar heuristic**: launched real `google-chrome-stable --ozone-platform=wayland` in the nested compositor and screenshotted it with `grim`. No double decoration - exactly one titlebar-equivalent band, and no `srdwm`-drawn window title text anywhere in the capture (this compositor's own SSD always draws the window title; its total absence means Chrome negotiated `ClientSide` itself and srdwm correctly didn't stack its own frame on top). The Unity-style "File Edit View History Tools Profiles Help" row Chrome renders above its own toolbar (a real, separate Chrome-on-Linux behavior tied to appmenu/dbusmenu detection, confirmed present in `srd clients`' own `global_menu` field for this window) is Chrome's own client-side chrome, not evidence of anything srdwm drew. `likely_draws_own_titlebar`'s `org.gnome.*`-only app-id list does not need a Chrome/Chromium entry added - the existing xdg-decoration negotiation already handles it correctly without one.
+
+**Nemo's right-click context menu** (the still-open `POPUP-GEOM-DIAG`/`POPUP-GRAB-DIAG` investigation in `xdg_shell.rs`): partially re-verified only. Confirmed no double-decoration for Nemo the same way (one clean SSD titlebar, traffic-light-style buttons, no CSD stacking). Could **not** safely test the actual reported symptom (right-click produces no menu at all) - `ydotool` is a uinput-level daemon shared with the live session, not scoped to the nested compositor, and a blind synthetic click there risks landing in the user's real desktop rather than the test window (this file's own standing warning: "never click at a position you have not verified first"). Parked (`nightshift questions`) rather than guessed at or left silently incomplete - the two live options are asking the user to right-click Nemo directly and report back, or finding a way to scope synthetic input to a nested session before trying again. The diagnostics themselves are left in place since the underlying bug's status is still genuinely unknown, not because of oversight.
+
 ## workspace.per_monitor, titlebar buttons, and desktop icons: live srd set + readback (2026-08-28)
 
 Closed the rest of the "config-file only" gaps named directly in the AGS capability survey.
