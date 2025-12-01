@@ -586,6 +586,14 @@ pub(crate) struct CompState {
     /// motion event of every drag, which is what made moving a window
     /// stutter. Only a real size change now does either.
     pub(crate) last_synced_size: HashMap<WindowId, (i32, i32)>,
+    /// Windows whose `Window::size_is_provisional` was `true` at creation
+    /// and whose client hasn't sent a real, non-empty content commit yet --
+    /// see that field's own doc comment. `sync_geometry` sends `size: None`
+    /// (let the client pick) instead of forcing this guessed size for the
+    /// one configure sent while a window is in this set; `commit()` removes
+    /// it and adopts the client's own real first size into `Window::
+    /// geometry` the moment one arrives.
+    pub(crate) provisional_size: HashSet<WindowId>,
     /// A size-changing `xdg_toplevel.configure` that's been sent but not
     /// yet reflected in the client's own real committed content size --
     /// `(size requested, when it was sent)`. `sync_geometry` won't send

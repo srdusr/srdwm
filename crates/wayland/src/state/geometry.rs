@@ -392,10 +392,19 @@ impl CompState {
                     !caught_up && sent_at.elapsed() < CONFIGURE_THROTTLE_TIMEOUT
                 });
                 if size_changed && !throttled {
+                    // See `Window::size_is_provisional`'s own doc comment:
+                    // the very first configure for a window whose size was
+                    // never a real decision - just `Window::new`'s/a
+                    // backend's own hardcoded guess - tells the client to
+                    // pick its own size (`state.size = None`) instead of
+                    // forcing this one on it. `last_synced_size` having no
+                    // entry yet is exactly "this is that first configure";
+                    // checked before the `insert` just below overwrites it.
+                    let let_client_choose = self.provisional_size.contains(&id) && !self.last_synced_size.contains_key(&id);
                     self.last_synced_size.insert(id, size);
                     self.pending_size_configure.insert(id, (size, Instant::now()));
                     top.with_pending_state(|state| {
-                        state.size = Some(size.into());
+                        state.size = if let_client_choose { None } else { Some(size.into()) };
                         // No configure from this compositor, ever, set any
                         // `xdg_toplevel` state bit at all before this --
                         // confirmed by grepping the whole crate for
@@ -505,6 +514,53 @@ impl CompState {
         // `Space`'s notion of "on top" from `WindowManager`'s.
         if moved {
             self.resync_stacking_order();
+        }
+    }
+
+    /// Called from `CompositorHandler::commit`, right after `w.on_commit()`
+    /// - the first time a window still in `provisional_size` commits a
+    /// real, non-empty buffer, adopts the client's own chosen content size
+    /// into `Window::geometry` instead of leaving `add_window`'s guessed
+    /// placeholder in place. A no-op once `provisional_size` no longer
+    /// names this window (the ordinary case, checked first, so every other
+    /// commit pays only one `HashSet` lookup).
+    ///
+    /// Position is left exactly where `SmartPlacement` put it - only
+    /// clamped so a client that picked a bigger size than the guess can't
+    /// end up hanging off its monitor's right/bottom edge - since the
+    /// guessed size was only ever wrong about *size*; the cascade/grid
+    /// position it computed is still a perfectly good place for a window
+    /// of any size to open.
+    pub(crate) fn adopt_provisional_size(&mut self, id: WindowId) {
+        if !self.provisional_size.contains(&id) {
+            return;
+        }
+        let Some(dwindow) = self.id_to_window.get(&id) else { return };
+        // Logical points, same as `xdg_toplevel::configure`'s own `size`
+        // (see `sync_geometry`'s doc comment on that) - converted to this
+        // compositor's physical-pixel `Rect` space below via the window's
+        // own monitor scale, the same conversion `sync_geometry` does in
+        // reverse.
+        let content = dwindow.geometry();
+        if content.size.w <= 0 || content.size.h <= 0 {
+            // Compositor/role-only commit, no real buffer attached yet --
+            // wait for the commit that actually has one.
+            return;
+        }
+        self.provisional_size.remove(&id);
+        let mut wm = self.wm.borrow_mut();
+        let Some(w) = wm.window(id) else { return };
+        let scale = wm.monitors().iter().find(|m| m.id == w.monitor).map(|m| m.scale).unwrap_or(1.0);
+        let monitor_geometry = wm.monitors().iter().find(|m| m.id == w.monitor).map(|m| m.geometry);
+        let band = if w.decorated { TITLEBAR_HEIGHT } else { 0 };
+        let width = ((content.size.w as f64 * scale).round() as u32).max(srdwm_core::placement::MIN_WINDOW_WIDTH);
+        let height = ((content.size.h as f64 * scale).round() as u32).max(srdwm_core::placement::MIN_WINDOW_HEIGHT) + band;
+        let Some(w) = wm.window_mut(id) else { return };
+        w.geometry.width = width;
+        w.geometry.height = height;
+        if let Some(monitor) = monitor_geometry {
+            w.geometry.x = w.geometry.x.min(monitor.right() - width as i32).max(monitor.x);
+            w.geometry.y = w.geometry.y.min(monitor.bottom() - height as i32).max(monitor.y);
         }
     }
 }

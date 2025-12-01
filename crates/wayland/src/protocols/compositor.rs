@@ -83,6 +83,13 @@ impl CompositorHandler for CompState {
             if let Some(w) = self.id_to_window.get(&id) {
                 w.on_commit();
             }
+            // See `Window::size_is_provisional`'s own doc comment: before
+            // anything below reads `Window::geometry` (`redraw_decoration_
+            // buffer`, `sync_geometry`), give a window still waiting on its
+            // own first real size a chance to adopt it from what `on_commit`
+            // just recomputed, rather than keep rendering/configuring
+            // against the guessed placeholder for one more round-trip.
+            self.adopt_provisional_size(id);
             // See `content_epoch`'s doc comment: this is the only per-commit
             // signal the udev backend's rounded-corner mask cache has to
             // invalidate itself, since content can change every frame,

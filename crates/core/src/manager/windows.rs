@@ -151,10 +151,17 @@ impl WindowManager {
                 let step = self.next_cascade_step.get();
                 self.next_cascade_step.set(step.wrapping_add(1));
                 window.geometry = SmartPlacement::place(monitor, &existing, size, &self.placement, step);
+                // See `Window::size_is_provisional`'s own doc comment:
+                // `size` above is whatever a backend hardcoded before this
+                // window's real content was known, not a genuine
+                // preference - reset below if a rule or maximize goes on
+                // to give this window a real, deliberate size instead.
+                window.size_is_provisional = true;
             }
         }
         if let Some(geometry) = actions.as_ref().and_then(|a| a.geometry) {
             window.geometry = geometry;
+            window.size_is_provisional = false;
         }
         // `general.phone_mode`'s own real default (see its doc comment on
         // `WindowManager` for the full "optional phone mode" reasoning):
@@ -176,6 +183,11 @@ impl WindowManager {
         self.restack_pinned();
         if maximize {
             self.toggle_maximize(id);
+            // Deliberately full-monitor, not a guess - see `Window::
+            // size_is_provisional`'s own doc comment.
+            if let Some(w) = self.windows.get_mut(&id) {
+                w.size_is_provisional = false;
+            }
         }
         id
     }

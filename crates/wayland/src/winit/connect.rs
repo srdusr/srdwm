@@ -181,6 +181,7 @@ impl WaylandPlatform {
             border_side_buffers: HashMap::new(),
             color_filter_buffers: HashMap::new(),
             last_synced_size: HashMap::new(),
+            provisional_size: HashSet::new(),
             pending_size_configure: HashMap::new(),
             pending: pending.clone(),
             bound_keys: Rc::new(bound_keys.iter().cloned().collect()),

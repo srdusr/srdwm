@@ -10,6 +10,15 @@ impl CompState {
             w.app_id = with_toplevel_app_id(toplevel.wl_surface()).unwrap_or_default();
             w.geometry = srdwm_core::Rect::new(0, 0, 800, 600 + TITLEBAR_HEIGHT as i32 as u32);
             wm.add_window(w);
+            // See `Window::size_is_provisional`'s own doc comment: only
+            // when `add_window` actually used the guessed `800x600` above
+            // (not a remembered size, a rule's own `geometry` action, or a
+            // maximize/phone-mode fill) does the client get to pick its own
+            // size instead - `sync_geometry`/`adopt_provisional_size` are
+            // what actually act on membership here.
+            if wm.window(id).is_some_and(|w| w.size_is_provisional) {
+                self.provisional_size.insert(id);
+            }
             // Starts the open-slide tween (see `WindowAnim`'s doc comment):
             // the window's first `sync_geometry` call below will see this,
             // register the tween, and place it here - a few pixels below

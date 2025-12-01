@@ -244,6 +244,25 @@ pub struct Window {
     /// This window's global-menu D-Bus address, if the client has exported
     /// one. See [`GlobalMenu`]'s own doc comment.
     pub global_menu: Option<GlobalMenu>,
+    /// Set by `WindowManager::add_window` when `geometry`'s size just came
+    /// from `SmartPlacement`'s own guessed default (`Window::new`'s
+    /// `640x480`, or whatever a backend hardcodes before a client has said
+    /// anything about its own preferred size) rather than a deliberate
+    /// decision - a remembered size, a rule's explicit `geometry` action,
+    /// or a maximize/phone-mode fill. `false` for all three of those, since
+    /// there is nothing provisional about a size someone actually chose.
+    ///
+    /// A backend reads this once, right after `add_window` returns, to
+    /// decide whether the *client's own* first real committed size should
+    /// be allowed to win once it arrives (see `crates/wayland/src/state/
+    /// geometry.rs`'s own use of this) - reported live as "windows always
+    /// spawn small and square, not remembering placement or size": every
+    /// new toplevel was forced, via its very first `xdg_toplevel.configure`,
+    /// into this guessed placeholder size regardless of what the
+    /// application itself would have preferred, which is why every app
+    /// converged on the same generic footprint instead of its own natural
+    /// one.
+    pub size_is_provisional: bool,
 }
 
 impl Window {
@@ -281,6 +300,7 @@ impl Window {
             rules_applied: false,
             anim_from: None,
             global_menu: None,
+            size_is_provisional: false,
         }
     }
 }

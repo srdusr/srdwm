@@ -26,6 +26,51 @@
     }
 
     #[test]
+    fn a_smart_placed_window_is_marked_size_provisional() {
+        let mut wm = wm_with_monitor();
+        let id = wm.alloc_window_id();
+        let w = Window::new(id, "first");
+        wm.add_window(w);
+        // No remembered geometry, no rule, not maximized - the size that
+        // just got smart-placed is nothing but `Window::new`'s own default
+        // guess, so a backend should be free to let the client override it.
+        assert!(wm.window(id).unwrap().size_is_provisional);
+    }
+
+    #[test]
+    fn a_remembered_geometry_is_never_provisional() {
+        let mut wm = wm_with_monitor();
+        wm.set_remembered_geometry("some-app".to_string(), (100, 100, 900, 700));
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "second");
+        w.app_id = "some-app".to_string();
+        wm.add_window(w);
+        let win = wm.window(id).unwrap();
+        assert_eq!((win.geometry.width, win.geometry.height), (900, 700));
+        assert!(!win.size_is_provisional, "a deliberately remembered size must never be second-guessed by the client's own default");
+    }
+
+    #[test]
+    fn a_rules_explicit_geometry_is_never_provisional() {
+        let mut wm = wm_with_monitor();
+        wm.rules.push(WindowRule { matcher: WindowMatch { class: Some("ruled-app".to_string()), ..Default::default() }, actions: WindowRuleActions { geometry: Some(Rect::new(10, 10, 500, 400)), ..Default::default() } });
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "third");
+        w.app_id = "ruled-app".to_string();
+        wm.add_window(w);
+        assert!(!wm.window(id).unwrap().size_is_provisional, "a rule's own explicit geometry is a deliberate choice, not a guess");
+    }
+
+    #[test]
+    fn phone_mode_maximize_is_never_provisional() {
+        let mut wm = wm_with_monitor();
+        wm.phone_mode = true;
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "fourth"));
+        assert!(!wm.window(id).unwrap().size_is_provisional, "a deliberate full-monitor fill is not a guess needing a client override");
+    }
+
+    #[test]
     fn add_window_picks_up_the_configured_default_decoration_mode() {
         let mut wm = wm_with_monitor();
         wm.theme.default_decorated = false;

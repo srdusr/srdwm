@@ -3,6 +3,8 @@ use crate::layout::{Layout, MasterStackLayout, NoOpLayout, TilingConfig};
 use crate::monitor::{DisabledMonitor, Monitor, MonitorId, MonitorSplit};
 use crate::placement::{PlacementConfig, SmartPlacement, SnapZoneKind, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
 use crate::rules::WindowRule;
+#[cfg(test)]
+use crate::rules::{WindowMatch, WindowRuleActions};
 use crate::lock_config::LockConfig;
 use crate::theme::ThemeConfig;
 use crate::window::{likely_draws_own_titlebar, ResizeEdge, TitlebarHit, Window, WindowId, RESIZE_MARGIN};
