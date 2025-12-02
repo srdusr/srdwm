@@ -1,9 +1,9 @@
 # SRDWM
 
-A cross-platform window manager, configured entirely in Lua, aiming to feel
-like a native window manager on every platform it targets rather than a
-compromise between them: real title bars with drag/resize/minimize/maximize/close
-on every backend that can support them, not just a border.
+SRDWM is a cross-platform window manager. You configure it entirely in
+Lua. Every backend draws a real title bar. Every title bar supports drag,
+resize, minimize, maximize, and close. No backend falls back to a plain
+border instead.
 
 This is a Rust rewrite of an earlier C++ prototype; see
 [`docs/PRIOR_ART.md`](docs/PRIOR_ART.md) for what carried over, what got
@@ -14,18 +14,16 @@ still has it if anyone needs it.
 
 ## Status
 
-Linux is the primary target and the only one verified end-to-end so far.
-The Wayland backend is the daily-driver target and by far the more
-complete of the two - a real `smithay` compositor with its own GPU
-render path, session lock, desktop icons, global menu, layer-shell
-(bars/docks), fully rendered decorations, and more:
+All four backends are equal in design intent. Implementation depth
+differs only because Linux is the only platform with a working
+development machine right now.
 
 | Backend | Status |
 |---|---|
-| Wayland | Daily-driver complete: real decorations (titlebar text, resize, snap), session lock, desktop icons with right-click menus, global menu (`com.canonical.AppMenu.Registrar`/dbusmenu), layer-shell, XWayland, an optional GPU (GBM+EGL) render path alongside the default software one, fake (headless) monitors, and a Phase-2 multi-cursor primitive (pinning a virtual pointer to one window) |
-| X11 | Working - reparenting WM with a drawn title bar (buttons, drag, resize, right-click window menu), feature-audited for parity with the Wayland backend |
-| Windows | Designed, not built (no Windows target in dev sandbox) |
-| macOS | Designed, not built (no macOS target in dev sandbox) |
+| Wayland | Daily-driver complete: real decorations (titlebar text, resize, snap), session lock, desktop icons with right-click menus, global menu (`com.canonical.AppMenu.Registrar`/dbusmenu), layer-shell, XWayland, an optional GPU (GBM+EGL) render path alongside the default software one, fake (headless) monitors, and a Phase-2 multi-cursor primitive (pinning a virtual pointer to one window). Verified end-to-end on real Linux hardware. |
+| X11 | Working: a reparenting window manager with a drawn title bar (buttons, drag, resize, right-click window menu). Feature-audited for parity with the Wayland backend. Verified end-to-end on real Linux hardware. |
+| Windows | Under development. Real, `cfg(windows)`-gated code exists for border tinting (`DwmSetWindowAttribute`), low-level input hooks, and monitor enumeration. This code has never been built or run on a Windows machine, because no Windows machine is available in the current development environment. |
+| macOS | Under development. Real, `cfg(target_os = "macos")`-gated code exists for the Accessibility-API window control this backend needs. This code has never been built or run on a macOS machine, because no macOS machine is available in the current development environment. |
 
 Full detail, including exactly what's real vs. stubbed and why, is in
 [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) --
