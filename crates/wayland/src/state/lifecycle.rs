@@ -157,6 +157,7 @@ impl CompState {
             maximized: w.maximized,
             fullscreen: w.fullscreen,
             shadows_enabled: self.wm.borrow().shadows_enabled,
+            floating: w.floating,
             hovered_button,
             title_centered: theme.title_centered,
             buttons_left: theme.buttons_left,
@@ -250,8 +251,21 @@ impl CompState {
         // as a shadow the window doesn't visually need. Matches the
         // Hyprland/GNOME convention `MISSING.md` measures this compositor
         // against.
+        //
+        // No shadow for a TILED window either - a real, reported bug, not
+        // a style choice made up front: a drop shadow exists to separate a
+        // window from whatever is visually *behind* it, but tiled windows
+        // are coplanar and adjacent by construction, with nothing behind
+        // them to separate from. `SHADOW_SIZE` pixels of shadow with only
+        // `gap_inner` pixels of real gap to fall into (as little as 1px)
+        // has nowhere to land except on the neighbouring tile, darkening
+        // it by up to `SHADOW_MAX_ALPHA` - reported live as "some windows
+        // are dark tinted." Floating windows keep their shadow: they
+        // genuinely do sit above other windows, which is exactly where a
+        // shadow does its job, and it's also the one case `visible_border_
+        // fragments`' own occluder clipping already handles correctly.
         let shadows_enabled = self.wm.borrow().shadows_enabled;
-        if shadows_enabled && !w.maximized && !w.fullscreen {
+        if shadows_enabled && w.floating && !w.maximized && !w.fullscreen {
             // A decorated window's corners are *always* rounded (the
             // titlebar/border strips round to `corner_radius` regardless of
             // this setting - see their own call sites); an undecorated
