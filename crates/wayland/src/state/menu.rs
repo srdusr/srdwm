@@ -14,8 +14,20 @@ impl CompState {
             return;
         };
         let theme = self.wm.borrow().theme;
-        let items: Vec<(&str, bool)> = menu.items.iter().map(|&(label, _)| (label, false)).collect();
-        let data = decoration::render_context_menu(menu.width, menu.row_height, &items, theme.titlebar_bg, theme.titlebar_fg_focused, theme.titlebar_fg_unfocused, theme.default_border_color);
+        let rows: Vec<(&str, bool, u32, decoration::MenuRowKind)> = menu
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, &(label, action))| {
+                let kind = match action {
+                    crate::context_menu::MenuAction::Separator => decoration::MenuRowKind::Separator,
+                    crate::context_menu::MenuAction::Header => decoration::MenuRowKind::Header,
+                    _ => decoration::MenuRowKind::Item,
+                };
+                (label, false, menu.row_height_for(i), kind)
+            })
+            .collect();
+        let data = decoration::render_context_menu(menu.width, &rows, theme.titlebar_bg, theme.titlebar_fg_focused, theme.titlebar_fg_unfocused, theme.default_border_color);
         let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (menu.width as i32, menu.height()), 1, Transform::Normal, None);
         self.context_menu_buffer = Some(buffer);
         self.context_menu = Some(menu);
@@ -60,17 +72,54 @@ impl CompState {
             MenuAction::MoveToWorkspace(workspace) => {
                 self.wm.borrow_mut().move_window_to_workspace(window, workspace);
             }
+            MenuAction::CycleButtonStyle => {
+                let mut wm = self.wm.borrow_mut();
+                wm.theme.traffic_light_buttons = !wm.theme.traffic_light_buttons;
+                drop(wm);
+                self.redraw_every_decoration();
+            }
+            MenuAction::CycleButtonSide => {
+                let mut wm = self.wm.borrow_mut();
+                wm.theme.buttons_left = !wm.theme.buttons_left;
+                drop(wm);
+                self.redraw_every_decoration();
+            }
             MenuAction::Close => {
                 if let Some(w) = self.id_to_window.get(&window) {
                     crate::input::close_dwindow(w);
                 }
             }
             // Never actually reached: the click-dispatch site
-            // (`input/pointer.rs`) intercepts `Separator` before calling
-            // this function at all. Handled here too so this match stays
-            // exhaustive without a catch-all that would silently swallow a
-            // real future variant added without updating this function.
-            MenuAction::Separator => {}
+            // (`input/pointer.rs`) intercepts `Separator`/`Header` before
+            // calling this function at all. Handled here too so this
+            // match stays exhaustive without a catch-all that would
+            // silently swallow a real future variant added without
+            // updating this function.
+            MenuAction::Separator | MenuAction::Header => {}
+        }
+    }
+
+    /// Rebuilds every open window's titlebar/border bitmap against
+    /// whatever `wm.theme` currently holds - what `CycleButtonStyle`/
+    /// `CycleButtonSide` need to actually show their effect immediately.
+    ///
+    /// `srd set button_style`/`button_side` (`crates/platform/src/ipc/
+    /// dispatch.rs`) change the exact same `ThemeConfig` fields but are
+    /// deliberately scoped to "only affects windows created (or
+    /// redecorated) after this call" - that crate is backend-agnostic
+    /// and has no way to reach into a Wayland-specific redraw. A titlebar
+    /// menu action has no such excuse: it's *this* backend's own code,
+    /// already holding `&mut self`, and a "customize" action that doesn't
+    /// visibly change the very titlebar you clicked would be exactly the
+    /// kind of "doesn't make sense" this menu was reported for in the
+    /// first place. `redraw_decoration_buffer` already no-ops on any
+    /// window whose decoration signature didn't actually change, so
+    /// calling it for every window here costs nothing for the (common)
+    /// case where most of them don't use server-side decoration at all.
+    fn redraw_every_decoration(&mut self) {
+        let ids: Vec<WindowId> = self.wm.borrow().windows().map(|w| w.id).collect();
+        for id in ids {
+            self.redraw_decoration_buffer(id);
         }
     }
 

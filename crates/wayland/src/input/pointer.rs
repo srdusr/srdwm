@@ -514,14 +514,15 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
         if let Some(menu) = state.context_menu.take() {
             if let Some(row) = menu.row_at(pos.x as i32, pos.y as i32) {
                 let (_, action) = menu.items[row];
-                // A separator row occupies real space (`row_at` resolves a
-                // click on it same as any other) but isn't a real action --
-                // same "click does nothing, menu stays open" convention any
-                // native menu's own divider follows, rather than either
-                // running a no-op action or dismissing the whole menu on
-                // what was very possibly a slightly-off click at a real
-                // item just above/below it.
-                if matches!(action, crate::context_menu::MenuAction::Separator) {
+                // A separator or section-header row occupies real space
+                // (`row_at` resolves a click on it same as any other) but
+                // isn't a real action - same "click does nothing, menu
+                // stays open" convention any native menu's own divider/
+                // caption follows, rather than either running a no-op
+                // action or dismissing the whole menu on what was very
+                // possibly a slightly-off click at a real item just
+                // above/below it.
+                if !action.is_interactive() {
                     state.context_menu = Some(menu);
                     return;
                 }

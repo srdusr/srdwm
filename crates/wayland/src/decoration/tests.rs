@@ -790,18 +790,18 @@ fn border_bottom_extra_rows_are_transparent_outside_the_corners() {
 }
 
 #[test]
-fn context_menu_is_one_row_tall_per_item() {
-    let items = [("Minimize", false), ("Maximize", false), ("Always on Top", false), ("Close", false)];
-    let buf = render_context_menu(160, 28, &items, (0x2e, 0x34, 0x40), (0xff, 0xff, 0xff), (0x4c, 0x56, 0x6a), (0x10, 0x10, 0x10));
+fn context_menu_is_the_sum_of_each_rows_own_height() {
+    let items = [("Minimize", false, 28, MenuRowKind::Item), ("Maximize", false, 28, MenuRowKind::Item), ("Always on Top", false, 28, MenuRowKind::Item), ("Close", false, 28, MenuRowKind::Item)];
+    let buf = render_context_menu(160, &items, (0x2e, 0x34, 0x40), (0xff, 0xff, 0xff), (0x4c, 0x56, 0x6a), (0x10, 0x10, 0x10));
     assert_eq!(buf.len(), 160 * (28 * 4) * 4);
 }
 
 #[test]
 fn context_menu_highlighted_row_has_a_different_background_than_the_rest() {
-    let items = [("Minimize", false), ("Close", true)];
+    let items = [("Minimize", false, 28, MenuRowKind::Item), ("Close", true, 28, MenuRowKind::Item)];
     let bg = (0x2e, 0x34, 0x40);
     let highlight = (0x4c, 0x56, 0x6a);
-    let buf = render_context_menu(160, 28, &items, bg, (0xff, 0xff, 0xff), highlight, (0x10, 0x10, 0x10));
+    let buf = render_context_menu(160, &items, bg, (0xff, 0xff, 0xff), highlight, (0x10, 0x10, 0x10));
     let width = 160usize;
     // Sample a background pixel from each row, away from the text/border.
     let px_at = |x: usize, y: usize| -> [u8; 3] {
@@ -830,8 +830,8 @@ fn context_menu_panel_is_opaque_in_the_middle_but_rounded_at_the_corners() {
     // opaque - the opposite of what this test used to assert - while an
     // edge's midpoint (away from any corner's curve) and the panel's own
     // interior stay fully opaque either way.
-    let items = [("Close", false)];
-    let buf = render_context_menu(100, 28, &items, (0, 0, 0), (0xff, 0xff, 0xff), (0, 0, 0), (0x99, 0x99, 0x99));
+    let items = [("Close", false, 28, MenuRowKind::Item)];
+    let buf = render_context_menu(100, &items, (0, 0, 0), (0xff, 0xff, 0xff), (0, 0, 0), (0x99, 0x99, 0x99));
     let alpha_at = |x: usize, y: usize| buf[(y * 100 + x) * 4 + 3];
     assert_eq!(alpha_at(0, 0), 0, "the exact corner pixel is now outside the rounded curve, not a hard square");
     // 2px in from the flat top/bottom edges, at the midpoint (far enough
@@ -844,15 +844,18 @@ fn context_menu_panel_is_opaque_in_the_middle_but_rounded_at_the_corners() {
 }
 
 #[test]
-fn a_pure_separator_row_draws_a_narrow_line_not_a_full_text_row() {
-    // A label of only `\u{2500}` renders as a thin graphical line instead
-    // of text glyphs - see `render_context_menu`'s own doc comment for
-    // why (Unicode box-drawing glyphs render inconsistently at small
+fn a_separator_row_draws_a_narrow_line_not_a_full_text_row() {
+    // `MenuRowKind::Separator` renders as a thin graphical line regardless
+    // of its (empty) label - see `render_context_menu`'s own doc comment
+    // for why (Unicode box-drawing glyphs render inconsistently at small
     // sizes; a real line reads as an intentional divider). Scans every
     // pixel in the row (not one fixed column, which could accidentally
     // land in a font glyph's own hollow spot) - a hairline should touch
     // only a couple of the row's own pixel rows, nowhere near a real text
-    // row's spread (see the sibling test just below).
+    // row's spread (see the sibling test just below). Given its own much
+    // smaller `SEPARATOR_HEIGHT`-sized slot (9px here), not the item rows'
+    // 28px, so this also exercises variable row heights, not just the
+    // divider's own look.
     //
     // Three items, separator in the middle: `fill_rounded_rect`'s own
     // distance field softens alpha within `PANEL_RADIUS` of *any* of the
@@ -868,8 +871,9 @@ fn a_pure_separator_row_draws_a_narrow_line_not_a_full_text_row() {
     // so only the separator itself can account for a non-`bg` pixel here.
     let bg = (0x2e, 0x34, 0x40);
     let width = 160usize;
-    let items = [("Open", false), ("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", false), ("Close", false)];
-    let buf = render_context_menu(width as u32, 28, &items, bg, (0xff, 0xff, 0xff), (0x4c, 0x56, 0x6a), (0x10, 0x10, 0x10));
+    const SEPARATOR_HEIGHT: u32 = 9;
+    let items = [("Open", false, 28, MenuRowKind::Item), ("", false, SEPARATOR_HEIGHT, MenuRowKind::Separator), ("Close", false, 28, MenuRowKind::Item)];
+    let buf = render_context_menu(width as u32, &items, bg, (0xff, 0xff, 0xff), (0x4c, 0x56, 0x6a), (0x10, 0x10, 0x10));
     let px_at = |x: usize, y: usize| -> [u8; 3] {
         let i = (y * width + x) * 4;
         [buf[i + 2], buf[i + 1], buf[i]]
@@ -878,31 +882,43 @@ fn a_pure_separator_row_draws_a_narrow_line_not_a_full_text_row() {
     let safe_x = (PANEL_RADIUS + 2)..(width - PANEL_RADIUS - 2);
     let row_has_any_non_bg = |y: usize| safe_x.clone().any(|x| px_at(x, y) != [bg.0, bg.1, bg.2]);
     let separator_row_top = 28;
-    let non_bg_rows = (separator_row_top..separator_row_top + 28).filter(|&y| row_has_any_non_bg(y)).count();
+    let non_bg_rows = (separator_row_top..separator_row_top + SEPARATOR_HEIGHT as usize).filter(|&y| row_has_any_non_bg(y)).count();
     assert!(non_bg_rows <= 3, "a hairline separator should touch only a couple of the row's pixel rows, got {non_bg_rows}");
     assert!(non_bg_rows >= 1, "the separator must actually draw something, not vanish entirely");
 }
 
 #[test]
-fn a_labeled_section_header_separator_still_renders_as_text() {
-    // `"─── Move to Workspace ───"` deliberately mixes the divider
-    // character with real text (`core::ContextMenu`'s own section-header
-    // convention) - it must keep rendering as text, not collapse into a
-    // plain hairline just because it contains `\u{2500}` characters too.
-    // Same whole-row scan and same "sandwich away from the panel's own
-    // rounded-edge antialiasing" shape as the sibling test above.
+fn a_header_row_renders_dimmed_text_not_a_divider_and_ignores_highlight() {
+    // `MenuRowKind::Header` replaced an earlier hack that faked a section
+    // caption by embedding box-drawing characters directly in an ordinary
+    // item's label (`"─── Move to Workspace ───"`) - indistinguishable
+    // from a real, clickable row except for the dashes, and reported live
+    // as looking exactly like that: a menu item that does nothing. A real
+    // header row must still render as text (not collapse into a hairline
+    // the way `Separator` does), and must never show a hover highlight
+    // even if the caller passes `highlighted: true` for it by mistake --
+    // a section caption isn't a target, so nothing should ever suggest it
+    // is one.
     let bg = (0x2e, 0x34, 0x40);
     let width = 200usize;
-    let items = [("Open", false), ("\u{2500}\u{2500}\u{2500} Move to Workspace \u{2500}\u{2500}\u{2500}", false), ("Close", false)];
-    let buf = render_context_menu(width as u32, 28, &items, bg, (0xff, 0xff, 0xff), (0x4c, 0x56, 0x6a), (0x10, 0x10, 0x10));
+    const HEADER_HEIGHT: u32 = 22;
+    let items = [("Open", false, 28, MenuRowKind::Item), ("Move to Workspace", true, HEADER_HEIGHT, MenuRowKind::Header), ("Close", false, 28, MenuRowKind::Item)];
+    let buf = render_context_menu(width as u32, &items, bg, (0xff, 0xff, 0xff), (0x4c, 0x56, 0x6a), (0x10, 0x10, 0x10));
     let px_at = |x: usize, y: usize| -> [u8; 3] {
         let i = (y * width + x) * 4;
         [buf[i + 2], buf[i + 1], buf[i]]
     };
     let row_has_any_non_bg = |y: usize| (0..width).any(|x| px_at(x, y) != [bg.0, bg.1, bg.2]);
     let header_row_top = 28;
-    let non_bg_rows = (header_row_top..header_row_top + 28).filter(|&y| row_has_any_non_bg(y)).count();
-    assert!(non_bg_rows > 3, "a text row (mixed divider+caption) should paint well more than a hairline's worth of rows, got {non_bg_rows}");
+    let non_bg_rows = (header_row_top..header_row_top + HEADER_HEIGHT as usize).filter(|&y| row_has_any_non_bg(y)).count();
+    assert!(non_bg_rows > 3, "a header's own caption text should paint well more than a hairline's worth of rows, got {non_bg_rows}");
+    // No highlight fill anywhere in the header's own row band, even though
+    // `highlighted: true` was passed for it above - a flat highlight fill
+    // would show up as a large, uniform block of `highlight_bg`-tinted
+    // pixels well away from the text glyphs themselves; sampling a point
+    // near the row's own right edge (past where "Move to Workspace" 's
+    // text reaches) catches that without depending on exact glyph shapes.
+    assert_eq!(px_at(width - 10, header_row_top + 10), [bg.0, bg.1, bg.2], "a header row must never show the hover highlight fill");
 }
 
 #[test]

@@ -89,7 +89,7 @@ impl X11Platform {
                         (menu.row_at(x, y).map(|r| menu.items[r].1), menu.window)
                     };
                     match row_action {
-                        Some(srdwm_core::context_menu::MenuAction::Separator) => {}
+                        Some(action) if !action.is_interactive() => {}
                         Some(action) => {
                             self.close_context_menu()?;
                             self.run_context_menu_action(menu_window, action)?;

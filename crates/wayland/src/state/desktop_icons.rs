@@ -593,8 +593,22 @@ impl CompState {
 
     fn build_desktop_menu_buffer(&mut self, menu: DesktopMenu) {
         let theme = self.wm.borrow().theme;
-        let items: Vec<(&str, bool)> = menu.items.iter().map(|&(label, _)| (label, false)).collect();
-        let data = decoration::render_context_menu(menu.width, menu.row_height, &items, theme.titlebar_bg, theme.titlebar_fg_focused, theme.titlebar_fg_unfocused, theme.default_border_color);
+        // Not redesigned the way the titlebar menu was (`srdwm_core::
+        // context_menu`'s own module doc comment) - this menu's rows are
+        // still all one uniform height, `Separator` included, matching
+        // its behaviour before `render_context_menu` grew a per-row
+        // height/kind. Every row here is real content or `DesktopMenuAction
+        // ::Separator`, never a non-interactive caption, so there is no
+        // `MenuRowKind::Header` case to map to.
+        let rows: Vec<(&str, bool, u32, decoration::MenuRowKind)> = menu
+            .items
+            .iter()
+            .map(|(label, action)| {
+                let kind = if matches!(action, crate::desktop_menu::DesktopMenuAction::Separator) { decoration::MenuRowKind::Separator } else { decoration::MenuRowKind::Item };
+                (*label, false, menu.row_height, kind)
+            })
+            .collect();
+        let data = decoration::render_context_menu(menu.width, &rows, theme.titlebar_bg, theme.titlebar_fg_focused, theme.titlebar_fg_unfocused, theme.default_border_color);
         let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (menu.width as i32, menu.height()), 1, Transform::Normal, None);
         self.desktop_menu_buffer = Some(buffer);
         self.desktop_menu = Some(menu);

@@ -80,7 +80,7 @@ impl X11Platform {
     pub(super) fn redraw_context_menu(&mut self) -> PlatformResult<()> {
         let Some((menu, popup)) = &self.context_menu else { return Ok(()) };
         let popup = *popup;
-        let (width, row_height, total_height) = (menu.width, menu.row_height, menu.height());
+        let (width, total_height) = (menu.width, menu.height());
         let theme = self.wm.borrow().theme;
         let bg = rgb_to_pixel(theme.titlebar_bg);
         let fg = rgb_to_pixel(theme.titlebar_fg_focused);
@@ -89,14 +89,27 @@ impl X11Platform {
         self.conn.poly_fill_rectangle(popup, self.gc, &[Rectangle { x: 0, y: 0, width: width as u16, height: total_height as u16 }]).map_err(err)?;
         self.conn.change_gc(self.gc, &ChangeGCAux::new().foreground(fg).font(self.font)).map_err(err)?;
 
+        // Per-row heights, not a uniform `row_height * i` - a `Separator`/
+        // `Header` row is shorter than a real item (`ContextMenu::row_
+        // height_for`), same variable-height model the Wayland backend's
+        // own `render_context_menu` now uses; `menu.row_y(i)` is exactly
+        // how that side computes each row's own top too, so the two
+        // backends can't drift onto different geometry for the same menu
+        // data. No dimmed-text treatment for a `Header` row here (this
+        // backend draws everything through one single-colour `GC`, no
+        // per-pixel blending the way the Wayland renderer's own `mix_rgb`
+        // has) - feature parity (non-interactive, correctly sized) over
+        // pixel parity, matching this backend's existing bar elsewhere.
         for (i, (label, action)) in menu.items.iter().enumerate() {
-            let row_y = i as i32 * row_height as i32;
+            let row_y = menu.row_y(i);
+            let row_height = menu.row_height_for(i) as i32;
             if matches!(action, MenuAction::Separator) {
-                let mid = row_y + row_height as i32 / 2;
+                let mid = row_y + row_height / 2;
                 self.conn.poly_line(CoordMode::ORIGIN, popup, self.gc, &[Point { x: 8, y: mid as i16 }, Point { x: width as i16 - 8, y: mid as i16 }]).map_err(err)?;
                 continue;
             }
-            self.conn.image_text8(popup, self.gc, 10, (row_y + 20) as i16, label.as_bytes()).map_err(err)?;
+            let baseline = row_y + row_height * 3 / 4;
+            self.conn.image_text8(popup, self.gc, 10, baseline as i16, label.as_bytes()).map_err(err)?;
         }
         self.conn.flush().map_err(err)?;
         Ok(())
@@ -144,8 +157,28 @@ impl X11Platform {
             MenuAction::MoveToWorkspace(workspace) => {
                 self.wm.borrow_mut().move_window_to_workspace(window, workspace);
             }
+            // Same reasoning as the Wayland backend's own `redraw_every_
+            // decoration` (`crates/wayland/src/state/menu.rs`): `srd set
+            // button_style`/`button_side` are deliberately scoped to
+            // "takes effect on windows created after this call" because
+            // `crates/platform` is backend-agnostic and has no redraw hook
+            // to call - this menu action runs as this backend's own
+            // code, already holding `&mut self`, so it can and should
+            // repaint every open titlebar immediately instead.
+            MenuAction::CycleButtonStyle => {
+                let mut wm = self.wm.borrow_mut();
+                wm.theme.traffic_light_buttons = !wm.theme.traffic_light_buttons;
+                drop(wm);
+                self.redraw_all_decorations()?;
+            }
+            MenuAction::CycleButtonSide => {
+                let mut wm = self.wm.borrow_mut();
+                wm.theme.buttons_left = !wm.theme.buttons_left;
+                drop(wm);
+                self.redraw_all_decorations()?;
+            }
             MenuAction::Close => self.request_close(window)?,
-            MenuAction::Separator => {}
+            MenuAction::Separator | MenuAction::Header => {}
         }
         self.conn.flush().map_err(err)?;
         Ok(())

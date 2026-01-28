@@ -35,7 +35,7 @@ impl X11Platform {
         Ok(())
     }
 
-    fn redraw_all_decorations(&mut self) -> PlatformResult<()> {
+    pub(super) fn redraw_all_decorations(&mut self) -> PlatformResult<()> {
         let focused = self.wm.borrow().focused_id();
         let ids: Vec<WindowId> = self.frames.keys().copied().collect();
         for id in ids {

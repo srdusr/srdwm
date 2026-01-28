@@ -87,20 +87,61 @@ pub(crate) const CORNER_RADIUS: u32 = 12;
 /// Still no submenus/icons - real gaps beyond this pass' own scope, not
 /// attempted blind.
 ///
-/// A row whose label is *entirely* the box-drawing character `─`
-/// (`\u{2500}`, one or more, no other content) renders as a real thin
-/// divider line instead of text glyphs - a label that *mixes* `─` with
-/// real text (`"─── Move to Workspace ───"`, a deliberate section-header
-/// convention `core::ContextMenu` already uses) is untouched and still
-/// renders as text, since that dual purpose (divider *and* caption) is
-/// the actual design, not a plain separator. A pure divider is drawn as
-/// pixels rather than characters because Unicode box-drawing glyphs
-/// render inconsistently thin/dotted across fonts at small sizes - a
-/// real 1px anti-aliased line, inset from both edges and blended low-
-/// opacity against the panel (matching the AGS reference dropdown's own
-/// `separator.menu-sep`: `color-mix(in srgb, var(--fg) 12%, transparent)`),
-/// reads as an intentional divider rather than a run of stray dashes.
-pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], bg: (u8, u8, u8), fg: (u8, u8, u8), highlight_bg: (u8, u8, u8), border: (u8, u8, u8)) -> Vec<u8> {
+/// A row's shape, alongside its own label/height - `render_context_menu`
+/// used to detect a divider by checking whether a label was made entirely
+/// of the box-drawing character `─`, and had no representation for a
+/// section-header row at all (`"─── Move to Workspace ───"` rendered, and
+/// behaved, as an ordinary clickable-looking item that merely did
+/// nothing). Reported live as looking wrong on both counts - a real,
+/// distinct row kind is what `srdwm_core::context_menu::MenuAction`'s own
+/// `Separator`/`Header` variants exist for; this mirrors that split here
+/// without this crate needing to depend on that enum itself.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MenuRowKind {
+    Item,
+    /// A thin divider line, no label.
+    Separator,
+    /// A non-interactive section caption - dimmer, smaller text, never
+    /// highlighted.
+    Header,
+}
+
+/// Rounded floating panel with a per-row rounded hover highlight, matching
+/// the reference this project's own AGS panel already settled on for its
+/// global-menu dropdown (`widget/Bar/components/GlobalMenu/style.scss`'s
+/// `popover box.menu-list`): flat rows with no border/outline at rest, a
+/// soft tinted fill (not a frame) on the highlighted one, inset padding so
+/// rows don't touch the panel's own edge, real gaps between rows. Reported
+/// live as looking "squished, no spacing/padding/margining, not at all
+/// polished" - the previous version drew edge-to-edge square rows with a
+/// single hard 1px border around the whole menu, exactly what that
+/// complaint (raised about the AGS dropdown, fixed there first) describes.
+/// Still no submenus/icons - real gaps beyond this pass' own scope, not
+/// attempted blind.
+///
+/// `rows` carries each row's own height alongside its label/kind - a
+/// [`MenuRowKind::Separator`]/[`MenuRowKind::Header`] row is much shorter
+/// than a real item (see `srdwm_core::context_menu`'s own `SEPARATOR_
+/// HEIGHT`/`HEADER_HEIGHT`), reported live as looking wrong when every
+/// row, divider included, took the same full item height: a hairline
+/// sitting in the middle of a mostly-empty 32px slot. The caller is what
+/// actually knows each row's real height (`ContextMenu::row_height_for`);
+/// this function just draws whatever it's told, at the offsets implied by
+/// summing those heights in order - the same summing `ContextMenu::row_
+/// at`/`row_y` do, so a click and a pixel can never disagree about where a
+/// row actually is.
+///
+/// A [`MenuRowKind::Separator`] is drawn as a real 1px anti-aliased line,
+/// inset from both edges and blended low-opacity against the panel
+/// (matching the AGS reference dropdown's own `separator.menu-sep`:
+/// `color-mix(in srgb, var(--fg) 12%, transparent)`) - pixels, not
+/// Unicode box-drawing characters, which render inconsistently thin/
+/// dotted across fonts at small sizes. A [`MenuRowKind::Header`] draws its
+/// label dimmed (the same mix ratio a separator's own line uses) and
+/// never highlighted, regardless of what the caller passes for that row's
+/// `highlighted` field - section captions aren't clickable, so nothing
+/// should ever visually suggest they are.
+pub fn render_context_menu(width: u32, rows: &[(&str, bool, u32, MenuRowKind)], bg: (u8, u8, u8), fg: (u8, u8, u8), highlight_bg: (u8, u8, u8), border: (u8, u8, u8)) -> Vec<u8> {
     let _ = border; // No outline anywhere now - see this function's own doc comment. Kept as a parameter so callers/themes don't need updating for a look this function no longer draws.
     const PANEL_RADIUS: f32 = 10.0;
     const ROW_INSET: i32 = 4;
@@ -114,17 +155,13 @@ pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], 
     // accent to tint toward", not "the literal pixel colour".
     const HIGHLIGHT_MIX: f32 = 0.22;
     // Matches the reference's own `separator.menu-sep` background --
-    // barely-there, a hairline rather than a visible bar.
-    const SEPARATOR_MIX: f32 = 0.12;
+    // barely-there, a hairline rather than a visible bar. Reused as the
+    // header caption's own dim ratio - both exist to read as "present,
+    // but deliberately not the main content" against the same panel.
+    const DIM_MIX: f32 = 0.12;
 
-    let (width, row_height) = (width.max(1) as usize, row_height.max(1) as usize);
-    // Exactly `row_height * items.len()`, same as before this pass --
-    // `ContextMenu`/`DesktopMenu`'s own `height()` and `row_at()` (which
-    // this function has no access to and mustn't get out of sync with)
-    // assume row `i` starts at `i * row_height` with no extra top/bottom
-    // inset, so all of this rework happens *inside* that unchanged canvas
-    // rather than by growing it.
-    let height = (row_height * items.len().max(1)).max(1);
+    let width = width.max(1) as usize;
+    let height = rows.iter().map(|(_, _, h, _)| *h).sum::<u32>().max(1) as usize;
     let mut buf = vec![0u8; width * height * 4];
 
     // The panel itself: one flat rounded-rect fill on an otherwise fully
@@ -133,15 +170,19 @@ pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], 
     fill_rounded_rect(&mut buf, width, height, 0, 0, width as i32, height as i32, PANEL_RADIUS, bg, bg);
 
     let highlight_fill = mix_rgb(bg, highlight_bg, HIGHLIGHT_MIX);
-    let separator_color = mix_rgb(bg, fg, SEPARATOR_MIX);
+    let dim_color = mix_rgb(bg, fg, DIM_MIX);
     let font = find_system_font();
-    for (i, (label, highlighted)) in items.iter().enumerate() {
-        let row_top = (i * row_height) as i32;
-        if !label.is_empty() && label.chars().all(|c| c == '\u{2500}') {
-            let y = row_top + row_height as i32 / 2;
-            fill_rounded_rect_over(&mut buf, width, height, ROW_INSET * 2, y, width as i32 - ROW_INSET * 2, y + 1, 0.0, separator_color);
+    let mut row_top: i32 = 0;
+    for (label, highlighted, row_height, kind) in rows.iter().copied() {
+        let row_height = row_height as i32;
+        if kind == MenuRowKind::Separator {
+            let y = row_top + row_height / 2;
+            fill_rounded_rect_over(&mut buf, width, height, ROW_INSET * 2, y, width as i32 - ROW_INSET * 2, y + 1, 0.0, dim_color);
+            row_top += row_height;
             continue;
         }
+        let highlighted = highlighted && kind != MenuRowKind::Header;
+        let label_color = if kind == MenuRowKind::Header { dim_color } else { fg };
         // The background text actually sits on, for `blit_glyph`'s own
         // blend-toward-a-known-solid-colour contract - the row's own
         // highlight fill (already baked into `buf` by this point, above)
@@ -153,9 +194,9 @@ pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], 
         // comment) - used correctly, it would leave a visible dark
         // fringe around every character's anti-aliased edge instead of a
         // clean blend into the row's real colour.
-        let row_bg = if *highlighted { highlight_fill } else { bg };
-        if *highlighted {
-            fill_rounded_rect_over(&mut buf, width, height, ROW_INSET, row_top, width as i32 - ROW_INSET, row_top + row_height as i32, ROW_RADIUS, highlight_fill);
+        let row_bg = if highlighted { highlight_fill } else { bg };
+        if highlighted {
+            fill_rounded_rect_over(&mut buf, width, height, ROW_INSET, row_top, width as i32 - ROW_INSET, row_top + row_height, ROW_RADIUS, highlight_fill);
         }
         if let Some(font) = &font {
             let baseline = row_top as f32 + row_height as f32 * 0.72;
@@ -168,7 +209,7 @@ pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], 
                 if metrics.width > 0 && metrics.height > 0 {
                     let glyph_x = pen_x + metrics.xmin as f32;
                     let glyph_y = baseline - metrics.height as f32 - metrics.ymin as f32;
-                    blit_glyph(&mut buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, row_bg, fg);
+                    blit_glyph(&mut buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, row_bg, label_color);
                 }
                 pen_x += metrics.advance_width;
                 if pen_x as usize >= width {
@@ -176,6 +217,7 @@ pub fn render_context_menu(width: u32, row_height: u32, items: &[(&str, bool)], 
                 }
             }
         }
+        row_top += row_height;
     }
     buf
 }
