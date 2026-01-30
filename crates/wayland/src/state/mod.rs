@@ -114,15 +114,18 @@ pub(crate) struct DecorationSignature {
     pub(crate) maximized: bool,
     pub(crate) fullscreen: bool,
     pub(crate) shadows_enabled: bool,
-    /// A tiled window gets no shadow at all (see `redraw_decoration_
-    /// buffer`'s own gate) - included here for the same "one signature,
-    /// every real input" reason as `maximized`/`fullscreen` just above:
-    /// toggling floating on its own (`srd.window.toggle_floating()`,
-    /// switching layouts) changes nothing else this signature already
-    /// tracks, so without this the cache would keep serving whichever
-    /// shadow state happened to be cached until some unrelated field
-    /// (a resize, a focus change) forced a rebuild anyway.
-    pub(crate) floating: bool,
+    /// A window actually occupying a tiled slot right now (its workspace
+    /// is running the `"tiling"` layout, and it hasn't opted out via
+    /// `Window::floating`) gets no shadow at all - see `redraw_
+    /// decoration_buffer`'s own gate. Deliberately *not* just `Window::
+    /// floating` on its own: a workspace's layout name changing (`Super+
+    /// Shift+t`/`s`) affects every window on it without touching any of
+    /// their own `floating` fields, and toggling `floating` alone
+    /// (`srd.window.toggle_floating()`) changes nothing else this
+    /// signature already tracks - without this field, either change
+    /// would leave the cache serving whichever shadow state it last
+    /// computed until some unrelated field forced a rebuild anyway.
+    pub(crate) currently_tiled: bool,
     /// Which of *this* window's own titlebar buttons (if any) is currently
     /// hovered, and the glyph-reveal animation's current progress (0..=255)
     /// - see `CompState::hovered_titlebar_button`'s own doc comment.

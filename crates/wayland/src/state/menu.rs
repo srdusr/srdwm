@@ -7,12 +7,28 @@ impl CompState {
     /// and caches the rasterised buffer once here rather than per frame --
     /// same reasoning as `redraw_decoration_buffer`.
     pub(crate) fn open_context_menu(&mut self, window: WindowId, pos: (i32, i32)) {
-        let Some(menu) = ({
+        let Some(mut menu) = ({
             let wm = self.wm.borrow();
             crate::context_menu::ContextMenu::open(&wm, window, pos)
         }) else {
             return;
         };
+        // `ContextMenu::width` is a backend-agnostic placeholder - `core`
+        // has no font of its own to measure real text against, so it can
+        // only ever pick a fixed guess. Widened here to whatever this
+        // menu's own widest real label actually needs, or reported live
+        // as "text goes out of view": the old fixed width comfortably fit
+        // every label back when this menu only listed short ones
+        // ("Minimize", "Close"), but a longer one added since ("Button
+        // Style: Traffic Lights", or a user-configurable workspace name)
+        // just ran past the panel's own right edge, silently cut off
+        // mid-character by `render_context_menu`'s own overflow guard.
+        // Only ever grows the width, never shrinks it below the built-in
+        // minimum `ContextMenu::open` already picked.
+        let font = decoration::find_system_font();
+        let widest_label = menu.items.iter().map(|&(label, _)| decoration::measure_text_width(&font, label, decoration::FONT_PIXELS)).fold(0.0_f32, f32::max);
+        let content_width = (widest_label + decoration::TEXT_LEFT_PADDING * 2.0).ceil() as u32;
+        menu.width = menu.width.max(content_width);
         let theme = self.wm.borrow().theme;
         let rows: Vec<(&str, bool, u32, decoration::MenuRowKind)> = menu
             .items

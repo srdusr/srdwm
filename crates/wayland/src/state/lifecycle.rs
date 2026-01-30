@@ -145,6 +145,17 @@ impl CompState {
         // nothing this function reads has actually changed since the last
         // call turns those redundant calls into a cheap signature
         // comparison instead of a full re-rasterization.
+        // Whether this window is *actually* occupying a tiled slot right
+        // now - see the shadow gate further down for the full reasoning.
+        // Computed once, here, and reused there rather than recomputed:
+        // it depends on the workspace's own layout name, not just this
+        // window's own `floating` flag, so it has to be part of the
+        // signature too - switching a workspace's layout (`Super+Shift+
+        // t`/`s`) changes this for every window on it without touching
+        // any of their own `floating` fields, and a signature that didn't
+        // track it would keep serving whichever shadow state was cached
+        // before the switch.
+        let currently_tiled = self.wm.borrow().workspace(w.workspace).is_some_and(|ws| ws.layout == "tiling") && !w.floating;
         let signature = DecorationSignature {
             width: frame.width,
             height: frame.height,
@@ -157,7 +168,7 @@ impl CompState {
             maximized: w.maximized,
             fullscreen: w.fullscreen,
             shadows_enabled: self.wm.borrow().shadows_enabled,
-            floating: w.floating,
+            currently_tiled,
             hovered_button,
             title_centered: theme.title_centered,
             buttons_left: theme.buttons_left,
@@ -252,20 +263,36 @@ impl CompState {
         // Hyprland/GNOME convention `MISSING.md` measures this compositor
         // against.
         //
-        // No shadow for a TILED window either - a real, reported bug, not
-        // a style choice made up front: a drop shadow exists to separate a
-        // window from whatever is visually *behind* it, but tiled windows
-        // are coplanar and adjacent by construction, with nothing behind
-        // them to separate from. `SHADOW_SIZE` pixels of shadow with only
+        // No shadow for a window that is *actually being tiled right now*
+        // - a real, reported bug, not a style choice made up front: a
+        // drop shadow exists to separate a window from whatever is
+        // visually *behind* it, but a tiled window is coplanar and
+        // adjacent to its neighbours by construction, with nothing behind
+        // it to separate from. `SHADOW_SIZE` pixels of shadow with only
         // `gap_inner` pixels of real gap to fall into (as little as 1px)
         // has nowhere to land except on the neighbouring tile, darkening
         // it by up to `SHADOW_MAX_ALPHA` - reported live as "some windows
-        // are dark tinted." Floating windows keep their shadow: they
-        // genuinely do sit above other windows, which is exactly where a
-        // shadow does its job, and it's also the one case `visible_border_
-        // fragments`' own occluder clipping already handles correctly.
+        // are dark tinted."
+        //
+        // Gating this on `w.floating` alone (the first version of this
+        // fix) was a real regression, caught live: `arrange_workspace`
+        // only reads `floating` under the `"tiling"` layout, so every
+        // window on this project's own default `"dynamic"` layout starts
+        // - and stays - `floating: false` unless something explicitly
+        // flips it. That first version read `floating: false` as "this
+        // window is tiled, no shadow" regardless of which layout was
+        // actually running, so *every* window under dynamic/floating mode
+        // silently lost its shadow, recoverable only by toggling `Super+S`
+        // (`srd.window.toggle_floating()`) - which then looked like that
+        // key toggles a "tint", not floating, since floating itself does
+        // nothing visible under a layout that never tiles anyone. `Window::
+        // floating` only ever means "opted out of tiling" *within* a
+        // workspace that tiles at all - checking the workspace's own
+        // layout name first is what this needed instead: a window is only
+        // "currently tiled" when both are true. `currently_tiled` itself
+        // was already computed above, alongside the signature.
         let shadows_enabled = self.wm.borrow().shadows_enabled;
-        if shadows_enabled && w.floating && !w.maximized && !w.fullscreen {
+        if shadows_enabled && !currently_tiled && !w.maximized && !w.fullscreen {
             // A decorated window's corners are *always* rounded (the
             // titlebar/border strips round to `corner_radius` regardless of
             // this setting - see their own call sites); an undecorated

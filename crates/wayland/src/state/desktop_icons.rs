@@ -591,8 +591,17 @@ impl CompState {
         self.build_desktop_menu_buffer(menu);
     }
 
-    fn build_desktop_menu_buffer(&mut self, menu: DesktopMenu) {
+    fn build_desktop_menu_buffer(&mut self, mut menu: DesktopMenu) {
         let theme = self.wm.borrow().theme;
+        // Same fixed-width-guess bug the titlebar menu was reported for
+        // ("text goes out of view") - "Open in File Manager"/"New Text
+        // Document" both run past a fixed 170px guess. Widened to this
+        // menu's own widest real label, same measurement `open_context_
+        // menu` (`state/menu.rs`) uses.
+        let font = decoration::find_system_font();
+        let widest_label = menu.items.iter().map(|(label, _)| decoration::measure_text_width(&font, label, decoration::FONT_PIXELS)).fold(0.0_f32, f32::max);
+        let content_width = (widest_label + decoration::TEXT_LEFT_PADDING * 2.0).ceil() as u32;
+        menu.width = menu.width.max(content_width);
         // Not redesigned the way the titlebar menu was (`srdwm_core::
         // context_menu`'s own module doc comment) - this menu's rows are
         // still all one uniform height, `Separator` included, matching

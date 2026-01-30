@@ -19,6 +19,18 @@ pub(crate) fn find_system_font() -> Option<Font> {
     FONT.get_or_init(load_any_monospace_font).clone()
 }
 
+/// The real rendered pixel width of `text` at `size`, in this font - the
+/// same two-pass "sum every glyph's own advance width" measurement `render_
+/// header_box`'s `draw_centered` already does inline, pulled out here so a
+/// caller that needs to *size a box* around text (not just draw it) has one
+/// place to ask, rather than repeating the sum. Returns `0.0` with no
+/// system font found, matching every other text-rendering path's own
+/// "solid colour only, no text at all" fallback in that case.
+pub(crate) fn measure_text_width(font: &Option<Font>, text: &str, size: f32) -> f32 {
+    let Some(font) = font else { return 0.0 };
+    text.chars().filter(|c| !c.is_control()).map(|ch| font.rasterize(ch, size).0.advance_width).sum()
+}
+
 fn load_any_monospace_font() -> Option<Font> {
     let roots = ["/usr/share/fonts", "/usr/local/share/fonts"];
     let mut home_roots = Vec::new();

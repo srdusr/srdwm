@@ -42,7 +42,7 @@ pub(crate) use border::{border_bottom_visible_rows, border_top_visible_rows};
 pub(crate) use buttons::HOVER_GLYPH_DURATION;
 pub(crate) use color::{mix_rgb, rgb_to_bgra};
 pub(crate) use corners::{round_bottom_corners, round_top_corners};
-pub(crate) use font::{blit_glyph, find_system_font, FONT_PIXELS, TEXT_LEFT_PADDING};
+pub(crate) use font::{blit_glyph, find_system_font, measure_text_width, FONT_PIXELS, TEXT_LEFT_PADDING};
 pub use shadow::{shadow_bitmap, shadow_rect};
 pub(crate) use shadow::{SHADOW_MAX_ALPHA, SHADOW_SIZE};
 pub use titlebar::render_titlebar;
