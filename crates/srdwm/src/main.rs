@@ -166,6 +166,7 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     let animations = engine.get_bool("general.animations", true);
     let duration = engine.get_f64("general.animation_duration", 200.0).max(0.0) as u32;
     let shadows = engine.get_bool("general.shadows", true);
+    let close_focus_follows_workspace = engine.get_bool("general.close_focus_follows_workspace", false);
     let resize_margin = engine.get_f64("general.resize_margin", srdwm_core::RESIZE_MARGIN as f64).max(1.0) as i32;
     // Genuinely absent, not `false`, when the user's config never sets it
     // - see `WindowManager::rounded_corners_enabled`'s doc comment for why
@@ -310,6 +311,7 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     wm.animations_enabled = animations;
     wm.animation_duration_ms = duration;
     wm.shadows_enabled = shadows;
+    wm.close_focus_follows_workspace = close_focus_follows_workspace;
     wm.resize_margin = resize_margin;
     wm.rounded_corners_enabled = rounded_corners;
     wm.gpu_enabled = gpu;

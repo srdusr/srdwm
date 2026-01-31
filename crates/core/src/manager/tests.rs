@@ -11,6 +11,72 @@
     }
 
     #[test]
+    fn closing_the_focused_window_prefers_a_same_workspace_fallback_over_a_more_recent_global_one() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a")); // workspace 1
+
+        let ws2 = wm.add_workspace("2", "dynamic");
+        wm.switch_workspace(ws2);
+        let c = wm.alloc_window_id();
+        wm.add_window(Window::new(c, "c")); // workspace 2, now globally most-recent
+
+        wm.switch_workspace(1);
+        let b = wm.alloc_window_id();
+        wm.add_window(Window::new(b, "b")); // workspace 1, now focused and globally most-recent
+
+        assert_eq!(wm.current_workspace(), 1);
+        wm.remove_window(b);
+        // The naive "global most recent" fallback would have landed on `c`
+        // (workspace 2) here - `a`, still on the workspace the user is
+        // actually looking at, is what a real desktop would land on.
+        assert_eq!(wm.focused_id(), Some(a));
+        assert_eq!(wm.current_workspace(), 1, "must not have been dragged onto workspace 2 by the fallback");
+    }
+
+    #[test]
+    fn closing_the_last_window_on_a_workspace_leaves_focus_none_by_default() {
+        let mut wm = wm_with_monitor();
+        assert!(!wm.close_focus_follows_workspace, "default must be off, matching every mainstream desktop");
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a")); // workspace 1
+
+        let ws2 = wm.add_workspace("2", "dynamic");
+        wm.switch_workspace(ws2);
+        let c = wm.alloc_window_id();
+        wm.add_window(Window::new(c, "c")); // workspace 2
+
+        wm.switch_workspace(1);
+        wm.focus_window(a); // re-focus `a`; current_workspace stays 1 (already there)
+        assert_eq!(wm.current_workspace(), 1);
+
+        wm.remove_window(a);
+        // No window left on workspace 1 at all - with the setting off,
+        // this must not silently jump the user over to `c` on workspace 2.
+        assert_eq!(wm.focused_id(), None);
+        assert_eq!(wm.current_workspace(), 1);
+    }
+
+    #[test]
+    fn closing_the_last_window_on_a_workspace_can_still_follow_when_opted_in() {
+        let mut wm = wm_with_monitor();
+        wm.close_focus_follows_workspace = true;
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a")); // workspace 1
+
+        let ws2 = wm.add_workspace("2", "dynamic");
+        wm.switch_workspace(ws2);
+        let c = wm.alloc_window_id();
+        wm.add_window(Window::new(c, "c")); // workspace 2
+
+        wm.switch_workspace(1);
+        wm.focus_window(a);
+        wm.remove_window(a);
+        // Opted in: the old always-follow-the-global-fallback behaviour.
+        assert_eq!(wm.focused_id(), Some(c));
+    }
+
+    #[test]
     fn new_window_on_dynamic_workspace_uses_smart_placement() {
         let mut wm = wm_with_monitor();
         let id = wm.alloc_window_id();

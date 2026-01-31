@@ -158,6 +158,7 @@ pub(crate) struct PinnedInputsResponse {
 #[derive(Serialize)]
 pub(crate) struct SettingsResponse {
     pub(crate) shadows: bool,
+    pub(crate) close_focus_follows_workspace: bool,
     pub(crate) rounded_corners: Option<bool>,
     pub(crate) animations: bool,
     pub(crate) night_light: bool,

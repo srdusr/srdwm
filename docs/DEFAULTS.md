@@ -27,7 +27,18 @@ srd.set("general.file_manager", "")                    -- Default: "" - empty me
 srd.set("general.desktop_icon_single_click", false)    -- Default: false - double-click opens an icon
 srd.set("general.terminal", "")                        -- Default: "" - empty tries a common terminal on $PATH
 srd.set("general.phone_mode", false)                   -- Default: false - see "Phone mode" below
+srd.set("general.close_focus_follows_workspace", false) - Default: false - see below
 ```
+
+`close_focus_follows_workspace` decides what happens when your currently
+focused window closes and no other window is left on the workspace you're
+looking at. `false` (the default) leaves you with nothing focused on your
+own workspace - it never switches you elsewhere, matching Windows/GNOME/
+macOS, none of which change your active workspace just because a window
+closed. `true` restores the alternate behaviour: falling back to whichever
+window was focused most recently anywhere, switching your active workspace
+to follow it there (matching Hyprland's own `focuswindow`-driven
+convention). Live-settable: `srd set close_focus_follows_workspace <bool>`.
 `general.smart_placement`/`general.border_width` are not listed: neither
 is implemented - new-window placement always uses smart placement
 unconditionally (no toggle exists), and the real, working border-width

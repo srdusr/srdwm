@@ -53,6 +53,18 @@ pub(crate) fn close_dwindow(w: &DWindow) {
 /// Wayland/X11 keyboard focus - without this, a window can be raised and
 /// tiled correctly yet never receive a single keystroke.
 pub(crate) fn focus_window(state: &mut CompState, id: WindowId) {
+    // Real desktop convention (Windows/GNOME/macOS all do this): a
+    // selected desktop icon stays highlighted only until something else
+    // takes focus. Reported live as "highlighted desktop icons don't
+    // become not highlighted anymore" when clicking a window - `select_
+    // desktop_icon(None)` (clearing selection) was only ever called from
+    // `start_desktop_marquee` (a new marquee-select on bare desktop), never
+    // from the one place every focus path already funnels through
+    // regardless of how it got triggered (a click, Alt-Tab, a dock's IPC
+    // focus dispatch, scratchpad show, ...) - see this function's own
+    // doc comment on why that funnel already exists for raising. A no-op,
+    // cheap, when nothing was selected to begin with.
+    state.select_desktop_icon(None);
     state.wm.borrow_mut().focus_window(id);
     // Raises the window in smithay's own `Space` too, not just core's
     // `order` - `Space` keeps a completely independent stacking order of

@@ -22,6 +22,7 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
             let wm = wm.borrow();
             let settings = SettingsResponse {
                 shadows: wm.shadows_enabled,
+                close_focus_follows_workspace: wm.close_focus_follows_workspace,
                 rounded_corners: wm.rounded_corners_enabled,
                 animations: wm.animations_enabled,
                 night_light: wm.color_filter == srdwm_core::ColorFilter::NightLight,
@@ -634,6 +635,17 @@ fn handle_set(req: &serde_json::Value, wm: &std::rc::Rc<std::cell::RefCell<Windo
         "shadows" => {
             let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("shadows needs a boolean value"), false) };
             wm.borrow_mut().shadows_enabled = v;
+            (ok(), true)
+        }
+        // `srd set close_focus_follows_workspace <bool>` - live equivalent
+        // of `general.close_focus_follows_workspace`. See `WindowManager::
+        // close_focus_follows_workspace`'s own doc comment for what this
+        // actually gates: whether closing your focused window is allowed
+        // to fall back to (and switch your active workspace to follow) a
+        // window elsewhere, when nothing else is left on your current one.
+        "close_focus_follows_workspace" => {
+            let Some(v) = value.and_then(|v| v.as_bool()) else { return (err("close_focus_follows_workspace needs a boolean value"), false) };
+            wm.borrow_mut().close_focus_follows_workspace = v;
             (ok(), true)
         }
         // A bool, not a radius: the actual corner radius is a fixed

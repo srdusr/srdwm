@@ -271,7 +271,24 @@ impl WindowManager {
     pub fn remove_window(&mut self, id: WindowId) -> Option<Window> {
         self.order.retain(|&w| w != id);
         if self.focused == Some(id) {
-            self.focused = self.order.last().copied();
+            // Prefer the most-recently-focused window still on *this*
+            // workspace - `self.order` tracks every window globally, not
+            // per-workspace, so its own `.last()` (the previous behaviour)
+            // could just as easily be a background window sitting on a
+            // workspace the user isn't even looking at. `focus_window`
+            // switches the active workspace to match whatever it's given
+            // (a real, separate, and correct feature for a deliberate
+            // `srd dispatch focus` from elsewhere) - so handing it a
+            // cross-workspace fallback here silently dragged the user's
+            // whole view along with it the moment they closed a window,
+            // reported live as "teleports me to previous workspace".
+            // `close_focus_follows_workspace` (default `false`, matching
+            // every mainstream desktop - none of them change your active
+            // workspace just because a window closed) restores that
+            // original always-follow behaviour for anyone who wants it.
+            let current = self.current_workspace;
+            let same_workspace = self.order.iter().rev().copied().find(|&w| self.windows.get(&w).is_some_and(|win| win.workspace == current));
+            self.focused = same_workspace.or_else(|| self.close_focus_follows_workspace.then(|| self.order.last().copied()).flatten());
         }
         let window = self.windows.remove(&id);
         // Remembers wherever this app's window actually ended up, not just

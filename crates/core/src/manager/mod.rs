@@ -241,6 +241,24 @@ pub struct WindowManager {
     /// see the Wayland backend's shadow render call site - so this only
     /// ever turns it off entirely, not on for those.
     pub shadows_enabled: bool,
+    /// Whether closing your own focused window is allowed to fall back to
+    /// a window on a *different* workspace and switch you there to follow
+    /// it, when nothing else is left on your current one. Read from
+    /// `general.close_focus_follows_workspace`. `false` (the default)
+    /// matches every mainstream desktop (Windows/GNOME/macOS never change
+    /// your active workspace just because a window closed) - `remove_
+    /// window`'s own fallback then only ever considers a same-workspace
+    /// window, leaving focus at `None` if there isn't one, rather than
+    /// picking whatever window was next in the *global* most-recently-
+    /// focused order regardless of which workspace it happens to be on.
+    /// Reported live as windows closing and "teleporting" the user to a
+    /// previous workspace - exactly this: the global fallback picking a
+    /// background window elsewhere, then `focus_window`'s own (separate,
+    /// correct, and unrelated to this setting) "switch workspace to match
+    /// the newly focused window" side effect following it there. `true`
+    /// restores that original always-follow behaviour for anyone who
+    /// wants it.
+    pub close_focus_follows_workspace: bool,
     /// Width, in pixels, of the resize grab band along a window's edges,
     /// read from `general.resize_margin`. See [`crate::window::RESIZE_MARGIN`]'s
     /// doc comment for the default and why it's what it is.
@@ -548,6 +566,7 @@ impl WindowManager {
             animations_enabled: true,
             animation_duration_ms: 200,
             shadows_enabled: true,
+            close_focus_follows_workspace: false,
             resize_margin: RESIZE_MARGIN,
             rounded_corners_enabled: None,
             gpu_enabled: false,
