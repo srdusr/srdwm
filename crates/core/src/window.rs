@@ -140,8 +140,18 @@ pub fn classify_menu_source(gtk_menu_path: Option<String>, is_real_gtk_applicati
 /// GNOME's HIG mandate, so guessing from the app id alone there would
 /// misclassify plenty of ordinary, well-behaved server-side-decorated apps
 /// that also happen to use a reverse-DNS-style id.
+///
+/// `org.pwmt.*` added the same way, on the same evidence: zathura
+/// (`org.pwmt.zathura`) reported live as a double titlebar - confirmed in
+/// a nested compositor, screenshotted, two stacked rows with visibly
+/// different button styles (srdwm's own configured style on top, zathura's
+/// own girara-drawn row underneath). PWMT's own small set of tools (girara-
+/// based, zathura being the only one in common use) all share the same
+/// always-draws-its-own-header behaviour Firefox/Nemo needed a rule for,
+/// so the namespace is as safe a bet here as GNOME's own.
 pub fn likely_draws_own_titlebar(app_id: &str) -> bool {
-    app_id.to_ascii_lowercase().starts_with("org.gnome.")
+    let app_id = app_id.to_ascii_lowercase();
+    app_id.starts_with("org.gnome.") || app_id.starts_with("org.pwmt.")
 }
 
 /// State of a single managed window. This is platform-independent: backends
@@ -929,6 +939,22 @@ mod button_order_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn likely_draws_own_titlebar_matches_both_known_namespaces_case_insensitively() {
+        assert!(likely_draws_own_titlebar("org.gnome.Nautilus"));
+        assert!(likely_draws_own_titlebar("ORG.GNOME.TextEditor"));
+        assert!(likely_draws_own_titlebar("org.pwmt.zathura"));
+        assert!(likely_draws_own_titlebar("Org.Pwmt.Zathura"));
+    }
+
+    #[test]
+    fn likely_draws_own_titlebar_does_not_misclassify_unrelated_reverse_dns_ids() {
+        assert!(!likely_draws_own_titlebar("io.github.somebody.SomeApp"));
+        assert!(!likely_draws_own_titlebar("org.mozilla.firefox"));
+        assert!(!likely_draws_own_titlebar("firefox"));
+        assert!(!likely_draws_own_titlebar(""));
+    }
 
     fn frame() -> Rect {
         Rect::new(100, 100, 400, 300)
