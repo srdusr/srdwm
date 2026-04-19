@@ -210,6 +210,10 @@ impl WaylandPlatform {
         // it correctly. The border strips and titlebar bitmap are
         // different: outside `geometry`, so they still need `occluders`'
         // explicit clip against whichever window is stacked in front.
+        // See the matching push in `udev/render.rs` - this backend only
+        // ever has the one output, so the clip is a no-op here, but reading
+        // the same source keeps the two shadow paths from drifting.
+        let monitor_bounds: Vec<srdwm_core::Rect> = self.wm.borrow().monitors().iter().map(|m| m.full_geometry).collect();
         let mut occluders: Vec<srdwm_core::Rect> = Vec::with_capacity(ids.len());
         for id in ids {
             let Some(w) = self.wm.borrow().window(id).cloned() else { continue };
@@ -405,11 +409,12 @@ impl WaylandPlatform {
             // exactly where two windows' corners nearly meet, which this
             // compositor's default cascade placement does constantly.
             if let Some(shadow) = self.state.shadow_buffers.get(&id) {
-                let rect = decoration::shadow_rect(frame);
+                let full = decoration::shadow_rect(frame);
+                let rect = decoration::shadow_rect_clipped(frame, &monitor_bounds);
                 for fragment in crate::elements::visible_border_fragments(rect, &occluders) {
                     let pos = (fragment.x as f64, fragment.y as f64);
                     let src = Rectangle::new(
-                        Point::from(((fragment.x - rect.x) as f64, (fragment.y - rect.y) as f64)),
+                        Point::from(((fragment.x - full.x) as f64, (fragment.y - full.y) as f64)),
                         Size::from((fragment.width as f64, fragment.height as f64)),
                     );
                     match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, shadow, None, Some(src), None, Kind::Unspecified) {

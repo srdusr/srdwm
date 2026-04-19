@@ -338,7 +338,7 @@ impl UdevState {
 /// `(x, y, width, height)` tuples rather than real `UdevHead`s - pulled
 /// out so it's testable without a real DRM/`Card` handle, which every
 /// `UdevHead` in this module otherwise needs to even construct.
-fn bounds_of(heads: impl Iterator<Item = (i32, i32, i32, i32)>) -> (f64, f64, f64, f64) {
+pub(crate) fn bounds_of(heads: impl Iterator<Item = (i32, i32, i32, i32)>) -> (f64, f64, f64, f64) {
     let mut min_x = 0;
     let mut min_y = 0;
     let mut max_x = 0;

@@ -40,6 +40,11 @@ impl CompState {
         // below just re-offsets these same positions by its own `origin`.
         self.ensure_desktop_icons();
         let desktop_icon_render_list = self.desktop_icon_render_list();
+        // Same "gather immutable state before `self.udev` is borrowed
+        // mutably" reason as everything else in this block - used by the
+        // per-window shadow push below to keep a shadow off any monitor its
+        // own window does not occupy (`decoration::shadow_rect_clipped`).
+        let monitor_bounds: Vec<srdwm_core::Rect> = self.wm.borrow().monitors().iter().map(|m| m.full_geometry).collect();
         // Captured-and-blurred backgrounds collected during the per-head
         // loop below, applied via `self.capture_output` only after it
         // ends - `self.udev`'s mutable borrow is held for the whole loop
@@ -876,11 +881,17 @@ impl CompState {
                     // corners nearly meet, which this compositor's default
                     // cascade placement does constantly.
                     if let Some(shadow) = self.shadow_buffers.get(&id) {
-                        let rect = decoration::shadow_rect(frame);
+                        // `full` is the bitmap's own extent and stays
+                        // unclipped, because `src` below indexes into that
+                        // bitmap; `rect` is the same box clipped to the
+                        // monitors this window actually occupies, and only
+                        // decides which fragments get drawn.
+                        let full = decoration::shadow_rect(frame);
+                        let rect = decoration::shadow_rect_clipped(frame, &monitor_bounds);
                         for fragment in crate::elements::visible_border_fragments(rect, &occluders) {
                             let pos = ((fragment.x - origin.x) as f64, (fragment.y - origin.y) as f64);
                             let src = Rectangle::new(
-                                Point::from(((fragment.x - rect.x) as f64, (fragment.y - rect.y) as f64)),
+                                Point::from(((fragment.x - full.x) as f64, (fragment.y - full.y) as f64)),
                                 Size::from((fragment.width as f64, fragment.height as f64)),
                             );
                             match MemoryRenderBufferRenderElement::from_buffer(&mut udev.renderer, pos, shadow, None, Some(src), None, Kind::Unspecified) {

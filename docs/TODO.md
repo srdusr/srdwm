@@ -1,10 +1,100 @@
 # TODO / planned features - master checklist
 
+## Nemo's right-click menu: confirmed working, and two real bugs found doing it (2026-08-28)
+
+The last open punch-list item. It is closed on a real end-to-end repro, not
+on reading the source, and the `POPUP-GEOM-DIAG`/`POPUP-GRAB-DIAG`
+diagnostics in `protocols/xdg_shell.rs` are removed.
+
+**Result: the popup works.** In a throwaway nested compositor, a synthetic
+right-click on a file in Nemo opens the full context menu at the click
+point, above the window; hovering "Open With" opens its submenu, correctly
+placed and stacked over its own parent menu. Screenshots taken with `grim`
+on the nested display. Nothing in the popup path needed a fix.
+
+**Bug 1, and the reason this could never be tested before: synthetic input
+was a no-op on the backend a nested instance runs on.** Every
+`Motion`/`MotionAbsolute` handler in `virtual_pointer.rs` read
+`UdevState::bounds()` behind an early `return` when `state.udev` was
+`None`. That field is `Some` only for the DRM backend, so under the nested
+winit backend `zwlr_virtual_pointer_unstable_v1` advertised its global,
+accepted `create_virtual_pointer`, accepted every request, and silently
+discarded all motion - no error, no log. A Wayland client of one specific
+compositor is the only safe way to drive a throwaway instance (unlike
+`ydotool`, which writes to `/dev/uinput` and lands wherever the real seat's
+focus is - the exact hazard that parked this item), and it did not work.
+Fixed with a `pointer_bounds()` helper: DRM heads when `state.udev` is
+`Some`, `WindowManager::monitors()` otherwise. Both backends fill that list
+from `Platform::monitors()`, so it is the backend-agnostic source.
+
+**Bug 2, which made the screenshot state the opposite of the truth: the
+nested backend's screencopy pass rendered no popups and no shadows.** The
+DRM backend serves screencopy out of the on-screen frame it just drew, so
+it never had this. The winit backend re-renders the scene into an offscreen
+buffer (`winit/capture.rs`), and that second scene was missing tiers. A
+menu that drew perfectly on screen photographed as absent - which reads
+exactly like the client never opened one, and is very close to the original
+report. The first repro run "confirmed" the bug on that evidence; only a
+per-frame render diagnostic (`elements=1`, 84 consecutive frames, at the
+correct on-screen coordinate) showed the popup was being drawn all along.
+Popups and shadows now render into that pass. Border strips are still
+missing from it - a real remaining gap, stated rather than left silent.
+
+Also settled while doing this: the single-instance gotcha this file records
+twice (Firefox/Nemo activating the live instance regardless of a
+`WAYLAND_DISPLAY` override, opening real windows on the user's actual
+desktop). Starting the client under `dbus-run-session` gives it a private
+session bus, so it has no live instance to activate against and really does
+start a new process on the nested display. Verified: `srd clients` on the
+nested socket listed the Nemo window, and nothing appeared on the live
+session.
+
+New tool: `tools/virtual-pointer-click` (`vpclick`), a scriptable
+virtual-pointer driver - `move`/`press`/`release`/`click`, one command per
+line on stdin, acknowledged after each round-trip, so a test script can put
+a `grim` between a move and the click that follows it and never click at an
+unverified position. Standalone, like the other two tools in `tools/`.
+
+## Shadow bleed across a monitor seam: fixed (2026-08-28)
+
+The "windows show a bit in the other monitor" report from the entry below,
+which was diagnosed and left unfixed. `shadow_rect` expands by
+`SHADOW_SIZE` on every side with no monitor-boundary awareness, so a window
+flush against a seam put its 24px shadow strip on the neighbouring screen.
+
+New `decoration::shadow_rect_clipped(geometry, bounds)` clips the shadow to
+the bounding box of the monitors the window's own geometry actually
+touches. Not to the one monitor it is assigned to: a window straddling a
+seam really does occupy both screens, and clipping at the seam would cut
+its shadow off in the middle of its own visible body. A window touching no
+monitor is returned unclipped rather than collapsed to nothing. Both render
+paths and the winit capture pass now use it; the bitmap's own extent stays
+unclipped, because the `src` rectangle indexes into that bitmap and only
+the fragment list is clipped.
+
+Six tests, built on the incident's own numbers (two 1920x1080 outputs, seam
+at x=1920): flush against the seam from either side, straddling it,
+mid-monitor, the desktop's outer edge, and no monitors at all.
+**Not confirmed on screen.** The nested backend cannot produce a second
+monitor - `set output split` and `create fake-monitor` both return
+`{"ok":true}` and change nothing there, because both need real head
+machinery that only the DRM backend has. Confirming it needs the user's own
+two-monitor session.
+
+Correcting the entry below, which called this moot because the user had
+turned shadows off: `srd settings` against the live session reports
+`shadows: true`. It is not moot - it is a bug they can still hit today,
+the moment a floating window sits near the seam.
+
+Full workspace build/test/clippy clean: 489 tests (247 core / 158 wayland /
+43 platform / 28 config / 13 ctl), 0 failed, 0 clippy warnings, +6 for the
+seam clip.
+
 ## Four live reports from a real second monitor: one diagnosis, two real fixes, one config toggle, one AGS-side finding (2026-08-28)
 
 A second monitor was physically connected, surfacing several reports at once.
 
-**"Windows show a bit in the other monitor", diagnosed, not yet independently re-verified.** `srd clients` on the live session showed several real windows sitting at `x: 1920` - exactly the seam between the two 1920-wide outputs. With shadows still active on the (not-yet-restarted) live binary, each one's 24px shadow strip has nowhere to land but the neighbouring monitor. This is a real, separate gap from anything fixed earlier today: the shadow-tint fix only ever considered a window's *neighbouring tile*, never a *neighbouring monitor* - `shadow_rect` expands blindly by `SHADOW_SIZE` on every side with no monitor-boundary awareness at all, so any floating window near a multi-monitor seam would still bleed onto the adjacent screen even with today's other shadow fixes applied. Not fixed as its own thing, since `general.shadows` was already turned off for this user's own live config today (per their own "tinting no" - see the shadow-regression entry below) - moot for them specifically, but a real, still-open limitation worth flagging for anyone who re-enables shadows on a multi-monitor setup.
+**"Windows show a bit in the other monitor", diagnosed, not yet independently re-verified.** `srd clients` on the live session showed several real windows sitting at `x: 1920` - exactly the seam between the two 1920-wide outputs. With shadows still active on the (not-yet-restarted) live binary, each one's 24px shadow strip has nowhere to land but the neighbouring monitor. This is a real, separate gap from anything fixed earlier today: the shadow-tint fix only ever considered a window's *neighbouring tile*, never a *neighbouring monitor* - `shadow_rect` expands blindly by `SHADOW_SIZE` on every side with no monitor-boundary awareness at all, so any floating window near a multi-monitor seam would still bleed onto the adjacent screen even with today's other shadow fixes applied. Not fixed as its own thing, since `general.shadows` was already turned off for this user's own live config today (per their own "tinting no" - see the shadow-regression entry below) - moot for them specifically, but a real limitation for anyone who re-enables shadows on a multi-monitor setup. **Fixed since - see the shadow-seam entry at the top of this file.**
 
 **Desktop icons stayed highlighted after clicking a window - fixed.** `select_desktop_icon(None)` (clearing the selection) was only ever called from `start_desktop_marquee` (starting a fresh rubber-band select on bare desktop) - never from anywhere a real window becoming focused would reach. Every focus path in this compositor (a click, Alt-Tab, a dock's IPC focus dispatch, scratchpad show, the Snap-Layouts flyout) already funnels through one shared `focus_window` in `crates/wayland/src/input/focus.rs` for raising - added the same deselect call there, so it's now correct regardless of *how* a window got focused, matching Windows/GNOME/macOS convention (a selected icon stays highlighted only until something else takes focus).
 
@@ -110,7 +200,7 @@ Verified the two remaining research items live, in a nested compositor (`WAYLAND
 
 **Chrome/Chromium double-titlebar heuristic**: launched real `google-chrome-stable --ozone-platform=wayland` in the nested compositor and screenshotted it with `grim`. No double decoration - exactly one titlebar-equivalent band, and no `srdwm`-drawn window title text anywhere in the capture (this compositor's own SSD always draws the window title; its total absence means Chrome negotiated `ClientSide` itself and srdwm correctly didn't stack its own frame on top). The Unity-style "File Edit View History Tools Profiles Help" row Chrome renders above its own toolbar (a real, separate Chrome-on-Linux behavior tied to appmenu/dbusmenu detection, confirmed present in `srd clients`' own `global_menu` field for this window) is Chrome's own client-side chrome, not evidence of anything srdwm drew. `likely_draws_own_titlebar`'s `org.gnome.*`-only app-id list does not need a Chrome/Chromium entry added - the existing xdg-decoration negotiation already handles it correctly without one.
 
-**Nemo's right-click context menu** (the still-open `POPUP-GEOM-DIAG`/`POPUP-GRAB-DIAG` investigation in `xdg_shell.rs`): partially re-verified only. Confirmed no double-decoration for Nemo the same way (one clean SSD titlebar, traffic-light-style buttons, no CSD stacking). Could **not** safely test the actual reported symptom (right-click produces no menu at all) - `ydotool` is a uinput-level daemon shared with the live session, not scoped to the nested compositor, and a blind synthetic click there risks landing in the user's real desktop rather than the test window (this file's own standing warning: "never click at a position you have not verified first"). Parked (`nightshift questions`) rather than guessed at or left silently incomplete - the two live options are asking the user to right-click Nemo directly and report back, or finding a way to scope synthetic input to a nested session before trying again. The diagnostics themselves are left in place since the underlying bug's status is still genuinely unknown, not because of oversight.
+**Nemo's right-click context menu** (the `POPUP-GEOM-DIAG`/`POPUP-GRAB-DIAG` investigation in `xdg_shell.rs`, **since closed - see the entry at the top of this file**): partially re-verified only. Confirmed no double-decoration for Nemo the same way (one clean SSD titlebar, traffic-light-style buttons, no CSD stacking). Could **not** safely test the actual reported symptom (right-click produces no menu at all) - `ydotool` is a uinput-level daemon shared with the live session, not scoped to the nested compositor, and a blind synthetic click there risks landing in the user's real desktop rather than the test window (this file's own standing warning: "never click at a position you have not verified first"). Parked (`nightshift questions`) rather than guessed at or left silently incomplete - the two live options are asking the user to right-click Nemo directly and report back, or finding a way to scope synthetic input to a nested session before trying again. The diagnostics themselves are left in place since the underlying bug's status is still genuinely unknown, not because of oversight.
 
 ## workspace.per_monitor, titlebar buttons, and desktop icons: live srd set + readback (2026-08-28)
 
@@ -225,7 +315,7 @@ Not attempted this pass, deliberately: `gpu.rs`'s own doc comment already states
 
 Separately, found and removed eight `log::warn!("XXX-DIAG ...")` lines left behind from live debugging in the multi-session shift that landed in commit `3c41fc4` - the same "temporary, never removed" pattern already fixed twice earlier this session (see the 2026-08-21 POS-DIAG/CURSOR-DIAG entry and the 2026-08-27 TEMP-DIAG entry further down): `DECO-DIAG` (four call sites across `manager/windows.rs::add_window`/`reapply_rules_if_pending`, one in `state/lifecycle.rs::redraw_decoration_buffer`, one in `state/toplevel.rs::sync_toplevel_metadata`), `WS-IPC-DIAG` (`platform/ipc/dispatch.rs`'s `activate_workspace`), and `LAYER-VIS-DIAG` (`state/layers.rs`). Several of these fire on genuinely constant, ordinary interaction - `reapply_rules_if_pending`'s own doc comment says outright it runs "constantly for perfectly ordinary reasons (a browser tab finishing a page load)" - so this was real, continuous log noise on every title change, every workspace switch, every layer surface hide, not just a one-off leftover.
 
-Deliberately left alone: `protocols/xdg_shell.rs`'s `POPUP-GEOM-DIAG`/`POPUP-GRAB-DIAG` (five call sites). Unlike the eight removed above, this one is self-documented as a live, still-open investigation ("Temporary: live report is that Nemo's right-click context menu never appears at all... Remove once resolved") with no entry anywhere in this file confirming that investigation actually concluded - removing an active diagnostic for a bug nobody has confirmed fixed would be a real regression in debuggability, not a cleanup. Left for whoever is still chasing that one.
+Deliberately left alone at the time, **removed since the investigation closed - see the entry at the top of this file**: `protocols/xdg_shell.rs`'s `POPUP-GEOM-DIAG`/`POPUP-GRAB-DIAG` (five call sites). Unlike the eight removed above, this one is self-documented as a live, still-open investigation ("Temporary: live report is that Nemo's right-click context menu never appears at all... Remove once resolved") with no entry anywhere in this file confirming that investigation actually concluded - removing an active diagnostic for a bug nobody has confirmed fixed would be a real regression in debuggability, not a cleanup. Left for whoever is still chasing that one.
 
 Full workspace build/test/clippy clean (33 platform / 32 ctl tests, both up from before by the new split coverage).
 

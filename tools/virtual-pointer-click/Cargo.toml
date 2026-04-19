@@ -1,0 +1,18 @@
+[package]
+name = "virtual-pointer-click"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone - deliberately not a member of the main workspace at
+# ../../Cargo.toml, same reasoning as ../virtual-pointer-pin-test's and
+# ../toplevel-activate's own Cargo.toml: building/testing srdwm itself never
+# has to build this too. A debug tool, not part of the shipped product.
+[workspace]
+
+[[bin]]
+name = "vpclick"
+path = "src/main.rs"
+
+[dependencies]
+wayland-client = "=0.31.14"
+wayland-protocols-wlr = { version = "=0.3.12", features = ["client"] }

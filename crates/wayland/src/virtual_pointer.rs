@@ -225,8 +225,7 @@ impl Dispatch<ZwlrVirtualPointerV1, VirtualPointerData> for CompState {
                     pinned_move_to(state, data, &surface, target, time);
                     return;
                 }
-                let Some(udev) = state.udev.as_ref() else { return };
-                let (min_x, min_y, max_x, max_y) = udev.bounds();
+                let (min_x, min_y, max_x, max_y) = pointer_bounds(state);
                 let pos = last_pointer_pos(state);
                 let target = Point::<f64, Logical>::from((
                     (pos.x + dx.to_f64()).clamp(min_x, (max_x - 1.0).max(min_x)),
@@ -249,9 +248,6 @@ impl Dispatch<ZwlrVirtualPointerV1, VirtualPointerData> for CompState {
                     pinned_move_to(state, data, &surface, target, time);
                     return;
                 }
-                if state.udev.is_none() {
-                    return;
-                }
                 let (nx, ny) = (x as f64 / x_extent as f64, y as f64 / y_extent as f64);
                 // Mapped onto the requested output's own full geometry if
                 // `create_virtual_pointer_with_output` named one, otherwise
@@ -264,12 +260,12 @@ impl Dispatch<ZwlrVirtualPointerV1, VirtualPointerData> for CompState {
                     match state.wm.borrow().monitors().iter().find(|m| m.name == name) {
                         Some(m) => (m.full_geometry.x as f64, m.full_geometry.y as f64, m.full_geometry.width as f64, m.full_geometry.height as f64),
                         None => {
-                            let (min_x, min_y, max_x, max_y) = state.udev.as_ref().unwrap().bounds();
+                            let (min_x, min_y, max_x, max_y) = pointer_bounds(state);
                             (min_x, min_y, max_x - min_x, max_y - min_y)
                         }
                     }
                 } else {
-                    let (min_x, min_y, max_x, max_y) = state.udev.as_ref().unwrap().bounds();
+                    let (min_x, min_y, max_x, max_y) = pointer_bounds(state);
                     (min_x, min_y, max_x - min_x, max_y - min_y)
                 };
                 let target = Point::<f64, Logical>::from(((min_x + nx * w).clamp(min_x, min_x + w - 1.0), (min_y + ny * h).clamp(min_y, min_y + h - 1.0)));
@@ -382,6 +378,38 @@ impl CompState {
             }
         }
     }
+}
+
+/// The whole addressable pointer span, in logical coordinates - the union
+/// of every head on the DRM backend, and the union of every
+/// `WindowManager` monitor otherwise.
+///
+/// Every `Motion`/`MotionAbsolute` bounds lookup here used to read
+/// `UdevState::bounds()` directly, behind an early `return` when
+/// `state.udev` was `None`. That field is `Some` only for the DRM backend
+/// (see `state/mod.rs`), so on the nested winit backend this protocol
+/// advertised its global, accepted `create_virtual_pointer`, accepted
+/// every request, and then silently discarded all motion: no error, no
+/// log, nothing on screen. That is the exact backend a nested test
+/// instance runs on, so the one safe way to drive synthetic input at a
+/// throwaway compositor - a Wayland client of that compositor, which
+/// cannot reach any other session by construction, unlike a uinput-level
+/// tool such as `ydotool` - did not work at all. Found while trying to
+/// verify Nemo's right-click popup without clicking blind at the user's
+/// real desktop.
+///
+/// `WindowManager::monitors()` is filled from `Platform::monitors()` at
+/// startup and on every hotplug poll (`crates/srdwm/src/main.rs`), by both
+/// backends, so it is the backend-agnostic source. The DRM branch stays
+/// first and unchanged: `heads` is what that backend actually clamps its
+/// own `pointer_pos` against, and the two lists can legitimately disagree
+/// mid-hotplug.
+fn pointer_bounds(state: &CompState) -> (f64, f64, f64, f64) {
+    if let Some(udev) = state.udev.as_ref() {
+        return udev.bounds();
+    }
+    let wm = state.wm.borrow();
+    crate::udev::bounds_of(wm.monitors().iter().map(|m| (m.full_geometry.x, m.full_geometry.y, m.full_geometry.width as i32, m.full_geometry.height as i32)))
 }
 
 /// This pinned stream's target window's own current content size,

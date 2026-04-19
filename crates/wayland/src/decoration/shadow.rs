@@ -30,6 +30,61 @@ pub fn shadow_rect(geometry: srdwm_core::Rect) -> srdwm_core::Rect {
     srdwm_core::Rect::new(geometry.x - s, geometry.y - s, geometry.width + SHADOW_SIZE * 2, geometry.height + SHADOW_SIZE * 2)
 }
 
+/// [`shadow_rect`], clipped so a shadow can never land on a monitor the
+/// window itself does not occupy.
+///
+/// Reported live as "windows show a bit in the other monitor" with a real
+/// second monitor connected: `srd clients` showed several windows sitting
+/// at exactly `x: 1920`, the seam between two 1920-wide outputs, and a
+/// window flush against that seam has nowhere to put its 24px shadow strip
+/// except the neighbouring screen. The earlier shadow work only ever
+/// considered a window's neighbouring *tile*; [`shadow_rect`] expands by
+/// [`SHADOW_SIZE`] on every side with no monitor-boundary awareness at
+/// all, so this survived it.
+///
+/// `bounds` is every monitor's `full_geometry`. The clip box is the
+/// bounding box of the monitors the window's own geometry actually
+/// touches, not just of the one it is assigned to: a window straddling a
+/// seam genuinely occupies both screens, and clipping such a window's
+/// shadow at the seam would cut it off in the middle of its own visible
+/// body. A window touching no monitor at all (off-screen, or no monitors
+/// yet) is returned unclipped - there is nothing to clip against, and
+/// silently collapsing it to an empty rect would drop the shadow instead.
+pub fn shadow_rect_clipped(geometry: srdwm_core::Rect, bounds: &[srdwm_core::Rect]) -> srdwm_core::Rect {
+    let rect = shadow_rect(geometry);
+    let mut clip: Option<srdwm_core::Rect> = None;
+    for m in bounds.iter().filter(|m| overlaps(**m, geometry)) {
+        clip = Some(match clip {
+            None => *m,
+            Some(c) => union(c, *m),
+        });
+    }
+    match clip {
+        Some(c) => intersect(rect, c),
+        None => rect,
+    }
+}
+
+fn overlaps(a: srdwm_core::Rect, b: srdwm_core::Rect) -> bool {
+    a.x < b.x + b.width as i32 && b.x < a.x + a.width as i32 && a.y < b.y + b.height as i32 && b.y < a.y + a.height as i32
+}
+
+fn union(a: srdwm_core::Rect, b: srdwm_core::Rect) -> srdwm_core::Rect {
+    let x = a.x.min(b.x);
+    let y = a.y.min(b.y);
+    let right = (a.x + a.width as i32).max(b.x + b.width as i32);
+    let bottom = (a.y + a.height as i32).max(b.y + b.height as i32);
+    srdwm_core::Rect::new(x, y, (right - x).max(0) as u32, (bottom - y).max(0) as u32)
+}
+
+fn intersect(a: srdwm_core::Rect, b: srdwm_core::Rect) -> srdwm_core::Rect {
+    let x = a.x.max(b.x);
+    let y = a.y.max(b.y);
+    let right = (a.x + a.width as i32).min(b.x + b.width as i32);
+    let bottom = (a.y + a.height as i32).min(b.y + b.height as i32);
+    srdwm_core::Rect::new(x, y, (right - x).max(0) as u32, (bottom - y).max(0) as u32)
+}
+
 /// Renders a window's drop shadow as a BGRA8 bitmap: black at an alpha that
 /// falls off linearly from [`SHADOW_MAX_ALPHA`] right at the window's own
 /// edge to fully transparent [`SHADOW_SIZE`] pixels out. `win_width`/
@@ -182,5 +237,64 @@ fn edge_distance(pos: u32, margin: u32, extent: u32) -> u32 {
         pos - (margin + extent) + 1
     } else {
         0
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::shadow_rect_clipped;
+    use srdwm_core::Rect;
+
+    /// Two 1920x1080 outputs side by side, the exact arrangement the
+    /// "windows show a bit in the other monitor" report was taken on.
+    fn two_monitors() -> Vec<Rect> {
+        vec![Rect::new(0, 0, 1920, 1080), Rect::new(1920, 0, 1920, 1080)]
+    }
+
+    #[test]
+    fn a_window_flush_against_the_seam_does_not_shadow_the_next_monitor() {
+        // Right edge exactly on the seam at x=1920.
+        let w = Rect::new(1120, 100, 800, 600);
+        let r = shadow_rect_clipped(w, &two_monitors());
+        assert_eq!(r.x + r.width as i32, 1920, "shadow crossed the seam");
+        assert_eq!(r.x, 1120 - 24, "the left side should still get its full shadow");
+    }
+
+    #[test]
+    fn a_window_at_the_left_edge_of_the_second_monitor_does_not_shadow_the_first() {
+        let w = Rect::new(1920, 100, 800, 600);
+        let r = shadow_rect_clipped(w, &two_monitors());
+        assert_eq!(r.x, 1920, "shadow crossed the seam");
+    }
+
+    #[test]
+    fn a_window_in_the_middle_of_a_monitor_is_unclipped() {
+        let w = Rect::new(500, 300, 400, 300);
+        let r = shadow_rect_clipped(w, &two_monitors());
+        assert_eq!((r.x, r.y, r.width, r.height), (500 - 24, 300 - 24, 400 + 48, 300 + 48));
+    }
+
+    #[test]
+    fn a_window_straddling_the_seam_keeps_its_shadow_on_both_monitors() {
+        let w = Rect::new(1720, 100, 400, 600);
+        let r = shadow_rect_clipped(w, &two_monitors());
+        assert_eq!(r.x, 1720 - 24);
+        assert_eq!(r.x + r.width as i32, 2120 + 24);
+    }
+
+    #[test]
+    fn the_outer_edges_of_the_whole_desktop_still_clip() {
+        // Nothing to bleed onto past x=0, but the clip must not invent
+        // space that no monitor covers either.
+        let w = Rect::new(0, 0, 400, 300);
+        let r = shadow_rect_clipped(w, &two_monitors());
+        assert_eq!((r.x, r.y), (0, 0));
+    }
+
+    #[test]
+    fn no_monitors_leaves_the_rect_unclipped() {
+        let w = Rect::new(10, 10, 100, 100);
+        let r = shadow_rect_clipped(w, &[]);
+        assert_eq!((r.x, r.y, r.width, r.height), (10 - 24, 10 - 24, 100 + 48, 100 + 48));
     }
 }

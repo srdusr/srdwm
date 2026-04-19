@@ -8,7 +8,6 @@ use smithay::input::pointer::Focus;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_seat;
-use smithay::reexports::wayland_server::Resource;
 use smithay::utils::Serial;
 use smithay::wayland::shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState};
 
@@ -185,22 +184,11 @@ impl XdgShellHandler for CompState {
     /// real follow-up, not this fix); an occasional popup placed near a
     /// screen edge may render partly off it, which is cosmetic, not a hang.
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
-        // Temporary: live report is that Nemo's right-click context menu
-        // never appears at all (not mispositioned - entirely invisible),
-        // while the exact same xdg_popup mechanism works for Firefox. Logs
-        // the unconstrained geometry this popup gets so a live repro tells
-        // us whether it's landing off-screen/degenerate (the known gap this
-        // function's own doc comment already flags) or something else
-        // entirely. Remove once resolved.
-        let geom = positioner.get_geometry();
-        let parent = surface.get_parent_surface();
-        log::warn!("POPUP-GEOM-DIAG geometry={geom:?} parent={:?}", parent.as_ref().map(|s| s.id()));
         surface.with_pending_state(|state| {
-            state.geometry = geom;
+            state.geometry = positioner.get_geometry();
             state.positioner = positioner;
         });
         if surface.send_configure().is_err() {
-            log::warn!("POPUP-GEOM-DIAG send_configure failed");
             return;
         }
         let _ = self.popups.track_popup(smithay::desktop::PopupKind::Xdg(surface));
@@ -223,19 +211,9 @@ impl XdgShellHandler for CompState {
     /// `resize_request` already ignore the same parameter.
     fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, serial: Serial) {
         let popup = PopupKind::Xdg(surface);
-        let Ok(root) = find_popup_root_surface(&popup) else {
-            log::warn!("POPUP-GRAB-DIAG find_popup_root_surface failed");
-            return;
-        };
+        let Ok(root) = find_popup_root_surface(&popup) else { return };
         let seat = self.seat.clone();
-        let grab = match self.popups.grab_popup(root, popup, &seat, serial) {
-            Ok(g) => g,
-            Err(e) => {
-                log::warn!("POPUP-GRAB-DIAG grab_popup failed: {e:?}");
-                return;
-            }
-        };
-        log::warn!("POPUP-GRAB-DIAG grab established, has_pointer={} has_keyboard={}", seat.get_pointer().is_some(), seat.get_keyboard().is_some());
+        let Ok(grab) = self.popups.grab_popup(root, popup, &seat, serial) else { return };
         if let Some(keyboard) = seat.get_keyboard() {
             keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
         }
