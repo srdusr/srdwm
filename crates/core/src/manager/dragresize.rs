@@ -10,12 +10,16 @@ impl WindowManager {
 
     pub fn start_drag(&mut self, id: WindowId, x: i32, y: i32) {
         if let Some(w) = self.windows.get(&id) {
-            self.drag = Some(DragState { window: id, start_x: x, start_y: y, orig: w.geometry });
+            self.drag = Some(DragState { window: id, start_x: x, start_y: y, orig: w.geometry, last_x: x, last_y: y });
             self.focus_window(id);
         }
     }
 
     pub fn update_drag(&mut self, x: i32, y: i32) {
+        if let Some(drag) = &mut self.drag {
+            drag.last_x = x;
+            drag.last_y = y;
+        }
         let Some(drag) = &self.drag else { return };
         let (dx, dy) = (x - drag.start_x, y - drag.start_y);
         let mut new_geom = drag.orig;
@@ -108,8 +112,66 @@ impl WindowManager {
         }
     }
 
+    /// Where the currently-dragged window would land if the button came up
+    /// right now, or `None` when the drag is not in a snap zone.
+    ///
+    /// Deliberately calls the very same `SmartPlacement::snap_zone` that
+    /// `end_drag` does, on the same inputs, rather than re-deriving the
+    /// zones: a preview that can disagree with what release actually does
+    /// is worse than no preview, and any future change to the zone
+    /// geometry updates both at once by construction.
+    ///
+    /// Reported twice as missing: "if you move the window to absolute
+    /// north it show you layout options" and "why do i still not see the
+    /// windows layout or windows change layout when moved to areas of
+    /// screen like in windows". Edge snapping itself already worked - it
+    /// just committed silently on release with nothing shown beforehand,
+    /// so there was no way to tell it was going to happen, or where.
+    pub fn drag_snap_preview(&self) -> Option<Rect> {
+        let drag = self.drag.as_ref()?;
+        let w = self.windows.get(&drag.window)?;
+        let m = self.monitor_for(w.monitor)?;
+        SmartPlacement::snap_zone(w.geometry, m, &self.placement)
+    }
+
+    /// The monitor whose top edge the drag pointer is currently within
+    /// [`SNAP_FLYOUT_EDGE`] of, or `None`.
+    ///
+    /// Measured against `full_geometry`, not `geometry`: the trigger band
+    /// is the physical top of the screen, which is exactly where a bar
+    /// usually sits. Using the exclusive-zone-shrunk rect would put the
+    /// band *below* the bar, so on a machine with a top bar the gesture
+    /// would only fire after the pointer had already travelled past it.
+    ///
+    /// The pointer, not the window's own top edge, because the two differ
+    /// by however far down the titlebar the drag grabbed - and it is the
+    /// pointer the user is actually aiming.
+    ///
+    /// Not `Rect::contains_point`: that would also reject a pointer *above*
+    /// the monitor's top edge, which is the one direction this gesture is
+    /// aimed in. A real seat clamps the cursor to the output, so `y < 0`
+    /// should not arise on hardware - but `update_drag` clamps only the
+    /// window, so nothing in this type's own API guarantees it, and
+    /// "thrown past the edge" is the strongest possible form of the intent
+    /// this is trying to detect. Horizontal containment is still required,
+    /// as is being above the monitor's bottom, so a pointer on a different
+    /// output never matches.
+    pub fn drag_top_edge_monitor(&self) -> Option<&Monitor> {
+        let drag = self.drag.as_ref()?;
+        let (x, y) = (drag.last_x, drag.last_y);
+        self.monitors.iter().find(|m| {
+            let g = m.full_geometry;
+            x >= g.x && x < g.right() && y < g.bottom() && y - g.y <= SNAP_FLYOUT_EDGE
+        })
+    }
+
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
+    }
+
+    /// The window the current drag is moving, if any.
+    pub fn dragged_window(&self) -> Option<WindowId> {
+        self.drag.as_ref().map(|d| d.window)
     }
 
     pub fn start_resize(&mut self, id: WindowId, edge: ResizeEdge, x: i32, y: i32) {

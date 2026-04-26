@@ -101,6 +101,84 @@
     }
 
     #[test]
+    fn a_reload_that_fails_leaves_the_previous_config_running() {
+        // The single most likely thing to go wrong with a programmable
+        // config: the user saves a syntax error. Before this, the clear
+        // that precedes re-execution was never undone, so a bad edit left
+        // the compositor with no keybindings at all.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("init.lua"), r#"srd.bind("Mod4+t", function() end)"#).unwrap();
+        let engine = engine_in(dir.path());
+        engine.load_init().unwrap();
+        assert_eq!(engine.bound_keys().len(), 1, "the good config bound one key");
+
+        std::fs::write(dir.path().join("init.lua"), "this is not lua ((").unwrap();
+        assert!(engine.reload().is_err(), "a syntax error must be reported");
+        assert_eq!(engine.bound_keys().len(), 1, "the working config must survive a failed reload");
+        assert!(engine.dispatch_keybinding(&srdwm_core::canonicalize_key_combo("Mod4+t")), "and must still actually run");
+    }
+
+    #[test]
+    fn a_reload_whose_file_has_vanished_also_keeps_the_previous_config() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("init.lua"), r#"srd.bind("Mod4+t", function() end)"#).unwrap();
+        let engine = engine_in(dir.path());
+        engine.load_init().unwrap();
+        std::fs::remove_file(dir.path().join("init.lua")).unwrap();
+        assert!(engine.reload().is_err());
+        assert_eq!(engine.bound_keys().len(), 1);
+    }
+
+    #[test]
+    fn a_reload_that_succeeds_still_drops_bindings_removed_from_the_file() {
+        // The restore must not turn into "bindings are never cleared".
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("init.lua"), r#"srd.bind("Mod4+t", function() end) srd.bind("Mod4+y", function() end)"#).unwrap();
+        let engine = engine_in(dir.path());
+        engine.load_init().unwrap();
+        assert_eq!(engine.bound_keys().len(), 2);
+
+        std::fs::write(dir.path().join("init.lua"), r#"srd.bind("Mod4+t", function() end)"#).unwrap();
+        engine.reload().unwrap();
+        assert_eq!(engine.bound_keys().len(), 1, "a deleted binding must really go away");
+    }
+
+    #[test]
+    fn a_half_applied_broken_config_is_discarded_not_merged() {
+        // The failing file registers a binding and *then* errors. Keeping
+        // it would leave a config that is neither the old one nor the new.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("init.lua"), r#"srd.bind("Mod4+t", function() end)"#).unwrap();
+        let engine = engine_in(dir.path());
+        engine.load_init().unwrap();
+
+        std::fs::write(dir.path().join("init.lua"), "srd.bind(\"Mod4+z\", function() end)\nerror(\"boom\")").unwrap();
+        assert!(engine.reload().is_err());
+        let keys = engine.bound_keys();
+        assert_eq!(keys.len(), 1);
+        assert!(!keys.iter().any(|k| k.contains('z')), "the broken run's own binding must not survive: {keys:?}");
+    }
+
+    #[test]
+    fn refresh_is_a_known_event_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine_in(dir.path());
+        engine.lua.load(r#"srd.on("refresh", function() srd.set("refreshed", true) end)"#).exec().unwrap();
+        assert!(engine.dispatch_event("refresh"), "a registered refresh handler must run");
+        assert_eq!(engine.get("refreshed"), Some(ConfigValue::Bool(true)));
+    }
+
+    #[test]
+    fn srd_lock_queues_a_lock_request_on_the_window_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let wm = Rc::new(RefCell::new(WindowManager::new()));
+        let engine = Engine::new(wm.clone(), dir.path()).unwrap();
+        assert!(!wm.borrow_mut().drain_lock_request(), "nothing queued yet");
+        engine.lua.load("srd.lock()").exec().unwrap();
+        assert!(wm.borrow_mut().drain_lock_request(), "srd.lock() must queue a real request");
+    }
+
+    #[test]
     fn srd_load_executes_module_relative_to_config_dir() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("extra.lua"), r#"srd.set("from.extra", "yes")"#).unwrap();

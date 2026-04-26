@@ -100,6 +100,60 @@ fn install_signal_handlers() {}
 /// rewriting the literal, so it stays legible as "what you'd type in Lua".
 const RELOAD_COMBO_LITERAL: &str = "Mod4+Ctrl+r";
 
+/// How often the config directory is checked for edits when
+/// `general.config_reload_on_write` is on. See `config_mtime`.
+const CONFIG_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Puts a config error in front of the user instead of only in a log they
+/// have no reason to be reading.
+///
+/// A Lua config is a program, so a user breaking it is an ordinary event,
+/// not an exceptional one - and the failure is close to silent from the
+/// user's side: the compositor keeps running, their edit simply does
+/// nothing. Nothing on screen said why. `notify-send` is the same
+/// best-effort mechanism `srd.notify` already uses (see `fn_notify`); when
+/// no notification daemon is running it falls back to the log, which is no
+/// worse than the previous behaviour and never fatal.
+///
+/// Asked as "what happens when our config fails/user does something wrong
+/// which can be expected since lua programmable config".
+fn report_config_error(message: &str) {
+    log::error!("{message}");
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("notify-send")
+            .arg("--urgency=critical")
+            .arg("srdwm")
+            .arg(message)
+            .status();
+    }
+}
+
+/// The newest modification time across the config directory's own `.lua`
+/// files, used to notice an edit and reload without being asked.
+///
+/// A plain `stat` sweep rather than an inotify/`notify`-crate watch: it
+/// needs no new dependency, behaves identically on every platform this
+/// project targets (the standing rule is that everything must work
+/// everywhere, Windows and macOS included), and cannot leak watch
+/// descriptors on a directory that is edited and replaced by an editor
+/// writing through a temp file - the common case, and the one inotify
+/// watches on individual files famously miss. One directory read of a
+/// handful of files, at most once a second, is not a measurable cost next
+/// to a compositor frame.
+///
+/// Non-recursive on purpose: `srd.load("module")` resolves relative to this
+/// same directory, so a flat sweep already covers every file a config can
+/// pull in without walking arbitrary user directories.
+fn config_mtime(dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "lua"))
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .max()
+}
+
 /// Where the Lua config lives: `$SRDWM_CONFIG_PATH`, else
 /// `$XDG_CONFIG_HOME/srd`, else `~/.config/srd`.
 ///
@@ -243,6 +297,9 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     // traffic-light default, same fallback shape as every other string
     // switch above.
     theme.traffic_light_buttons = engine.get_string("theme.decorations.title_bar.button_style", "traffic_lights") != "traditional";
+    // "dynamic" (default: only the buttons the window can actually use) or
+    // "fixed" (always the full set) - see `ThemeConfig::dynamic_buttons`.
+    theme.dynamic_buttons = engine.get_string("theme.decorations.title_bar.button_mode", "dynamic") != "fixed";
     let border_width = engine.get_f64("theme.decorations.border.width", 2.0).max(0.0) as u32;
     theme.default_border_width = border_width;
     // 12, not the original 6: matches real macOS's own ~0.36 radius-to-
@@ -631,12 +688,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     engine.set_string("platform.os", std::env::consts::OS);
     match engine.load_init() {
         Ok(()) => log::info!("loaded config from {}", dir.display()),
-        Err(e) => log::warn!("no usable config at {} ({e}); running with built-in defaults", dir.display()),
+        Err(e) => {
+            log::warn!("no usable config at {} ({e}); running with built-in defaults", dir.display());
+            report_config_error(&format!("Config failed to load, using built-in defaults.\n{e}"));
+        }
     }
     apply_workspace_count(&engine, &wm);
     apply_general_settings(&engine, &wm);
     apply_default_layout(&engine, &wm);
     let running = engine.running_flag();
+    // `general.config_reload_on_write` - on by default. A programmable
+    // config is edited far more often than it is reloaded deliberately, and
+    // a failed reload can no longer leave the session in a broken state
+    // (`do_reload` restores the previous working config), so the safe
+    // default is the convenient one. Set it false for a config that
+    // deliberately does expensive work at load time.
+    let reload_on_write = engine.get_bool("general.config_reload_on_write", true);
+    let mut last_config_mtime = config_mtime(&dir);
+    let mut last_config_poll = std::time::Instant::now();
 
     let mut platform: Box<dyn Platform> = match kind {
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -706,6 +775,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+        // `general.config_reload_on_write`: notice an edited config and
+        // apply it without the user having to press the reload combo.
+        //
+        // Polled at most once a second (see `config_mtime`), and only when
+        // the newest `.lua` mtime has actually moved - so the steady-state
+        // cost is one directory read per second and nothing else. A failed
+        // reload here is not fatal and does not spam: `do_reload` puts the
+        // previous working config back, and the mtime has already been
+        // recorded, so a file that stays broken is reported once, not on
+        // every tick. Saving a fixed version moves the mtime again and
+        // reloads for real.
+        if reload_on_write {
+            let now = std::time::Instant::now();
+            if now.duration_since(last_config_poll) >= CONFIG_POLL_INTERVAL {
+                last_config_poll = now;
+                let current = config_mtime(&dir);
+                if current.is_some() && current != last_config_mtime {
+                    last_config_mtime = current;
+                    match engine.reload() {
+                        Ok(()) => log::info!("config reloaded (file changed on disk)"),
+                        Err(e) => report_config_error(&format!("Config edit not applied, keeping the last working one.\n{e}")),
+                    }
+                    apply_general_settings(&engine, &wm);
+                }
+            }
+        }
+        // The desktop menu's "Refresh" row, drained here rather than in a
+        // backend: reloading Lua and firing a Lua handler both need the
+        // `Engine`, which only this loop owns. See
+        // `WindowManager::request_refresh`.
+        if wm.borrow_mut().drain_refresh_request() {
+            match engine.reload() {
+                Ok(()) => log::info!("config reloaded (desktop refresh)"),
+                Err(e) => report_config_error(&format!("Config reload failed, keeping the last working one.\n{e}")),
+            }
+            // After the reload, so a handler edited in the config since
+            // startup is the one that runs.
+            engine.dispatch_event("refresh");
+        }
+
         let mut dirty = false;
         for event in events {
             match event {
@@ -714,7 +823,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if combo == srdwm_core::canonicalize_key_combo(RELOAD_COMBO_LITERAL) {
                         match engine.reload() {
                             Ok(()) => log::info!("config reloaded"),
-                            Err(e) => log::error!("config reload failed: {e}"),
+                            Err(e) => report_config_error(&format!("Config reload failed, keeping the last working one.\n{e}")),
                         }
                     } else if !engine.dispatch_keybinding(&combo) {
                         log::debug!("no binding for '{combo}'");

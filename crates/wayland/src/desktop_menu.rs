@@ -23,6 +23,21 @@ pub(crate) enum DesktopMenuAction {
     /// "not even new file" - see `CompState::new_desktop_text_file`'s own
     /// doc comment.
     NewTextFile,
+    /// Creates an empty file with this extension (no leading dot), named
+    /// "New <label>". The type is chosen by extension, which is what
+    /// actually decides how a desktop or file manager treats a file:
+    /// asked for as "in context menu say new file, user can choose what
+    /// file type is obviously by extension".
+    ///
+    /// A fixed, deliberately short list (see `NEW_FILE_TYPES`) rather than
+    /// a scan of the system's MIME database: the point is a couple of
+    /// clicks for the handful of files people actually create from a
+    /// desktop, not a type browser - a real file manager, one row further
+    /// down this same menu, is the right tool for anything beyond that.
+    NewFileOfType {
+        label: &'static str,
+        extension: &'static str,
+    },
     /// Spawns a terminal with `~/Desktop` as its working directory --
     /// `general.terminal`, or a common-binary fallback list if unset.
     OpenTerminalHere,
@@ -52,6 +67,20 @@ pub(crate) struct DesktopMenu {
 const MENU_WIDTH: u32 = 170;
 const ROW_HEIGHT: u32 = 28;
 
+/// The file types the bare-desktop menu offers to create, in order.
+///
+/// Plain text stays its own separate `NewTextFile` action rather than
+/// appearing here, because it is the overwhelmingly common one and was
+/// already the menu's own established top-level entry - demoting it into
+/// a list would make the ordinary case worse to reach.
+const NEW_FILE_TYPES: [(&str, &str); 5] = [
+    ("Markdown Document", "md"),
+    ("Shell Script", "sh"),
+    ("Python Script", "py"),
+    ("JSON File", "json"),
+    ("CSV Spreadsheet", "csv"),
+];
+
 impl DesktopMenu {
     /// Right-click on `icon` itself - the action set depends on what kind
     /// of icon it is, not one fixed list: a real file/folder gets Open/
@@ -76,16 +105,21 @@ impl DesktopMenu {
 
     /// Right-click on bare desktop (no icon under the pointer).
     pub(crate) fn open_for_desktop(pos: (i32, i32)) -> Self {
-        let items = vec![
+        let mut items = vec![
             ("New Folder", DesktopMenuAction::NewFolder),
             ("New Text Document", DesktopMenuAction::NewTextFile),
+        ];
+        for (label, extension) in NEW_FILE_TYPES {
+            items.push((label, DesktopMenuAction::NewFileOfType { label, extension }));
+        }
+        items.extend([
             ("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", DesktopMenuAction::Separator),
             ("Open Terminal Here", DesktopMenuAction::OpenTerminalHere),
             ("Open in File Manager", DesktopMenuAction::OpenInFileManager),
             ("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}", DesktopMenuAction::Separator),
             ("Select All", DesktopMenuAction::SelectAll),
             ("Refresh", DesktopMenuAction::Refresh),
-        ];
+        ]);
         Self { pos, width: MENU_WIDTH, row_height: ROW_HEIGHT, items }
     }
 
@@ -150,7 +184,49 @@ mod tests {
         let menu = DesktopMenu::open_for_desktop((10, 10));
         let real_actions: Vec<&str> =
             menu.items.iter().filter(|(_, a)| !matches!(a, DesktopMenuAction::Separator)).map(|(l, _)| *l).collect();
-        assert_eq!(real_actions, vec!["New Folder", "New Text Document", "Open Terminal Here", "Open in File Manager", "Select All", "Refresh"]);
+        assert_eq!(
+            real_actions,
+            vec![
+                "New Folder",
+                "New Text Document",
+                "Markdown Document",
+                "Shell Script",
+                "Python Script",
+                "JSON File",
+                "CSV Spreadsheet",
+                "Open Terminal Here",
+                "Open in File Manager",
+                "Select All",
+                "Refresh",
+            ]
+        );
+    }
+
+    #[test]
+    fn every_offered_file_type_carries_a_real_extension() {
+        let menu = DesktopMenu::open_for_desktop((0, 0));
+        let types: Vec<(&str, &str)> = menu
+            .items
+            .iter()
+            .filter_map(|(_, a)| match a {
+                DesktopMenuAction::NewFileOfType { label, extension } => Some((*label, *extension)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(types.len(), NEW_FILE_TYPES.len());
+        for (label, extension) in types {
+            assert!(!extension.is_empty(), "{label} has no extension");
+            assert!(!extension.starts_with('.'), "{label}: the dot is added when building the name, not stored");
+        }
+    }
+
+    #[test]
+    fn no_two_offered_file_types_share_an_extension() {
+        let mut seen: Vec<&str> = Vec::new();
+        for (label, extension) in NEW_FILE_TYPES {
+            assert!(!seen.contains(&extension), "{label} repeats extension {extension}");
+            seen.push(extension);
+        }
     }
 
     #[test]

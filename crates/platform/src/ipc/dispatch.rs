@@ -39,6 +39,7 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
                 master_count: wm.tiling.master_count,
                 per_monitor: wm.per_monitor_workspaces,
                 button_style: if wm.theme.traffic_light_buttons { "traffic_lights" } else { "traditional" }.to_string(),
+                button_mode: if wm.theme.dynamic_buttons { "dynamic" } else { "fixed" }.to_string(),
                 button_side: if wm.theme.buttons_left { "left" } else { "right" }.to_string(),
                 button_order: wm.theme.button_order.map(srdwm_core::format_button_order),
                 title_centered: wm.theme.title_centered,
@@ -521,6 +522,18 @@ fn handle_set(req: &serde_json::Value, wm: &std::rc::Rc<std::cell::RefCell<Windo
                 return (err("button_style needs \"traffic_lights\" or \"traditional\""), false);
             }
             wm.borrow_mut().theme.traffic_light_buttons = v == "traffic_lights";
+            (ok(), true)
+        }
+        // `srd set button_mode <dynamic|fixed>` - live equivalent of
+        // `theme.decorations.title_bar.button_mode`
+        // (`ThemeConfig::dynamic_buttons`). Same scope note as
+        // `button_style` above.
+        "button_mode" => {
+            let Some(v) = value.and_then(|v| v.as_str()) else { return (err("button_mode needs \"dynamic\" or \"fixed\""), false) };
+            if v != "dynamic" && v != "fixed" {
+                return (err("button_mode needs \"dynamic\" or \"fixed\""), false);
+            }
+            wm.borrow_mut().theme.dynamic_buttons = v == "dynamic";
             (ok(), true)
         }
         // `srd set button_side <left|right>` - live equivalent of `theme.

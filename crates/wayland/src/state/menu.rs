@@ -143,9 +143,21 @@ impl CompState {
     /// (global space, by convention the maximize button's own titlebar
     /// position). Same build-once-on-open pattern as `open_context_menu`.
     pub(crate) fn open_snap_flyout(&mut self, window: WindowId, pos: (i32, i32)) {
-        let flyout = crate::snap_flyout::SnapFlyout::open(window, pos);
+        let mut flyout = crate::snap_flyout::SnapFlyout::open(window, pos);
         let theme = self.wm.borrow().theme;
         let labels: Vec<&str> = flyout.cells().iter().map(|z| z.label()).collect();
+        // Grow each cell to fit the widest label, exactly as
+        // `open_context_menu` above already does for menu rows - never
+        // shrinking below the built-in minimum `SnapFlyout::open` picked.
+        //
+        // The flyout was the one labelled surface in this compositor that
+        // never got this treatment: at the fixed 90px cell width "Bottom
+        // Right" was cut off mid-word and "Top Left" ran into its
+        // neighbour, the same "text goes out of view" fault already
+        // reported and fixed for the context menu.
+        let font = decoration::find_system_font();
+        let widest = labels.iter().map(|l| decoration::measure_text_width(&font, l, decoration::FONT_PIXELS)).fold(0.0_f32, f32::max);
+        flyout.cell_width = flyout.cell_width.max((widest + decoration::TEXT_LEFT_PADDING * 2.0).ceil() as u32);
         let data = decoration::render_snap_flyout(3, flyout.cell_width, flyout.cell_height, &labels, theme.titlebar_bg, theme.titlebar_fg_focused, theme.default_border_color);
         let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (flyout.width() as i32, flyout.height() as i32), 1, Transform::Normal, None);
         self.snap_flyout_buffer = Some(buffer);

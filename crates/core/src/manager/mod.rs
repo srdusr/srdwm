@@ -1,7 +1,7 @@
 use crate::geometry::Rect;
 use crate::layout::{Layout, MasterStackLayout, NoOpLayout, TilingConfig};
 use crate::monitor::{DisabledMonitor, Monitor, MonitorId, MonitorSplit};
-use crate::placement::{PlacementConfig, SmartPlacement, SnapZoneKind, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH};
+use crate::placement::{centered_in, PlacementConfig, SmartPlacement, SnapZoneKind, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SNAP_FLYOUT_EDGE};
 use crate::rules::WindowRule;
 #[cfg(test)]
 use crate::rules::{WindowMatch, WindowRuleActions};
@@ -43,6 +43,17 @@ struct DragState {
     start_x: i32,
     start_y: i32,
     orig: Rect,
+    /// Where the pointer was on the last `update_drag` tick, global space.
+    /// Seeded from the drag's own start point so it is never meaningless,
+    /// even for a drag that ends before a single motion event arrives.
+    ///
+    /// Only the *pointer* can answer "is the user reaching for the top of
+    /// the screen right now" - `orig`/`Window::geometry` answer "where is
+    /// the window", which is a different question during a drag, because
+    /// the window hangs below the grab point by however far down its
+    /// titlebar the user took hold of it. See `drag_top_edge_monitor`.
+    last_x: i32,
+    last_y: i32,
 }
 
 struct ResizeState {
@@ -423,6 +434,9 @@ pub struct WindowManager {
     /// Read from `theme.lock.*`. See `LockConfig`'s own doc comment for
     /// why this isn't just folded into `theme` above.
     pub lock: LockConfig,
+    /// Set by `request_refresh`, drained by the main loop. Same
+    /// cross-boundary queued-request shape as `lock_requested`.
+    refresh_requested: bool,
     drag: Option<DragState>,
     resize: Option<ResizeState>,
     rules: Vec<WindowRule>,
@@ -586,6 +600,7 @@ impl WindowManager {
             auto_raise: false,
             theme: ThemeConfig::default(),
             lock: LockConfig::default(),
+            refresh_requested: false,
             drag: None,
             resize: None,
             rules: Vec::new(),

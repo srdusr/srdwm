@@ -152,7 +152,7 @@ fn shadow_bitmap_corner_is_softer_than_a_square_windows_when_rounded() {
 
 #[test]
 fn fills_background_when_no_text() {
-    let buf = render_titlebar(40, 20, "", (0x2e, 0x34, 0x40), (0xec, 0xef, 0xf4), true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false);
+    let buf = render_titlebar(40, 20, "", (0x2e, 0x34, 0x40), (0xec, 0xef, 0xf4), true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false, true);
     assert_eq!(buf.len(), 40 * 20 * 4);
     // Center, not (0,0): the top-left pixel is inside the rounded
     // corner `round_top_corners` clips away, so it's transparent by
@@ -175,7 +175,7 @@ fn button_icons_are_drawn_in_the_squares_hit_test_assigns_them() {
     let (width, height) = (300u32, srdwm_core::TITLEBAR_HEIGHT);
     let bg = (0x2e, 0x34, 0x40);
     let fg = (0xec, 0xef, 0xf4);
-    let buf = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false);
+    let buf = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false, true);
     let frame = srdwm_core::Rect::new(0, 0, width, height);
     let (width, height) = (width as usize, height as usize);
 
@@ -189,7 +189,7 @@ fn button_icons_are_drawn_in_the_squares_hit_test_assigns_them() {
         let cx = (x0 + x1) / 2;
         let cy = (y0 + y1) / 2;
         assert_eq!(
-            srdwm_core::ResizeEdge::hit_test(frame, cx, cy, true, 0, srdwm_core::RESIZE_MARGIN, false, None, false),
+            srdwm_core::ResizeEdge::hit_test(frame, cx, cy, true, 0, srdwm_core::RESIZE_MARGIN, false, None, false, true),
             Some(expected),
             "icon drawn at right_offset={right_offset} does not land in the square hit_test assigns to {expected:?}"
         );
@@ -208,8 +208,8 @@ fn a_dialog_draws_only_close_and_never_a_coloured_traffic_light() {
     // must override it regardless of what the active theme otherwise
     // uses everywhere else. `glyph_always = true` so Close's own X is
     // visible without needing a live hover to check it landed.
-    let dialog = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, true, None, true, true);
-    let normal = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, true, None, true, false);
+    let dialog = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, true, None, true, true, true);
+    let normal = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, true, None, true, false, true);
     let (w, h) = (width as usize, height as usize);
 
     // Where a normal (non-dialog) titlebar draws Maximize (offset
@@ -251,7 +251,7 @@ fn drawing_title_changes_some_pixels_when_font_available() {
     }
     let bg = (0x2e, 0x34, 0x40);
     let fg = (0xec, 0xef, 0xf4);
-    let buf = render_titlebar(200, 30, "Terminal", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false);
+    let buf = render_titlebar(200, 30, "Terminal", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false, true);
     let bg_bytes = rgb_to_bgra(bg, 255);
     let changed = buf.chunks_exact(4).any(|px| px != bg_bytes);
     assert!(changed, "expected at least one pixel to differ from the background once text is drawn");
@@ -282,8 +282,8 @@ fn centered_title_starts_further_right_than_left_aligned() {
     let leftmost_ink_column = |buf: &[u8]| -> Option<usize> {
         (0..width as usize).find(|&x| scan_rows.clone().any(|y| buf[(y * width as usize + x) * 4..(y * width as usize + x) * 4 + 4] != bg_bytes))
     };
-    let left = render_titlebar(width, height, "Hi", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false);
-    let centered = render_titlebar(width, height, "Hi", bg, fg, true, CORNER_RADIUS, 0, true, None, true, false, false, None, true, false);
+    let left = render_titlebar(width, height, "Hi", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false, true);
+    let centered = render_titlebar(width, height, "Hi", bg, fg, true, CORNER_RADIUS, 0, true, None, true, false, false, None, true, false, true);
     let left_start = leftmost_ink_column(&left).expect("left-aligned title must draw some ink");
     let centered_start = leftmost_ink_column(&centered).expect("centered title must draw some ink");
     assert!(centered_start > left_start, "a short title centered in a wide titlebar must start well to the right of the left-aligned version (left starts at {left_start}, centered at {centered_start})");
@@ -315,7 +315,7 @@ fn centered_title_ignores_the_button_reservation_and_centers_on_the_whole_width(
     let ink_columns = |buf: &[u8]| -> Vec<usize> {
         (button_reservation..width as usize).filter(|&x| scan_rows.clone().any(|y| buf[(y * width as usize + x) * 4..(y * width as usize + x) * 4 + 4] != bg_bytes)).collect()
     };
-    let buf = render_titlebar(width, height, "Hi", bg, fg, true, CORNER_RADIUS, 0, true, None, true, true, false, None, true, false);
+    let buf = render_titlebar(width, height, "Hi", bg, fg, true, CORNER_RADIUS, 0, true, None, true, true, false, None, true, false, true);
     let columns = ink_columns(&buf);
     let (first, last) = (*columns.first().expect("centered title must draw some ink"), *columns.last().unwrap());
     let midpoint = (first + last) as f32 / 2.0;
@@ -327,7 +327,7 @@ fn centered_title_ignores_the_button_reservation_and_centers_on_the_whole_width(
 fn empty_title_leaves_buffer_all_background_outside_the_rounded_corners() {
     let bg = (0x10, 0x20, 0x30);
     let (width, height) = (50, 24);
-    let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false);
+    let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false, true);
     let bg_bytes = rgb_to_bgra(bg, 255);
     for (i, px) in buf.chunks_exact(4).enumerate() {
         let (x, y) = (i % width as usize, i / width as usize);
@@ -343,7 +343,7 @@ fn empty_title_leaves_buffer_all_background_outside_the_rounded_corners() {
 fn corners_are_clipped_but_the_middle_is_not() {
     let bg = (0x10, 0x20, 0x30);
     let (width, height) = (50, 24);
-    let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false);
+    let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false, true);
     let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
     // The very corner pixel is well outside the quarter-circle at any
     // sane radius - fully clipped.
@@ -374,7 +374,7 @@ fn clipped_corner_pixels_are_fully_premultiplied_zero_not_just_alpha() {
     // is `(0, 0, 0, 0)` in every channel, not just alpha.
     let bg = (0x10, 0x20, 0x30);
     let (width, height) = (50, 24);
-    let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false);
+    let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false, true);
     let px_at = |x: usize, y: usize| &buf[(y * width as usize + x) * 4..(y * width as usize + x) * 4 + 4];
     assert_eq!(px_at(0, 0), [0, 0, 0, 0], "top-left corner pixel must be fully zeroed (premultiplied transparent), not just alpha");
     assert_eq!(px_at(width as usize - 1, 0), [0, 0, 0, 0], "top-right corner pixel must be fully zeroed (premultiplied transparent), not just alpha");
@@ -384,7 +384,7 @@ fn clipped_corner_pixels_are_fully_premultiplied_zero_not_just_alpha() {
 fn round_corners_false_leaves_the_top_corners_square() {
     let bg = (0x10, 0x20, 0x30);
     let (width, height) = (50, 24);
-    let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), false, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false);
+    let buf = render_titlebar(width, height, "", bg, (0xff, 0xff, 0xff), false, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false, true);
     let alpha_at = |x: usize, y: usize| buf[(y * width as usize + x) * 4 + 3];
     assert_eq!(alpha_at(0, 0), 255, "top-left corner should stay square when round_corners is false");
     assert_eq!(alpha_at(width as usize - 1, 0), 255, "top-right corner should stay square when round_corners is false");
@@ -406,8 +406,8 @@ fn hovering_the_close_button_brightens_only_that_dot() {
     let (width, height) = (200u32, srdwm_core::TITLEBAR_HEIGHT);
     let bg = (0x2e, 0x34, 0x40);
     let fg = (0xec, 0xef, 0xf4);
-    let plain = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false);
-    let close_hovered = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS, 0, true, Some((srdwm_core::TitlebarHit::Close, 255)), false, false, false, None, true, false);
+    let plain = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false, true);
+    let close_hovered = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS, 0, true, Some((srdwm_core::TitlebarHit::Close, 255)), false, false, false, None, true, false, true);
     let frame = srdwm_core::Rect::new(0, 0, width, height);
     let (w, h) = (width as usize, height as usize);
     let margin = srdwm_core::BUTTON_CLUSTER_MARGIN as usize;
@@ -424,7 +424,7 @@ fn hovering_the_close_button_brightens_only_that_dot() {
     // point to Close, or this test would be checking a hover state
     // that a real pointer could never reach in the first place.
     let (cx, cy) = ((close_box.0 + close_box.2) / 2, (close_box.1 + close_box.3) / 2);
-    assert_eq!(srdwm_core::ResizeEdge::hit_test(frame, cx, cy, true, 0, srdwm_core::RESIZE_MARGIN, false, None, false), Some(srdwm_core::TitlebarHit::Close));
+    assert_eq!(srdwm_core::ResizeEdge::hit_test(frame, cx, cy, true, 0, srdwm_core::RESIZE_MARGIN, false, None, false, true), Some(srdwm_core::TitlebarHit::Close));
 }
 
 #[test]
@@ -439,7 +439,7 @@ fn button_dot_has_a_glossy_highlight_toward_the_upper_left_and_shadow_toward_the
     let (width, height) = (200u32, srdwm_core::TITLEBAR_HEIGHT);
     let bg = (0x2e, 0x34, 0x40);
     let fg = (0xec, 0xef, 0xf4);
-    let buf = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false);
+    let buf = render_titlebar(width, height, "", bg, fg, true, CORNER_RADIUS, 0, true, None, false, false, false, None, true, false, true);
     let (w, h) = (width as usize, height as usize);
     let close_box = button_box(w, h, srdwm_core::BUTTON_CLUSTER_MARGIN as usize, false, BUTTON_MARGIN);
     let (cx, cy) = ((close_box.0 + close_box.2) / 2, (close_box.1 + close_box.3) / 2);
@@ -501,7 +501,7 @@ fn border_top_and_titlebar_corners_meet_without_a_seam() {
     let color = (0x40, 0x50, 0x60);
     let (width, thickness, radius) = (60, 4, 6);
     let border = render_border_top(width, thickness, color, radius, true);
-    let titlebar = render_titlebar(width, 24, "", color, (0xff, 0xff, 0xff), true, radius, thickness, true, None, false, false, false, None, true, false);
+    let titlebar = render_titlebar(width, 24, "", color, (0xff, 0xff, 0xff), true, radius, thickness, true, None, false, false, false, None, true, false, true);
     let border_alpha_at = |x: usize| border[((thickness as usize - 1) * width as usize + x) * 4 + 3];
     let titlebar_alpha_at = |xt: usize| titlebar[xt * 4 + 3];
     // `x` below is the shared *global* column - distance from the true

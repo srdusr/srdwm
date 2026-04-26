@@ -564,12 +564,23 @@ impl CompState {
     /// against this menu next to Windows'/macOS' own. Same collision-
     /// avoidance and refresh as `new_desktop_folder` just above.
     pub(crate) fn new_desktop_text_file(&mut self) {
+        self.new_desktop_file("New Text Document", "txt");
+    }
+
+    /// Creates an empty `~/Desktop/New <stem>.<extension>`, adding ` (2)`,
+    /// ` (3)` ... until the name is free, then refreshes the icon grid.
+    ///
+    /// The de-duplication counter goes before the extension, not after the
+    /// whole filename: `New Shell Script (2).sh` is still a shell script,
+    /// `New Shell Script.sh (2)` is not - and the extension is the entire
+    /// point of letting the type be chosen here.
+    pub(crate) fn new_desktop_file(&mut self, stem: &str, extension: &str) {
         let Ok(home) = std::env::var("HOME") else { return };
         let desktop = std::path::PathBuf::from(home).join("Desktop");
-        let mut name = "New Text Document.txt".to_string();
+        let mut name = format!("{stem}.{extension}");
         let mut n = 2;
         while desktop.join(&name).exists() {
-            name = format!("New Text Document ({n}).txt");
+            name = format!("{stem} ({n}).{extension}");
             n += 1;
         }
         if let Err(e) = std::fs::write(desktop.join(&name), "") {
@@ -639,7 +650,15 @@ impl CompState {
             DesktopMenuAction::OpenTerminalHere => self.open_terminal_here(),
             DesktopMenuAction::OpenInFileManager => self.open_desktop_in_file_manager(),
             DesktopMenuAction::SelectAll => self.select_all_desktop_icons(),
-            DesktopMenuAction::Refresh => self.refresh_desktop_icons(),
+            DesktopMenuAction::NewFileOfType { label, extension } => self.new_desktop_file(&format!("New {label}"), extension),
+            DesktopMenuAction::Refresh => {
+                self.refresh_desktop_icons();
+                // Re-reads the Lua config and fires `srd.on("refresh")`,
+                // so a user's own "restart my bar / reload my shell" list
+                // runs from the same menu row - see
+                // `WindowManager::request_refresh`.
+                self.wm.borrow_mut().request_refresh();
+            }
             // Never actually reached - the click-dispatch site intercepts
             // `Separator` first, same as `context_menu::MenuAction::
             // Separator`'s own dispatch. Handled here too so this match

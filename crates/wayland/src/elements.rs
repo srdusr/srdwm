@@ -77,6 +77,63 @@ pub(crate) fn border_side_render_element(buf: &mut SolidColorBuffer, strip: srdw
     SolidColorRenderElement::from_buffer(buf, loc, 1.0, 1.0, Kind::Unspecified)
 }
 
+/// How thick the snap preview's outline is, in logical pixels.
+const SNAP_PREVIEW_OUTLINE: i32 = 3;
+
+/// Opacity of the snap preview's translucent interior fill.
+///
+/// Low on purpose: this sits on top of whatever is already on screen, and
+/// its job is to say "the window lands *here*" without hiding what is
+/// underneath. The outline carries the shape; the fill only tints it.
+const SNAP_PREVIEW_FILL_ALPHA: f32 = 0.22;
+
+/// The drop-target overlay drawn while a window is being dragged into a
+/// snap zone - a translucent fill plus a solid outline over the rect the
+/// window will occupy when the button comes up.
+///
+/// `buffers` is a persistent pool (five entries: fill, then top/bottom/
+/// left/right outline) for exactly the reason [`border_side_render_element`]
+/// documents at length - a fresh `SolidColorBuffer` per frame gets a fresh
+/// `Id`, which makes smithay's damage tracker mark the element damaged on
+/// every frame forever and stops the output ever going idle.
+///
+/// Solid fills, not a rasterised bitmap: the preview rect is up to a whole
+/// monitor in size and changes as the drag moves, so building an ARGB
+/// buffer for it would mean allocating and filling megabytes per zone
+/// change. `Frame::draw_solid` needs no texture at all.
+pub(crate) fn snap_preview_elements(buffers: &mut Vec<SolidColorBuffer>, rect: srdwm_core::Rect, color: (u8, u8, u8), origin: (i32, i32)) -> Vec<SolidColorRenderElement> {
+    if rect.width == 0 || rect.height == 0 {
+        return Vec::new();
+    }
+    let (r, g, b) = (color.0 as f32 / 255.0, color.1 as f32 / 255.0, color.2 as f32 / 255.0);
+    let t = SNAP_PREVIEW_OUTLINE.min(rect.width as i32 / 2).min(rect.height as i32 / 2).max(1);
+    let (w, h) = (rect.width as i32, rect.height as i32);
+    // Fill first so the outline draws over it, then the four edges.
+    let parts: [(srdwm_core::Rect, f32); 5] = [
+        (rect, SNAP_PREVIEW_FILL_ALPHA),
+        (srdwm_core::Rect::new(rect.x, rect.y, rect.width, t as u32), 1.0),
+        (srdwm_core::Rect::new(rect.x, rect.y + h - t, rect.width, t as u32), 1.0),
+        (srdwm_core::Rect::new(rect.x, rect.y + t, t as u32, (h - 2 * t).max(0) as u32), 1.0),
+        (srdwm_core::Rect::new(rect.x + w - t, rect.y + t, t as u32, (h - 2 * t).max(0) as u32), 1.0),
+    ];
+    let mut out = Vec::with_capacity(parts.len());
+    for (index, (part, alpha)) in parts.into_iter().enumerate() {
+        if part.width == 0 || part.height == 0 {
+            continue;
+        }
+        let buf = border_fragment_buffer(buffers, index);
+        // Alpha lives in the element, not the buffer colour: `SolidColorBuffer::
+        // update` only bumps its commit counter when size or colour change,
+        // so keeping the colour opaque here means a preview that merely
+        // moves does not also invalidate on a colour it never actually
+        // changed.
+        buf.update((part.width as i32, part.height as i32), Color32F::new(r, g, b, 1.0));
+        let loc = Point::from((part.x - origin.0, part.y - origin.1));
+        out.push(SolidColorRenderElement::from_buffer(buf, loc, 1.0, alpha, Kind::Unspecified));
+    }
+    out
+}
+
 /// Splits a border strip into the sub-rectangles still visible after
 /// subtracting every window rect stacked in front of it.
 ///

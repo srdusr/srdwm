@@ -6,6 +6,18 @@
 use super::*;
 
 impl WindowManager {
+    /// Whether `w` gets a Maximize button, resolving `theme.dynamic_buttons`
+    /// against the window's own declared resizability.
+    ///
+    /// Lives here, next to the hit-test that consumes it, so the renderer
+    /// and the hit-test are reading one shared answer rather than each
+    /// deriving their own - these two have drifted apart before, and the
+    /// failure mode (buttons drawn in one set of slots, clicks resolved
+    /// against another) is silent.
+    pub fn show_maximize(&self, w: &Window) -> bool {
+        !self.theme.dynamic_buttons || w.resizable
+    }
+
     // ---- Hit testing ------------------------------------------------------
 
     /// Topmost window whose frame contains `(x, y)`, along with what part of
@@ -59,7 +71,7 @@ impl WindowManager {
             }
             let margin = w.resize_margin.unwrap_or(self.resize_margin);
             let geometry = geometry_for(w.id, w.geometry);
-            if let Some(hit) = ResizeEdge::hit_test(geometry, x, y, w.decorated, w.border_width, margin, self.theme.buttons_left, self.theme.button_order, w.is_dialog) {
+            if let Some(hit) = ResizeEdge::hit_test(geometry, x, y, w.decorated, w.border_width, margin, self.theme.buttons_left, self.theme.button_order, w.is_dialog, self.show_maximize(w)) {
                 return Some((w.id, hit));
             }
             // Not a titlebar/border/resize-margin hit on `w` - but if the

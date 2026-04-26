@@ -79,7 +79,7 @@ impl Engine {
     pub(super) fn fn_on(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |lua, (name, f): (String, mlua::Function)| {
-            const KNOWN: [&str; 3] = ["lid_closed", "lid_open", "ready"];
+            const KNOWN: [&str; 4] = ["lid_closed", "lid_open", "ready", "refresh"];
             if !KNOWN.contains(&name.as_str()) {
                 return Err(mlua::Error::RuntimeError(format!(
                     "srd.on: unknown event '{name}' (known: {})",
@@ -323,6 +323,29 @@ impl Engine {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |_, ()| {
             state.borrow().running.set(false);
+            Ok(())
+        })?)
+    }
+
+    /// `srd.lock()` - locks the session, the same request the control
+    /// CLI's own lock dispatch sends over IPC.
+    ///
+    /// Native rather than left to a `srd.spawn(...)` shelling out to that
+    /// CLI: a lock binding that shells out fails silently when the binary
+    /// is not on the config's own `PATH`, which is exactly the situation a
+    /// user is least able to diagnose - the screen simply does not lock.
+    /// This goes straight to `WindowManager::request_lock`, the same flag
+    /// the IPC dispatch sets, so the backend's existing drain handles it
+    /// with no second code path.
+    ///
+    /// There was no way to bind the built-in lock screen from Lua at all
+    /// before this; the shipped config's only lock key ran an external
+    /// script. Asked directly: "do we have a lockscreen binding?".
+    pub(super) fn fn_lock(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, ()| {
+            let wm = state.borrow().wm.clone();
+            wm.borrow_mut().request_lock();
             Ok(())
         })?)
     }

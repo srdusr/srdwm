@@ -16,6 +16,25 @@ impl Engine {
         })?)
     }
 
+    /// `srd.layout.get()` - the name of the layout the *current workspace*
+    /// is using right now.
+    ///
+    /// Deliberately not `srd.get("workspace.layout")`, which reads the
+    /// config values table: that holds the configured default layout for
+    /// new workspaces, not what the workspace in front of you switched to
+    /// since. A toggle written against that key works exactly once and
+    /// then sticks, because the value it reads never changes.
+    pub(super) fn fn_layout_get(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |lua, ()| {
+            let wm = state.borrow().wm.clone();
+            let wm = wm.borrow();
+            let ws = wm.current_workspace();
+            let name = wm.workspace(ws).map(|w| w.layout.clone()).unwrap_or_default();
+            Ok(Value::String(lua.create_string(&name)?))
+        })?)
+    }
+
     pub(super) fn fn_layout_configure(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |_, (name, table): (String, Table)| {

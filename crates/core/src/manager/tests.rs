@@ -700,6 +700,160 @@
         assert_eq!(wm.window(a).unwrap().geometry, original);
     }
 
+    /// Adds a window and drags it by exactly `(dx, dy)`, leaving the drag
+    /// open. Deltas rather than absolute targets because `add_window` runs
+    /// `SmartPlacement`, so a window's real starting rect is chosen by the
+    /// placement policy, not by whatever the test set before adding it.
+    fn drag_by(wm: &mut WindowManager, dx: i32, dy: i32) -> (WindowId, Rect) {
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let start = wm.window(a).unwrap().geometry;
+        // Grab well down the window so the pointer and the window's own
+        // top edge are never accidentally the same measurement.
+        let (px, py) = (start.x + 40, start.y + 40);
+        wm.start_drag(a, px, py);
+        wm.update_drag(px + dx, py + dy);
+        (a, start)
+    }
+
+    #[test]
+    fn dragging_to_the_left_edge_previews_the_left_half_before_release() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let start = wm.window(a).unwrap().geometry;
+        assert_eq!(wm.drag_snap_preview(), None, "no drag in progress");
+
+        let (px, py) = (start.x + 40, start.y + 40);
+        wm.start_drag(a, px, py);
+        assert_eq!(wm.drag_snap_preview(), None, "still where it started: nothing to preview");
+
+        // Exactly enough to put the window's own left edge on x=0.
+        wm.update_drag(px - start.x, py);
+        assert_eq!(wm.drag_snap_preview(), Some(Rect::new(0, 0, 960, 1080)), "left half");
+    }
+
+    #[test]
+    fn the_drag_preview_is_exactly_what_release_then_commits() {
+        // The preview and the commit must never be able to disagree --
+        // both go through SmartPlacement::snap_zone on the same inputs.
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let start = wm.window(a).unwrap().geometry;
+        let (px, py) = (start.x + 40, start.y + 40);
+        wm.start_drag(a, px, py);
+        wm.update_drag(px - start.x, py);
+        let previewed = wm.drag_snap_preview().expect("a zone was previewed");
+        wm.end_drag();
+        assert_eq!(wm.window(a).unwrap().geometry, previewed);
+    }
+
+    #[test]
+    fn a_drag_that_is_not_near_any_edge_previews_nothing() {
+        let mut wm = wm_with_monitor();
+        let (_, _) = drag_by(&mut wm, 300, 300);
+        assert_eq!(wm.drag_snap_preview(), None);
+    }
+
+    #[test]
+    fn the_flyout_trigger_follows_the_pointer_not_the_windows_own_top_edge() {
+        // A drag grabbed 40px down its titlebar holds the window's top
+        // edge 40px below the pointer, and `update_drag` clamps the window
+        // to the monitor while the pointer is free to reach y=0. Aiming
+        // the cursor at the top of the screen has to be enough on its own.
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let start = wm.window(a).unwrap().geometry;
+        let (px, py) = (start.x + 40, start.y + 40);
+        wm.start_drag(a, px, py);
+
+        wm.update_drag(px, py + 200);
+        assert!(wm.drag_top_edge_monitor().is_none(), "mid-screen");
+
+        wm.update_drag(px, 2);
+        assert_eq!(wm.drag_top_edge_monitor().map(|m| m.id), Some(0), "pointer is at the top edge");
+    }
+
+    #[test]
+    fn the_flyout_trigger_needs_the_pointer_actually_at_the_edge() {
+        let mut wm = wm_with_monitor();
+        drag_by(&mut wm, 0, -10_000);
+        // Clamped hard against the top: the pointer went with it, so this
+        // one legitimately does trigger.
+        assert!(wm.drag_top_edge_monitor().is_some());
+
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "a"));
+        let start = wm.window(a).unwrap().geometry;
+        wm.start_drag(a, start.x + 40, start.y + 40);
+        wm.update_drag(start.x + 40, SNAP_FLYOUT_EDGE + 1);
+        assert!(wm.drag_top_edge_monitor().is_none(), "one pixel outside the band");
+    }
+
+    #[test]
+    fn there_is_no_flyout_trigger_when_nothing_is_being_dragged() {
+        let wm = wm_with_monitor();
+        assert!(wm.drag_top_edge_monitor().is_none());
+    }
+
+    #[test]
+    fn a_dialog_opens_centered_not_cascaded_into_the_corner() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        let mut d = Window::new(a, "dialog");
+        d.is_dialog = true;
+        d.geometry = Rect::new(0, 0, 400, 300);
+        wm.add_window(d);
+        // 1920x1080 monitor, 400x300 dialog.
+        assert_eq!(wm.window(a).unwrap().geometry, Rect::new(760, 390, 400, 300));
+    }
+
+    #[test]
+    fn a_dialog_ignores_the_apps_remembered_position() {
+        // `remembered_geometry` is keyed by app_id, which a dialog shares
+        // with the window that spawned it - without the dialog branch
+        // running first, a dialog lands wherever that app's last main
+        // window sat.
+        let mut wm = wm_with_monitor();
+        wm.set_remembered_geometry("someapp".to_string(), (50, 60, 900, 700));
+        let a = wm.alloc_window_id();
+        let mut d = Window::new(a, "dialog");
+        d.app_id = "someapp".into();
+        d.is_dialog = true;
+        d.geometry = Rect::new(0, 0, 400, 300);
+        wm.add_window(d);
+        let g = wm.window(a).unwrap().geometry;
+        assert_eq!((g.x, g.y), (760, 390), "centred, not restored to (50,60)");
+    }
+
+    #[test]
+    fn an_ordinary_window_still_uses_its_remembered_position() {
+        // The dialog branch must not have stolen the normal path.
+        let mut wm = wm_with_monitor();
+        wm.set_remembered_geometry("someapp".to_string(), (50, 60, 900, 700));
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "main");
+        w.app_id = "someapp".into();
+        wm.add_window(w);
+        let g = wm.window(a).unwrap().geometry;
+        assert_eq!((g.x, g.y), (50, 60));
+    }
+
+    #[test]
+    fn a_dialog_larger_than_the_screen_still_starts_on_screen() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        let mut d = Window::new(a, "dialog");
+        d.is_dialog = true;
+        d.geometry = Rect::new(0, 0, 4000, 3000);
+        wm.add_window(d);
+        let g = wm.window(a).unwrap().geometry;
+        assert!(g.x >= 0 && g.y >= 0, "clamped to the monitor origin, got {g:?}");
+    }
+
     #[test]
     fn apply_snap_zone_resizes_to_the_named_zones_rect() {
         let mut wm = wm_with_monitor();

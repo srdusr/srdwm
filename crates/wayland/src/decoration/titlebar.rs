@@ -76,6 +76,13 @@ pub fn render_titlebar(
     // the same "renders on one side, hit-tests on the other" trap every
     // other button-geometry value here already has to avoid.
     is_dialog: bool,
+    // Whether a Maximize button is drawn at all - `WindowManager::
+    // show_maximize`'s answer, which resolves `theme.dynamic_buttons`
+    // against the window's own `resizable`. Must stay in exact agreement
+    // with `ResizeEdge::hit_test`'s own `show_maximize` parameter, the
+    // same "renders on one side, hit-tests on the other" contract
+    // `is_dialog` directly above already carries.
+    show_maximize: bool,
 ) -> Vec<u8> {
     let (width, height) = (width.max(1) as usize, height.max(1) as usize);
     // Forced off, not just defaulted - a dialog never gets coloured
@@ -98,7 +105,13 @@ pub fn render_titlebar(
     let cluster_margin = srdwm_core::BUTTON_CLUSTER_MARGIN as usize;
     // A dialog only ever gets one button (Close) - see this function's own
     // `is_dialog` doc comment.
-    let wanted_buttons = if is_dialog { 1 } else { 3 };
+    let wanted_buttons = if is_dialog {
+        1
+    } else if show_maximize {
+        3
+    } else {
+        2
+    };
     let button_count = if width >= cluster_margin + pitch * wanted_buttons { wanted_buttons } else { 0 };
     // `BUTTON_CLUSTER_MARGIN` included, not just the buttons' own `pitch *
     // button_count` span - the cluster's own leading gap needs reserving
@@ -244,6 +257,15 @@ pub fn render_titlebar(
             } else {
                 [srdwm_core::TitlebarButton::Close, srdwm_core::TitlebarButton::Maximize, srdwm_core::TitlebarButton::Minimize]
             })
+        };
+        // Maximize removed from the list rather than skipped in the loop:
+        // skipping would leave an empty slot where it used to be, while
+        // `hit_test` closes the gap - so every later button would be drawn
+        // one pitch away from where its clicks actually land.
+        let order: Vec<srdwm_core::TitlebarButton> = if show_maximize {
+            order.to_vec()
+        } else {
+            order.iter().copied().filter(|b| *b != srdwm_core::TitlebarButton::Maximize).collect()
         };
         // `BUTTON_CLUSTER_MARGIN` first, then each button's own `pitch * i`
         // spacing after it - must stay in agreement with `ResizeEdge::

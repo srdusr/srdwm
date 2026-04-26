@@ -4,17 +4,58 @@ use super::*;
 /// the closure can't capture `&Engine` itself (it isn't `Clone`/`Rc`, and
 /// `mlua::Lua::create_function` needs a `'static` closure), so both go
 /// through cloned `Lua`/state handles instead of one calling the other.
+/// Re-executes `init.lua`, and puts the previous config back if that fails.
+///
+/// The clear-then-execute order is required: a binding or handler deleted
+/// from the edited file has to actually disappear, which only clearing
+/// first achieves. The bug was that nothing ever undid the clear. A Lua
+/// syntax error - the single most likely thing to go wrong with a
+/// programmable config, and the thing a user is most likely to do by
+/// accident - left the compositor with **no keybindings at all**: not the
+/// old ones, not the new ones. The only key still working was the hardcoded
+/// reload combo `main.rs` handles before consulting Lua, which is the one
+/// key nobody thinks to press when their config has just stopped working,
+/// because nothing tells them that is the situation.
+///
+/// Now the three maps are moved out rather than cleared, and moved back on
+/// any failure, so a broken edit leaves the last *working* config running.
+/// That is the behaviour every mainstream programmable config has (tmux,
+/// Neovim, Hyprland): a bad reload is a no-op with an error, not a
+/// half-applied state.
+///
+/// Answers "what happens when our config fails/user does something wrong
+/// which can be expected since lua programmable config" - asked directly,
+/// and previously answered by the code with "you lose every keybinding".
 pub(super) fn do_reload(lua: &Lua, state: &Rc<RefCell<SharedState>>) -> Result<()> {
-    let config_dir = {
+    let (config_dir, previous) = {
         let mut s = state.borrow_mut();
-        s.key_bindings.clear();
-        s.event_handlers.clear();
-        s.repeat_keys.clear();
-        s.config_dir.clone()
+        let previous = (
+            std::mem::take(&mut s.key_bindings),
+            std::mem::take(&mut s.event_handlers),
+            std::mem::take(&mut s.repeat_keys),
+        );
+        (s.config_dir.clone(), previous)
+    };
+    let restore = |state: &Rc<RefCell<SharedState>>, previous: (_, _, _)| {
+        let mut s = state.borrow_mut();
+        // Whatever the failed run managed to register before erroring is
+        // discarded, not merged: half of a broken config is not a config.
+        s.key_bindings = previous.0;
+        s.event_handlers = previous.1;
+        s.repeat_keys = previous.2;
     };
     let path = config_dir.join("init.lua");
-    let src = std::fs::read_to_string(&path).map_err(|source| ConfigError::Io { path: path.clone(), source })?;
-    lua.load(&src).set_name(path.to_string_lossy().as_ref()).exec()?;
+    let src = match std::fs::read_to_string(&path) {
+        Ok(src) => src,
+        Err(source) => {
+            restore(state, previous);
+            return Err(ConfigError::Io { path, source });
+        }
+    };
+    if let Err(e) = lua.load(&src).set_name(path.to_string_lossy().as_ref()).exec() {
+        restore(state, previous);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -138,6 +179,9 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
         m.insert(k.to_string(), v);
     };
     set("general.default_layout", String("dynamic".into()));
+    // Re-read `init.lua` when it changes on disk, no reload key needed.
+    // See `main.rs`'s `config_mtime`/`CONFIG_POLL_INTERVAL`.
+    set("general.config_reload_on_write", Bool(true));
     set("general.smart_placement", Bool(true));
     set("general.window_gap", Number(8.0));
     set("general.animations", Bool(true));

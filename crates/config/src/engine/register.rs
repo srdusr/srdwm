@@ -20,6 +20,7 @@ impl Engine {
         srd.set("setenv", self.fn_setenv()?)?;
         srd.set("notify", self.fn_notify()?)?;
         srd.set("quit", self.fn_quit()?)?;
+        srd.set("lock", self.fn_lock()?)?;
         srd.set("reload", self.fn_reload()?)?;
         srd.set("validate_config", self.fn_validate_config()?)?;
 
@@ -65,6 +66,7 @@ impl Engine {
 
         let layout = lua.create_table()?;
         layout.set("set", self.fn_layout_set()?)?;
+        layout.set("get", self.fn_layout_get()?)?;
         layout.set("configure", self.fn_layout_configure()?)?;
         srd.set("layout", layout)?;
 

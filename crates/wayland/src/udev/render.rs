@@ -45,6 +45,11 @@ impl CompState {
         // per-window shadow push below to keep a shadow off any monitor its
         // own window does not occupy (`decoration::shadow_rect_clipped`).
         let monitor_bounds: Vec<srdwm_core::Rect> = self.wm.borrow().monitors().iter().map(|m| m.full_geometry).collect();
+        // Same "gather immutable state before `self.udev` is borrowed"
+        // reason again - both are read inside the per-head loop below,
+        // which holds that borrow for its whole body.
+        let drag_snap_preview = self.wm.borrow().drag_snap_preview();
+        let accent_color = self.wm.borrow().theme.default_border_color;
         // Captured-and-blurred backgrounds collected during the per-head
         // loop below, applied via `self.capture_output` only after it
         // ends - `self.udev`'s mutable borrow is held for the whole loop
@@ -449,6 +454,16 @@ impl CompState {
                         Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
                         Err(e) => log::warn!("udev: failed to import context menu buffer: {e}"),
                     }
+                }
+                // The drag snap preview - below the flyout (which the
+                // pointer is actively aiming at) but above every window,
+                // since it is showing where one of them is about to go.
+                if let Some(rect) = drag_snap_preview {
+                    custom_elements.extend(
+                        crate::elements::snap_preview_elements(&mut self.snap_preview_buffers, rect, accent_color, (origin.x, origin.y))
+                            .into_iter()
+                            .map(crate::elements::OverlayElement::Solid),
+                    );
                 }
                 // The Snap-Layouts flyout, if open - same "topmost but
                 // never hides the cursor" placement as the context menu.

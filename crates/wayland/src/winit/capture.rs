@@ -17,10 +17,18 @@ impl WaylandPlatform {
             renderer.create_buffer(Fourcc::Abgr8888, (size.w, size.h).into()).map_err(err)?;
         let mut framebuffer = renderer.bind(&mut target).map_err(err)?;
 
-        // Not full parity with the on-screen render loop above (no border/
-        // shadow strips here, same as before this function's content/opacity
-        // fix) - a real, pre-existing gap in what a screenshot shows on
-        // this backend, flagged rather than grown further in this pass.
+        // WHAT THIS PASS STILL DOES NOT DRAW: border strips, and the
+        // desktop icon grid. Everything else the on-screen loop draws is
+        // covered - content, titlebars, shadows, layer-shell surfaces,
+        // popups, both menus, the Snap-Layouts flyout and the drag snap
+        // preview.
+        //
+        // Keep this list honest. The whole reason the nested backend exists
+        // is checking behaviour with `grim`, and a tier missing here makes
+        // a working feature photograph as broken. That has now cost four
+        // separate investigations in one day (popups, shadows, the drag
+        // snap preview, the desktop menu), every one of them starting from
+        // a screenshot that was quietly lying.
         // Content (with each window's own `opacity`, unlike the
         // `self.state.space`-based single-alpha call this replaced) and the
         // bar/dock now render into the capture, at least: a screenshot used
@@ -48,6 +56,38 @@ impl WaylandPlatform {
         // like the client never opened one.
         let popup_targets = crate::elements::popup_targets(&self.state);
         custom_elements.extend(crate::elements::popup_render_elements(&popup_targets, renderer, (0, 0)));
+        // The titlebar context menu and the desktop/desktop-icon menu, both
+        // topmost, in the same order the on-screen loop draws them.
+        for (menu_pos, buffer) in [
+            (self.state.context_menu.as_ref().map(|m| m.pos), self.state.context_menu_buffer.as_ref()),
+            (self.state.desktop_menu.as_ref().map(|m| m.pos), self.state.desktop_menu_buffer.as_ref()),
+        ] {
+            let (Some(pos), Some(buffer)) = (menu_pos, buffer) else { continue };
+            match MemoryRenderBufferRenderElement::from_buffer(renderer, (pos.0 as f64, pos.1 as f64), buffer, None, None, None, Kind::Unspecified) {
+                Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                Err(e) => log::warn!("screencopy: failed to import menu buffer: {e}"),
+            }
+        }
+        // The Snap-Layouts flyout and the drag snap preview, in the same
+        // order the on-screen loop draws them. Both are drag-time overlays,
+        // and a screenshot that omits them cannot be used to check either
+        // one - which is exactly how this pass's missing popup tier wasted
+        // a session already.
+        if let (Some(flyout), Some(buffer)) = (self.state.snap_flyout.as_ref(), self.state.snap_flyout_buffer.as_ref()) {
+            let pos = (flyout.pos.0 as f64, flyout.pos.1 as f64);
+            match MemoryRenderBufferRenderElement::from_buffer(renderer, pos, buffer, None, None, None, Kind::Unspecified) {
+                Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
+                Err(e) => log::warn!("screencopy: failed to import snap flyout buffer: {e}"),
+            }
+        }
+        if let Some(rect) = self.wm.borrow().drag_snap_preview() {
+            let accent = self.wm.borrow().theme.default_border_color;
+            custom_elements.extend(
+                crate::elements::snap_preview_elements(&mut self.state.snap_preview_buffers, rect, accent, (0, 0))
+                    .into_iter()
+                    .map(crate::elements::OverlayElement::Solid),
+            );
+        }
         if !hide_top_layers {
             custom_elements.extend(crate::elements::output_layer_elements(renderer, &self.output, |layer| matches!(layer, Layer::Top | Layer::Overlay)));
         }

@@ -23,6 +23,26 @@ use super::{notify_idle_activity, DRAG_MODIFIER};
 /// mouse or touchpad can produce.
 pub(crate) const RESIZE_REDRAW_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000 / 60);
 
+/// How far below a monitor's top edge the drag-triggered Snap-Layouts
+/// flyout hangs. Enough to clear a typical bar, so the grid is not opening
+/// underneath one.
+const SNAP_FLYOUT_DROP: i32 = 36;
+
+/// What one pointer-motion tick decided about the drag-triggered
+/// Snap-Layouts flyout, decided while `WindowManager` is borrowed and acted
+/// on once that borrow is released (opening the flyout rasterises a buffer,
+/// which needs `&mut CompState` as a whole).
+///
+/// `NotDragging` is distinct from `Close` on purpose: a flyout opened the
+/// other way - by right-clicking a maximize button - must survive an
+/// unrelated pointer move, so a tick with no drag in progress has to leave
+/// it alone rather than close it.
+enum DragFlyout {
+    Open(WindowId, (i32, i32)),
+    Close,
+    NotDragging,
+}
+
 /// `WindowManager::hit_test`, but substituting each window's currently
 /// *animated* rect (if it has one active in `state.window_anims`) for its
 /// final `geometry` - see `hit_test_with`'s own doc comment in
@@ -311,6 +331,9 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
 
     update_cursor_shape(state, hit, over_layer_surface, over_content);
 
+    let mut drag_flyout = DragFlyout::NotDragging;
+    // Resolved before `wm` is borrowed below, since it reads `state`.
+    let over_open_flyout = state.snap_flyout.as_ref().is_some_and(|f| f.zone_at(pos.x as i32, pos.y as i32).is_some());
     let mut wm = state.wm.borrow_mut();
     let dragging_or_resizing = wm.is_dragging() || wm.is_resizing();
     // Captured now, while `wm` is already borrowed, and acted on further
@@ -320,6 +343,26 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
     let resizing_id = wm.resizing_window();
     if wm.is_dragging() {
         wm.update_drag(pos.x as i32, pos.y as i32);
+        // Windows-11-style: throw the window at the top of the screen and
+        // the Snap-Layouts grid drops down to be aimed at. Captured here
+        // while `wm` is borrowed and acted on after `drop(wm)` below --
+        // opening the flyout rasterises a buffer, which needs `&mut state`
+        // as a whole.
+        drag_flyout = match (wm.drag_top_edge_monitor(), wm.dragged_window()) {
+            (Some(m), Some(id)) => {
+                let g = m.full_geometry;
+                DragFlyout::Open(id, (g.x + g.width as i32 / 2, g.y + SNAP_FLYOUT_DROP))
+            }
+            // Leaving the trigger band does not dismiss an already-open
+            // flyout while the pointer is still on it - aiming at a cell
+            // means moving down, away from the band, which would otherwise
+            // close the grid on the way to using it. Confirmed by
+            // screenshot before this check existed: the flyout appeared at
+            // the top edge and had vanished by the time the pointer
+            // reached its first cell.
+            _ if over_open_flyout => DragFlyout::NotDragging,
+            _ => DragFlyout::Close,
+        };
     } else if wm.is_resizing() {
         wm.update_resize(pos.x as i32, pos.y as i32);
     }
@@ -348,6 +391,26 @@ pub(crate) fn handle_pointer_position(state: &mut CompState, pos: Point<f64, Log
         }
     }
     drop(wm);
+    // Open/close the drag-triggered Snap-Layouts flyout, now that `wm`'s
+    // borrow is released - see the capture site above.
+    match drag_flyout {
+        DragFlyout::Open(id, anchor) => {
+            let already_there = state.snap_flyout.as_ref().is_some_and(|f| f.window == id);
+            if !already_there {
+                state.open_snap_flyout(id, anchor);
+                // Centre it on the anchor, which is the monitor's own
+                // horizontal midpoint - `open_snap_flyout` places its
+                // top-left corner at whatever it is given (the maximize
+                // button's position, for the click-driven caller), and
+                // only this caller wants it centred.
+                if let Some(flyout) = state.snap_flyout.as_mut() {
+                    flyout.pos.0 -= flyout.width() as i32 / 2;
+                }
+            }
+        }
+        DragFlyout::Close => state.close_snap_flyout(),
+        DragFlyout::NotDragging => {}
+    }
     if let Some(id) = focus_follow_target {
         focus_window(state, id);
     }
@@ -745,6 +808,15 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
         // below, just for a desktop icon instead of a window.
         state.end_desktop_icon_drag();
         state.end_desktop_marquee();
+        // Releasing a drag over a cell of the drag-triggered Snap-Layouts
+        // flyout picks that cell's zone, in place of whatever edge snap
+        // `end_drag` would otherwise have computed from the drop point.
+        // Resolved before `end_drag` runs, because that consumes the drag.
+        let flyout_pick = state
+            .snap_flyout
+            .as_ref()
+            .filter(|f| state.wm.borrow().dragged_window() == Some(f.window))
+            .and_then(|f| f.zone_at(pos.x as i32, pos.y as i32).map(|zone| (f.window, zone)));
         let mut wm = state.wm.borrow_mut();
         let was_dragging = wm.is_dragging();
         let was_resizing = wm.is_resizing();
@@ -757,6 +829,12 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
         let id = wm.focused_id();
         if was_dragging {
             wm.end_drag();
+            // After `end_drag`, so the flyout's own choice is the last
+            // word rather than being overwritten by the edge snap that
+            // dropping at the top of the screen would otherwise apply.
+            if let Some((window, zone)) = flyout_pick {
+                wm.apply_snap_zone(window, zone);
+            }
         } else if was_resizing {
             wm.end_resize();
         }
@@ -769,6 +847,10 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
             crate::window_memory::save_all(wm.all_remembered_geometry());
         }
         drop(wm);
+        if was_dragging {
+            // Whether or not it was used, a drag ending closes it.
+            state.close_snap_flyout();
+        }
         // `end_drag` can snap the geometry one more time (edge/top-of-
         // screen snapping, `SmartPlacement::snap_zone`) *after* the last
         // `update_drag` already moved the window - without this, that

@@ -182,6 +182,21 @@ pub struct Window {
     /// lights - see `hit_test`'s and `decoration::render_titlebar`'s own
     /// use of this for what actually changes.
     pub is_dialog: bool,
+    /// Whether the client says it can actually be resized - `false` when
+    /// it pinned its minimum and maximum size to the same value (a native
+    /// `xdg_toplevel`'s `set_min_size`/`set_max_size`, or an XWayland
+    /// window's ICCCM size hints). Backend-set on every decoration redraw,
+    /// same as `is_dialog` above, for the same reason: `core` has no
+    /// protocol of its own to read it from. Defaults to `true`, so a
+    /// client that never declares limits - the common case - is treated
+    /// as resizable.
+    ///
+    /// Consumed by the `dynamic` titlebar button mode: a window that
+    /// cannot be resized cannot meaningfully be maximized either, so
+    /// offering the button is offering a no-op. Every mainstream desktop
+    /// (GNOME, KDE, Windows) hides or disables it in exactly this case.
+    /// Asked for as titlebars with "buttons of the program/dynamic".
+    pub resizable: bool,
     /// `decorated`'s value from just before entering fullscreen, restored
     /// on exit - see `WindowManager::toggle_fullscreen`'s doc comment on
     /// why this can't just hardcode `true` back.
@@ -286,6 +301,7 @@ impl Window {
             restore_geometry: None,
             decorated: true,
             is_dialog: false,
+            resizable: true,
             restore_decorated: None,
             floating: false,
             minimized: false,
@@ -503,6 +519,12 @@ impl ResizeEdge {
         // other" trap every other button-geometry value here already has
         // to avoid.
         is_dialog: bool,
+        // Whether a Maximize button is shown at all - `theme.
+        // dynamic_buttons && !window.resizable` resolves to `false`. Same
+        // "must stay in exact agreement with `decoration::render_titlebar`"
+        // contract as `is_dialog` directly above, and for the same reason:
+        // the two sides compute button slots independently.
+        show_maximize: bool,
     ) -> Option<TitlebarHit> {
         // Border strips render *outside* `frame` (`decoration::
         // border_strips`, `border_width` pixels past each edge) - without
@@ -579,10 +601,20 @@ impl ResizeEdge {
                     [TitlebarButton::Close, TitlebarButton::Maximize, TitlebarButton::Minimize]
                 })
             };
+            // Maximize dropped from the slot list entirely rather than
+            // left in place and ignored: leaving a hole would put a dead
+            // gap between the two remaining buttons, and the renderer
+            // closes the gap, so hit-testing has to close it identically
+            // or every button after it is offset by one slot.
+            let order: Vec<TitlebarButton> = if show_maximize {
+                order.to_vec()
+            } else {
+                order.iter().copied().filter(|b| *b != TitlebarButton::Maximize).collect()
+            };
             // A dialog only ever recognizes the first slot, matching
             // `decoration::render_titlebar` only ever drawing the one
             // button there too.
-            let button_count = if is_dialog { 1 } else { 3 };
+            let button_count = if is_dialog { 1 } else { order.len() };
             if buttons_left {
                 let left = frame.x + BUTTON_CLUSTER_MARGIN as i32;
                 // `x >= left` excludes the dead `BUTTON_CLUSTER_MARGIN`
@@ -1000,14 +1032,14 @@ mod tests {
         // margin is a real dead strip now (see its own doc comment) - a
         // point only `5` in from the raw edge landed inside it, not on the
         // button.
-        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Close));
     }
 
     #[test]
     fn maximize_is_left_of_close() {
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - BUTTON_PITCH as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - BUTTON_PITCH as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Maximize));
     }
 
@@ -1023,12 +1055,12 @@ mod tests {
         // undecorated windows.
         let f = frame();
         let maximize_spot = f.right() - BUTTON_CLUSTER_MARGIN as i32 - BUTTON_PITCH as i32 - 5;
-        let hit = ResizeEdge::hit_test(f, maximize_spot, f.y + 5, true, 0, RESIZE_MARGIN, false, None, true);
+        let hit = ResizeEdge::hit_test(f, maximize_spot, f.y + 5, true, 0, RESIZE_MARGIN, false, None, true, true);
         assert_ne!(hit, Some(TitlebarHit::Maximize), "a dialog must not have a Maximize hit zone at all");
         assert_ne!(hit, Some(TitlebarHit::Minimize), "a dialog must not have a Minimize hit zone at all");
         // The one real button (Close) must still be exactly where it always
         // is - `is_dialog` removes the other two, not shifts this one.
-        let close_hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, None, true);
+        let close_hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, None, true, true);
         assert_eq!(close_hit, Some(TitlebarHit::Close));
     }
 
@@ -1041,7 +1073,7 @@ mod tests {
         // it get used.
         let f = frame();
         let order = [TitlebarButton::Maximize, TitlebarButton::Minimize, TitlebarButton::Close];
-        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, Some(order), true);
+        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, Some(order), true, true);
         assert_eq!(hit, Some(TitlebarHit::Close));
     }
 
@@ -1053,7 +1085,7 @@ mod tests {
         // not just what gets drawn.
         let f = frame();
         let order = [TitlebarButton::Close, TitlebarButton::Minimize, TitlebarButton::Maximize];
-        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - BUTTON_PITCH as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, Some(order), false);
+        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - BUTTON_PITCH as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, Some(order), false, true);
         assert_eq!(hit, Some(TitlebarHit::Minimize));
     }
 
@@ -1066,8 +1098,8 @@ mod tests {
         // on.
         let f = frame();
         let order = [TitlebarButton::Maximize, TitlebarButton::Minimize, TitlebarButton::Close];
-        let left_hit = ResizeEdge::hit_test(f, f.x + BUTTON_CLUSTER_MARGIN as i32 + 5, f.y + 5, true, 0, RESIZE_MARGIN, true, Some(order), false);
-        let right_hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, Some(order), false);
+        let left_hit = ResizeEdge::hit_test(f, f.x + BUTTON_CLUSTER_MARGIN as i32 + 5, f.y + 5, true, 0, RESIZE_MARGIN, true, Some(order), false, true);
+        let right_hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 5, f.y + 5, true, 0, RESIZE_MARGIN, false, Some(order), false, true);
         assert_eq!(left_hit, Some(TitlebarHit::Maximize));
         assert_eq!(right_hit, Some(TitlebarHit::Maximize));
     }
@@ -1081,15 +1113,52 @@ mod tests {
         // of_titlebar_resizes_not_drags` for that zone's own coverage.
         let f = frame();
         let (cx, _) = f.center();
-        let hit = ResizeEdge::hit_test(f, cx, f.y + DECORATED_TOP_RESIZE_MARGIN + 5, true, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, cx, f.y + DECORATED_TOP_RESIZE_MARGIN + 5, true, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Drag));
     }
 
     #[test]
     fn bottom_right_corner_is_resize() {
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.bottom() - 1, true, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.bottom() - 1, true, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::BottomRight)));
+    }
+
+    #[test]
+    fn a_non_resizable_window_has_no_maximize_button_to_click() {
+        // `show_maximize = false` - the dynamic button mode's one rule.
+        let f = Rect::new(0, 0, 400, 300);
+        // Buttons on the right, default order Close, Maximize, Minimize.
+        // Slot 0 is Close either way.
+        let slot = |i: i32| f.right() - BUTTON_CLUSTER_MARGIN as i32 - BUTTON_PITCH as i32 * i - 1;
+        let hit = |x: i32, show_max: bool| ResizeEdge::hit_test(f, x, f.y + TITLEBAR_HEIGHT as i32 / 2, true, 0, RESIZE_MARGIN, false, None, false, show_max);
+
+        assert_eq!(hit(slot(1), true), Some(TitlebarHit::Maximize), "resizable: slot 1 is Maximize");
+        // With Maximize dropped, Minimize moves up into slot 1 - it must
+        // not leave a dead gap there.
+        assert_eq!(hit(slot(1), false), Some(TitlebarHit::Minimize), "non-resizable: Minimize closes the gap");
+        assert_eq!(hit(slot(0), false), Some(TitlebarHit::Close), "Close stays put");
+    }
+
+    #[test]
+    fn a_non_resizable_window_still_has_exactly_two_buttons() {
+        let f = Rect::new(0, 0, 400, 300);
+        let slot = |i: i32| f.right() - BUTTON_CLUSTER_MARGIN as i32 - BUTTON_PITCH as i32 * i - 1;
+        let hit = |x: i32| ResizeEdge::hit_test(f, x, f.y + TITLEBAR_HEIGHT as i32 / 2, true, 0, RESIZE_MARGIN, false, None, false, false);
+        // Slot 2 held Minimize when there were three; with two it is past
+        // the cluster and must be a drag, not a phantom third button.
+        assert_eq!(hit(slot(2)), Some(TitlebarHit::Drag), "no third button exists any more");
+    }
+
+    #[test]
+    fn a_dialog_is_close_only_regardless_of_the_dynamic_button_mode() {
+        let f = Rect::new(0, 0, 400, 300);
+        let slot = |i: i32| f.right() - BUTTON_CLUSTER_MARGIN as i32 - BUTTON_PITCH as i32 * i - 1;
+        for show_max in [true, false] {
+            let hit = |x: i32| ResizeEdge::hit_test(f, x, f.y + TITLEBAR_HEIGHT as i32 / 2, true, 0, RESIZE_MARGIN, false, None, true, show_max);
+            assert_eq!(hit(slot(0)), Some(TitlebarHit::Close), "show_maximize={show_max}");
+            assert_eq!(hit(slot(1)), Some(TitlebarHit::Drag), "a dialog has no second button, show_maximize={show_max}");
+        }
     }
 
     /// The bug this guards against: an undecorated window's own content in
@@ -1105,7 +1174,7 @@ mod tests {
         // outside RESIZE_MARGIN, so a real resize edge can't also explain a
         // `None` here - undecorated, this must not be treated as
         // decoration (or a resize edge) at all, just plain content.
-        let hit = ResizeEdge::hit_test(f, cx, f.y + 20, false, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, cx, f.y + 20, false, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, None);
     }
 
@@ -1113,7 +1182,7 @@ mod tests {
     fn undecorated_window_still_resizes_from_every_edge_including_top() {
         let f = frame();
         let (cx, _) = f.center();
-        let hit = ResizeEdge::hit_test(f, cx, f.y + 1, false, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, cx, f.y + 1, false, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::Top)));
     }
 
@@ -1133,9 +1202,9 @@ mod tests {
         // resize zone at all, which is no longer true.
         let f = frame();
         let (cx, _) = f.center();
-        assert_eq!(ResizeEdge::hit_test(f, cx, f.y + 5, false, 0, RESIZE_MARGIN, false, None, false), None, "5px in: past the narrow undecorated band, must reach the client");
+        assert_eq!(ResizeEdge::hit_test(f, cx, f.y + 5, false, 0, RESIZE_MARGIN, false, None, false, true), None, "5px in: past the narrow undecorated band, must reach the client");
         assert_eq!(
-            ResizeEdge::hit_test(f, cx, f.y + DECORATED_TOP_RESIZE_MARGIN + 5, true, 0, RESIZE_MARGIN, false, None, false),
+            ResizeEdge::hit_test(f, cx, f.y + DECORATED_TOP_RESIZE_MARGIN + 5, true, 0, RESIZE_MARGIN, false, None, false, true),
             Some(TitlebarHit::Drag),
             "decorated: past its own (wider) top resize margin, still plain drag"
         );
@@ -1151,7 +1220,7 @@ mod tests {
         // within the old, decorated-window-sized corner zone
         // (`CORNER_MARGIN * RESIZE_MARGIN` = 18px) before this fix.
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - 10, f.y + 10, false, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, f.right() - 10, f.y + 10, false, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, None, "past the narrow undecorated corner margin on both axes, must reach the client");
     }
 
@@ -1161,7 +1230,7 @@ mod tests {
         // content near - nothing about `CORNER_MARGIN`'s widening should
         // survive for an undecorated window at any corner.
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - 10, f.bottom() - 10, false, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, f.right() - 10, f.bottom() - 10, false, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, None, "past the narrow undecorated corner margin on both axes, must reach the client");
     }
 
@@ -1174,14 +1243,14 @@ mod tests {
         let f = frame();
         let (_, cy) = f.center();
         let (cx, _) = f.center();
-        assert_eq!(ResizeEdge::hit_test(f, f.right() - 1, cy, false, 0, RESIZE_MARGIN, false, None, false), Some(TitlebarHit::Resize(ResizeEdge::Right)));
-        assert_eq!(ResizeEdge::hit_test(f, cx, f.bottom() - 1, false, 0, RESIZE_MARGIN, false, None, false), Some(TitlebarHit::Resize(ResizeEdge::Bottom)));
+        assert_eq!(ResizeEdge::hit_test(f, f.right() - 1, cy, false, 0, RESIZE_MARGIN, false, None, false, true), Some(TitlebarHit::Resize(ResizeEdge::Right)));
+        assert_eq!(ResizeEdge::hit_test(f, cx, f.bottom() - 1, false, 0, RESIZE_MARGIN, false, None, false, true), Some(TitlebarHit::Resize(ResizeEdge::Bottom)));
     }
 
     #[test]
     fn outside_frame_is_none() {
         let f = frame();
-        assert_eq!(ResizeEdge::hit_test(f, 0, 0, true, 0, RESIZE_MARGIN, false, None, false), None);
+        assert_eq!(ResizeEdge::hit_test(f, 0, 0, true, 0, RESIZE_MARGIN, false, None, false, true), None);
     }
 
     #[test]
@@ -1196,16 +1265,16 @@ mod tests {
         let border_width = 2;
         // One pixel into the border strip, past the left edge.
         let x = f.x - 1;
-        assert_eq!(ResizeEdge::hit_test(f, x, cy, true, 0, RESIZE_MARGIN, false, None, false), None, "sanity check: with no border, this point really is outside the window");
+        assert_eq!(ResizeEdge::hit_test(f, x, cy, true, 0, RESIZE_MARGIN, false, None, false, true), None, "sanity check: with no border, this point really is outside the window");
         assert_eq!(
-            ResizeEdge::hit_test(f, x, cy, true, border_width, RESIZE_MARGIN, false, None, false),
+            ResizeEdge::hit_test(f, x, cy, true, border_width, RESIZE_MARGIN, false, None, false, true),
             Some(TitlebarHit::Resize(ResizeEdge::Left)),
             "one pixel into the actual drawn border must still register as the left edge"
         );
         // Just past the border entirely (border_width + 1 outside frame) is
         // still nothing - the fix widens the dead zone's boundary, it
         // doesn't remove it.
-        assert_eq!(ResizeEdge::hit_test(f, f.x - border_width as i32 - 1, cy, true, border_width, RESIZE_MARGIN, false, None, false), None);
+        assert_eq!(ResizeEdge::hit_test(f, f.x - border_width as i32 - 1, cy, true, border_width, RESIZE_MARGIN, false, None, false, true), None);
     }
 
     #[test]
@@ -1222,7 +1291,7 @@ mod tests {
         assert!(corner_reach > RESIZE_MARGIN, "the whole point of this test is that corner reach exceeds a plain edge's");
         let x = f.x + corner_reach - 1;
         let y = f.bottom() - corner_reach + 1;
-        assert_eq!(ResizeEdge::hit_test(f, x, y, true, 0, RESIZE_MARGIN, false, None, false), Some(TitlebarHit::Resize(ResizeEdge::BottomLeft)));
+        assert_eq!(ResizeEdge::hit_test(f, x, y, true, 0, RESIZE_MARGIN, false, None, false, true), Some(TitlebarHit::Resize(ResizeEdge::BottomLeft)));
     }
 
     #[test]
@@ -1233,7 +1302,7 @@ mod tests {
         // - must read as a plain bottom edge, not a corner.
         let x = f.x + corner_reach + 5;
         let y = f.bottom() - 1;
-        assert_eq!(ResizeEdge::hit_test(f, x, y, true, 0, RESIZE_MARGIN, false, None, false), Some(TitlebarHit::Resize(ResizeEdge::Bottom)));
+        assert_eq!(ResizeEdge::hit_test(f, x, y, true, 0, RESIZE_MARGIN, false, None, false, true), Some(TitlebarHit::Resize(ResizeEdge::Bottom)));
     }
 
     #[test]
@@ -1244,7 +1313,7 @@ mod tests {
         // `resize_edge_at` never even ran for a y inside the titlebar.
         let f = frame();
         let corner_reach = CORNER_MARGIN * RESIZE_MARGIN;
-        let hit = ResizeEdge::hit_test(f, f.x + corner_reach - 1, f.y + corner_reach - 1, true, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, f.x + corner_reach - 1, f.y + corner_reach - 1, true, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::TopLeft)));
     }
 
@@ -1259,7 +1328,7 @@ mod tests {
         // the raw corner itself now sits in that real dead strip (see its
         // own doc comment), which correctly falls through to drag/resize,
         // not Close.
-        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 1, f.y + 1, true, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, f.right() - BUTTON_CLUSTER_MARGIN as i32 - 1, f.y + 1, true, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Close));
     }
 
@@ -1276,7 +1345,7 @@ mod tests {
         // frame's own edge, nowhere near where Close's hitbox starts) and
         // within `DECORATED_TOP_RESIZE_MARGIN` vertically.
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.y + 1, true, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.y + 1, true, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::TopRight)));
     }
 
@@ -1289,7 +1358,7 @@ mod tests {
         // this only ever claims the true corner, not the whole column
         // beside Close.
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.y + DECORATED_TOP_RESIZE_MARGIN + 5, true, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, f.right() - 1, f.y + DECORATED_TOP_RESIZE_MARGIN + 5, true, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Drag));
     }
 
@@ -1300,7 +1369,7 @@ mod tests {
         // corner, so the dead strip and its own corner-resize target move
         // to the frame's left edge instead.
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.x + 1, f.y + 1, true, 0, RESIZE_MARGIN, true, None, false);
+        let hit = ResizeEdge::hit_test(f, f.x + 1, f.y + 1, true, 0, RESIZE_MARGIN, true, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::TopLeft)));
     }
 
@@ -1316,7 +1385,7 @@ mod tests {
         // boxes, so this is testing the plain top edge specifically.
         let f = frame();
         let x = f.x + f.width as i32 / 2;
-        let hit = ResizeEdge::hit_test(f, x, f.y + DECORATED_TOP_RESIZE_MARGIN - 1, true, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, x, f.y + DECORATED_TOP_RESIZE_MARGIN - 1, true, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Resize(ResizeEdge::Top)));
     }
 
@@ -1328,7 +1397,7 @@ mod tests {
         // silently grown a resize zone everywhere.
         let f = frame();
         let x = f.x + f.width as i32 / 2;
-        let hit = ResizeEdge::hit_test(f, x, f.y + DECORATED_TOP_RESIZE_MARGIN + 5, true, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, x, f.y + DECORATED_TOP_RESIZE_MARGIN + 5, true, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Drag));
     }
 
@@ -1341,7 +1410,7 @@ mod tests {
         // avoid. Right-aligned close button's box starts at `right - 30`;
         // well inside it, at the very top row.
         let f = frame();
-        let hit = ResizeEdge::hit_test(f, f.right() - 15, f.y + 1, true, 0, RESIZE_MARGIN, false, None, false);
+        let hit = ResizeEdge::hit_test(f, f.right() - 15, f.y + 1, true, 0, RESIZE_MARGIN, false, None, false, true);
         assert_eq!(hit, Some(TitlebarHit::Close));
     }
 

@@ -186,7 +186,7 @@ fn build_request(args: &[String]) -> Result<String, String> {
         // as booleans at all, not a string it then has to reject.
         Some("set") => {
             let key = args.get(1).ok_or(
-                "set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/master_ratio/master_count/shadows/rounded_corners/animations/night_light/reading_mode/phone_mode/multi_cursor/per_monitor/decoration_mode/button_style/button_side/button_order/title_centered/button_glyph_always/desktop_icons/desktop_icons_all_monitors)",
+                "set needs a key (border_width/border_color/corner_radius/gap_inner/gap_outer/master_ratio/master_count/shadows/rounded_corners/animations/night_light/reading_mode/phone_mode/multi_cursor/per_monitor/decoration_mode/button_style/button_side/button_mode/button_order/title_centered/button_glyph_always/desktop_icons/desktop_icons_all_monitors)",
             )?;
             let raw = args.get(2).ok_or("set needs a value")?;
             let value = match key.as_str() {
@@ -210,6 +210,10 @@ fn build_request(args: &[String]) -> Result<String, String> {
                 "button_side" => match raw.as_str() {
                     "left" | "right" => format!("{:?}", raw),
                     _ => return Err(format!("{key} needs 'left' or 'right'")),
+                },
+                "button_mode" => match raw.as_str() {
+                    "dynamic" | "fixed" => format!("{:?}", raw),
+                    _ => return Err(format!("{key} needs 'dynamic' or 'fixed'")),
                 },
                 "border_color" | "button_order" => format!("{:?}", raw),
                 _ => return Err(format!("unknown set key '{key}'")),
@@ -446,6 +450,7 @@ fn print_usage() {
     eprintln!("  srd set master_count <n>");
     eprintln!("  srd set decoration_mode <server|client>");
     eprintln!("  srd set button_style <traffic_lights|traditional>");
+    eprintln!("  srd set button_mode <dynamic|fixed>");
     eprintln!("  srd set button_side <left|right>");
     eprintln!("  srd set button_order <close,minimize,maximize order>");
     eprintln!("  srd set title_centered <true|false>");

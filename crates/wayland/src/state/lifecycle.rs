@@ -108,9 +108,37 @@ impl CompState {
         let is_dialog = self.id_to_window.get(&id).is_some_and(|dw| {
             dw.toplevel().is_some_and(|t| t.parent().is_some()) || dw.x11_surface().is_some_and(|x| x.is_transient_for().is_some())
         });
+        // Resolved the same way and at the same time as `is_dialog` above,
+        // for the same reason: this is protocol state, which `core` cannot
+        // read for itself. A client that pinned min == max on both axes is
+        // telling us it cannot be resized - and therefore cannot be
+        // maximized, so the Maximize button would do nothing. `0` means
+        // "unconstrained" on that axis in both protocols, so a zero on
+        // either side is never a match. See `Window::resizable`.
+        let resizable = self.id_to_window.get(&id).is_none_or(|dw| {
+            if let Some(toplevel) = dw.toplevel() {
+                let (min, max) = smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
+                    let mut cached = states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
+                    let current = cached.current();
+                    (current.min_size, current.max_size)
+                });
+                return !(min.w > 0 && min.h > 0 && min == max);
+            }
+            if let Some(x11) = dw.x11_surface() {
+                if let (Some(min), Some(max)) = (x11.min_size(), x11.max_size()) {
+                    return min != max;
+                }
+            }
+            true
+        });
         if let Some(win) = self.wm.borrow_mut().window_mut(id) {
             win.is_dialog = is_dialog;
+            win.resizable = resizable;
         }
+        let show_maximize = {
+            let wm = self.wm.borrow();
+            wm.window(id).is_none_or(|win| wm.show_maximize(win))
+        };
         // Corrects `w.geometry`'s far edge to match what the client's
         // surface really committed, when that's known - see
         // `effective_frame`'s own doc comment. Every bitmap this method
@@ -206,6 +234,7 @@ impl CompState {
                 theme.button_order,
                 theme.traffic_light_buttons,
                 is_dialog,
+                show_maximize,
             );
             let buffer = MemoryRenderBuffer::from_slice(&data, Fourcc::Argb8888, (width as i32, TITLEBAR_HEIGHT as i32), 1, Transform::Normal, None);
             self.decorations.insert(id, buffer);

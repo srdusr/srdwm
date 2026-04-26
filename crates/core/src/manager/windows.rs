@@ -77,8 +77,15 @@ impl WindowManager {
         // question from size: a size is always safe to reapply verbatim,
         // but a *position* needs checking against the monitors that
         // actually exist right now before it's safe to reuse.
+        //
+        // Skipped entirely for a dialog: `remembered_geometry` is keyed by
+        // `app_id`, which a dialog shares with the ordinary window that
+        // spawned it, so reapplying that entry would resize a small
+        // confirmation prompt to the size of the app's main window. Its
+        // own requested size is the right one. See the dialog branch
+        // further down for the matching position half.
         let mut remembered_position: Option<(i32, i32)> = None;
-        if !window.app_id.is_empty() {
+        if !window.app_id.is_empty() && !window.is_dialog {
             if let Some((x, y, w, h)) = self.remembered_geometry.get(&window.app_id).copied() {
                 window.geometry.width = w.max(MIN_WINDOW_WIDTH);
                 window.geometry.height = h.max(MIN_WINDOW_HEIGHT);
@@ -131,7 +138,27 @@ impl WindowManager {
         // shrunk usable one): a remembered position under where a bar now
         // sits is still "a real monitor, just partly covered", not invalid.
         let remembered_monitor = remembered_position.and_then(|(x, y)| self.monitors.iter().find(|m| m.full_geometry.contains_point(x, y)));
-        if let (Some((x, y)), Some(monitor)) = (remembered_position, remembered_monitor) {
+        // A dialog is centred, and neither cascaded nor restored to a
+        // remembered spot. Reported as "even dialog/starter windows spawn
+        // that side, most times should be centered".
+        //
+        // Ahead of the remembered-position branch on purpose: `remembered_
+        // geometry` is keyed by `app_id`, which a dialog shares with the
+        // ordinary window that spawned it, so a dialog would otherwise be
+        // dropped at wherever that app's last *main* window happened to
+        // sit - and would then overwrite that memory with its own small
+        // rect on close. Centring is also what every mainstream desktop
+        // does with a transient: the user's attention is already at the
+        // middle of the screen, not at a cascade origin.
+        //
+        // `geometry`, not `full_geometry`: a dialog centred in the usable
+        // area sits clear of a bar or dock, which is where a modal belongs.
+        if window.is_dialog {
+            if let Some(monitor) = target_monitor {
+                window.monitor = monitor.id;
+                window.geometry = centered_in(monitor.geometry, window.geometry.width, window.geometry.height);
+            }
+        } else if let (Some((x, y)), Some(monitor)) = (remembered_position, remembered_monitor) {
             window.monitor = monitor.id;
             window.geometry.x = x;
             window.geometry.y = y;

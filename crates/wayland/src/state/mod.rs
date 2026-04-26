@@ -582,6 +582,13 @@ pub(crate) struct CompState {
     /// dropping them would lose the damage-tracking stability the whole
     /// scheme exists for the moment fragment counts fluctuate back up.
     pub(crate) border_side_buffers: HashMap<WindowId, Vec<SolidColorBuffer>>,
+    /// Persistent solid-colour buffers backing the drag snap-preview
+    /// overlay (fill plus four outline strips) - same "reuse the buffer so
+    /// its `Id` stays stable across frames" reasoning as
+    /// `border_side_buffers` above. One pool, not one per window: only ever
+    /// one drag is in progress at a time. See
+    /// `elements::snap_preview_elements`.
+    pub(crate) snap_preview_buffers: Vec<SolidColorBuffer>,
     /// Persistent solid-colour buffer backing the whole-output night-light/
     /// reading-mode overlay, one per output name - same "reuse the buffer
     /// so its `Id` stays stable across frames" reasoning as `border_side_

@@ -25,6 +25,32 @@ impl WindowManager {
     pub fn drain_lock_request(&mut self) -> bool {
         std::mem::take(&mut self.lock_requested)
     }
+
+    /// Queues a request for the config layer to re-read `init.lua` and fire
+    /// the `srd.on("refresh", ...)` handler.
+    ///
+    /// Same core/backend split as `request_lock` above, for the same
+    /// reason: core owns no Lua state, so it cannot reload a config or run
+    /// a handler itself. The desktop menu's own "Refresh" row is the
+    /// caller.
+    ///
+    /// Asked for as "does refresh refresh configs in a function list in the
+    /// config ie refresh os, etc, ags/aegis/polybar/waybar". Refresh used
+    /// to re-scan the desktop icon grid and nothing else, so there was no
+    /// way to make it reload anything the user actually cared about. What
+    /// "refresh" *means* beyond srdwm's own config is deliberately the
+    /// config's decision, not a hardcoded list of other people's tools --
+    /// this compositor has no business knowing whether the user runs
+    /// waybar or AGS.
+    pub fn request_refresh(&mut self) {
+        self.refresh_requested = true;
+    }
+
+    /// Takes the current refresh request, if any. Drained once per poll,
+    /// same as `drain_lock_request`.
+    pub fn drain_refresh_request(&mut self) -> bool {
+        std::mem::take(&mut self.refresh_requested)
+    }
 }
 
 #[cfg(test)]
@@ -38,6 +64,23 @@ mod tests {
         wm.request_lock();
         assert!(wm.drain_lock_request(), "must report the pending request");
         assert!(!wm.drain_lock_request(), "must not report the same request twice");
+    }
+
+    #[test]
+    fn drain_refresh_request_is_true_once_then_false() {
+        let mut wm = WindowManager::new();
+        assert!(!wm.drain_refresh_request(), "nothing requested yet");
+        wm.request_refresh();
+        assert!(wm.drain_refresh_request(), "must report the pending request");
+        assert!(!wm.drain_refresh_request(), "must not report the same request twice");
+    }
+
+    #[test]
+    fn a_refresh_request_is_independent_of_a_lock_request() {
+        let mut wm = WindowManager::new();
+        wm.request_refresh();
+        assert!(!wm.drain_lock_request(), "refresh must not look like a lock");
+        assert!(wm.drain_refresh_request());
     }
 
     #[test]

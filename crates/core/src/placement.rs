@@ -51,6 +51,19 @@ impl Default for PlacementConfig {
     }
 }
 
+/// How close to a monitor's top edge the drag pointer has to get before
+/// the Snap-Layouts flyout drops down, in logical pixels.
+///
+/// Much larger than [`PlacementConfig::snap_threshold`] (8) on purpose, and
+/// they measure different things: `snap_threshold` measures the dragged
+/// *window's* edge against the screen edge and decides whether to commit a
+/// snap, so it has to be tight or an ordinary reposition near the top
+/// silently maximizes. This measures the *pointer* and only decides whether
+/// to offer a menu, which costs nothing if ignored - the user throws the
+/// cursor at the top of the screen, the way Windows 11's own gesture works,
+/// and a tight band would just make it feel unreliable.
+pub const SNAP_FLYOUT_EDGE: i32 = 12;
+
 /// The six fixed screen positions offered by the Snap-Layouts flyout
 /// (`crates/wayland/src/snap_flyout.rs`, opened by right-clicking a
 /// titlebar's maximize button) - the click-driven equivalent of dragging a
@@ -115,6 +128,18 @@ impl SnapZoneKind {
             SnapZoneKind::BottomRightQuarter => Rect::new(area.x + half_w as i32, area.y + half_h as i32, half_w, half_h),
         }
     }
+}
+
+/// A `width` x `height` rect centred in `area`, clamped so it never starts
+/// outside `area` even when it is larger than it.
+///
+/// Used for dialogs (see `WindowManager::add_window`). Integer division
+/// biases a one-pixel remainder toward the top-left, which is the standard
+/// convention and invisible in practice.
+pub fn centered_in(area: Rect, width: u32, height: u32) -> Rect {
+    let x = area.x + (area.width as i32 - width as i32) / 2;
+    let y = area.y + (area.height as i32 - height as i32) / 2;
+    Rect::new(x.max(area.x), y.max(area.y), width, height)
 }
 
 pub struct SmartPlacement;

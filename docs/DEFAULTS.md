@@ -19,6 +19,7 @@ srd.set("general.auto_raise", false)                   -- Default: false - also 
 srd.set("general.gpu", false)                          -- Default: false - udev backend only, see "GPU rendering" below
 srd.set("general.desktop_icons", true)                 -- Default: true - see "Desktop icons" below
 srd.set("general.desktop_icons_all_monitors", true)    -- Default: true - mirror icons onto every monitor, not just primary
+srd.set("general.config_reload_on_write", true)         -- Default: true - re-read init.lua when it changes on disk
 srd.set("general.reserve_top", 0)                      -- Default: 0 - static space reserved before any bar/dock connects
 srd.set("general.reserve_bottom", 0)                   -- Default: 0 - see "Startup space reservation" below
 srd.set("general.reserve_left", 0)                     -- Default: 0
@@ -453,7 +454,17 @@ srd.set("theme.decorations.title_bar.button_side", "right")   -- Default: "right
 srd.set("theme.decorations.title_bar.button_order", "")        -- Default: "" (unset)
 srd.set("theme.decorations.title_bar.button_glyph", "hover")   -- Default: "hover"
 srd.set("theme.decorations.title_bar.button_style", "traffic_lights")  -- Default: "traffic_lights"
+srd.set("theme.decorations.title_bar.button_mode", "dynamic")  -- Default: "dynamic"
 ```
+
+`button_mode` sets `"dynamic"` (the default) to show only the buttons a
+window can actually use, or `"fixed"` to always show the full set. Today
+dynamic mode has one rule: a window whose client pinned its minimum and
+maximum size to the same value gets no Maximize button, because pressing it
+can do nothing. GNOME, KDE and Windows all hide or disable maximize in the
+same case. A dialog's Close-only titlebar is a separate rule and applies in
+both modes. Live-settable with `srd set button_mode <dynamic|fixed>`, and
+readable back from `srd settings`.
 
 `text_align` sets `"center"` for the macOS convention (title centered on
 the whole titlebar width, ignoring the button cluster the way real macOS
@@ -832,3 +843,34 @@ local elapsed = srd.debug.profile_stop()
 This documentation provides a comprehensive reference for all default values and configuration options in SRDWM.
 
 
+
+## Config reloading and what happens when a config breaks
+
+A Lua config is a program, so breaking it is an ordinary event rather than
+an exceptional one. Three things make that safe.
+
+**A failed reload changes nothing.** Reloading clears the keybinding, event
+handler and repeat-key tables before re-running `init.lua`, so that a
+binding deleted from the file really disappears. If the new file fails to
+parse or errors while running, all three tables are put back exactly as they
+were. The last working config keeps running. Whatever the broken run managed
+to register before it failed is discarded rather than merged, because half a
+config is not a config.
+
+**The error is shown, not just logged.** Config failures go to
+`notify-send` as well as the log. Without that the failure is close to
+silent from the user's side: the compositor keeps running and the edit simply
+does nothing.
+
+**Edits apply on save.** `general.config_reload_on_write` (default `true`)
+checks the config directory's `.lua` modification times once a second and
+reloads when one changes. Set it to `false` for a config that does expensive
+work at load time. `Mod4+Ctrl+r` still reloads on demand in either case.
+
+Two limits to know. A reload does not re-register key *grabs* with the
+backend, so a brand new key combination needs a restart before the
+compositor sees that key at all; an existing combination picks up its new
+action immediately. And a reload rebuilds the theme from the config file, so
+it discards live `srd set` theme changes - including titlebar settings
+changed through the right-click menu. That is the correct precedence, but
+with reload-on-write it now happens every time the config is saved.

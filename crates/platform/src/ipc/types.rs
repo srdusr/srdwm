@@ -206,6 +206,10 @@ pub(crate) struct SettingsResponse {
     /// `"traffic_lights"`/`"traditional"` string `srd set button_style`
     /// itself accepts.
     pub(crate) button_style: String,
+    /// `"dynamic"`/`"fixed"` string `srd set button_mode` accepts --
+    /// `ThemeConfig::dynamic_buttons`'s readback, same shape and reason as
+    /// `button_style` directly above.
+    pub(crate) button_mode: String,
     /// `ThemeConfig::buttons_left`'s readback, as `"left"`/`"right"`.
     pub(crate) button_side: String,
     /// `ThemeConfig::button_order`'s readback - `null` when unset (the

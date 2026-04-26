@@ -157,6 +157,24 @@ pub struct ThemeConfig {
     /// this convention's own (Windows/GNOME) maximize icon rather than
     /// borrowing the other convention's.
     pub traffic_light_buttons: bool,
+    /// Show only the titlebar buttons the window can actually use, rather
+    /// than a fixed three.
+    ///
+    /// Today that means one rule: a window whose client pinned its minimum
+    /// and maximum size to the same value (`Window::resizable` is `false`)
+    /// does not get a Maximize button, because pressing it can do nothing.
+    /// A dialog's Close-only titlebar is a separate, older rule that
+    /// applies regardless of this setting.
+    ///
+    /// On by default. A button that visibly does nothing when pressed is a
+    /// defect rather than a preference, and GNOME, KDE and Windows all
+    /// hide or disable maximize in exactly this case. `theme.button_mode =
+    /// "fixed"` restores the always-three behaviour for anyone who wants
+    /// the titlebar to look identical on every window.
+    ///
+    /// Asked for as titlebars able to use "decorations/buttons of the
+    /// program/dynamic".
+    pub dynamic_buttons: bool,
 }
 
 impl Default for ThemeConfig {
@@ -175,6 +193,7 @@ impl Default for ThemeConfig {
             button_order: None,
             button_glyph_always: false,
             traffic_light_buttons: true,
+            dynamic_buttons: true,
         }
     }
 }

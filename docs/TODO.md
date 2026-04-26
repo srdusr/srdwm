@@ -1,5 +1,118 @@
 # TODO / planned features - master checklist
 
+## Eight asks recovered from the previous session's transcript, all built (2026-08-28)
+
+Reported as "there was more stuff from previous agent", then "please do all of
+them ... i also stated many issues ie titlebar inconsistencies etc". The list
+was rebuilt by reading the owner's own typed messages out of the previous
+session's transcript rather than by guessing, then each item was checked
+against the code before being called open. Three things they suspected were
+already done really were done - dialogs already got a Close-only titlebar,
+inactive-window dimming already existed, and the corner resize hitbox had
+already been tuned. The eight below had not been built.
+
+**1. Windows-style snap layouts on drag.** Asked twice ("if you move the
+window to absolute north it show you layout options", then "why do i still
+not see the windows layout ... when moved to areas of screen like in
+windows"). Edge snapping already worked but committed silently on release
+with nothing shown beforehand, so there was no way to know it was about to
+happen or where. Now: `WindowManager::drag_snap_preview` returns the rect the
+window will land in, drawn as a translucent accent fill with a solid outline
+(`elements::snap_preview_elements`, native solid fills - a preview can be a
+whole monitor in size and changes as the drag moves, so rasterising a bitmap
+per zone change would allocate megabytes); and throwing the pointer at a
+monitor's top edge drops down the existing six-cell Snap-Layouts grid to aim
+at. The preview calls the very same `SmartPlacement::snap_zone` that
+`end_drag` does, so preview and commit cannot disagree.
+
+Two defects found by screenshot and fixed before landing: moving down onto
+the flyout closed it (the pointer had left the trigger band), and its cell
+labels overflowed at the fixed 90px width - "Bottom Right" was cut off
+mid-word, the same "text goes out of view" fault already reported and fixed
+for the context menu. The flyout now grows to fit its widest label exactly as
+`open_context_menu` already did.
+
+**2. New File with a real type choice.** "in context menu say new file, user
+can choose what file type is obviously by extension". The desktop menu had
+`New Folder` and `New Text Document` only. Five more types now sit under
+them, each creating an empty file with the right extension. The de-duplication
+counter goes before the extension (`New Shell Script (2).sh`), since a
+suffixed extension would stop being one.
+
+**3. Refresh actually refreshes something.** "does refresh refresh configs in
+a function list in the config ie refresh os, etc, ags/aegis/polybar/waybar".
+Refresh re-scanned the desktop icon grid and nothing else. It now also
+re-reads `init.lua` and fires a new `srd.on("refresh", ...)` handler, so the
+config decides what else to reload. What "refresh" means beyond srdwm's own
+config is deliberately the user's decision - this compositor has no business
+hardcoding whether they run waybar or AGS.
+
+**4. Config reload on write.** "do we suppport update config on write" - no,
+it did not. `general.config_reload_on_write` (default on) polls the config
+directory's `.lua` mtimes once a second and reloads on a change. A `stat`
+sweep rather than an inotify watch: no new dependency, identical behaviour on
+every platform this project targets, and immune to the editor-writes-a-temp-
+file-and-renames pattern that defeats watches on individual files.
+
+**5. What happens when a config fails - a real bug, fixed.** Asked as "what
+happens when our config fails/user does something wrong which can be expected
+since lua programmable config". The answer the code gave was: **you lose every
+keybinding.** `do_reload` cleared `key_bindings`/`event_handlers`/
+`repeat_keys` before re-executing and never restored them, so a Lua syntax
+error - the most likely thing to go wrong with a programmable config - left
+neither the old bindings nor the new ones. The only key still working was the
+hardcoded reload combo, which is the one key nobody thinks to press, because
+nothing said that was the situation. The three maps are now moved out and put
+back on any failure, so a broken edit leaves the last working config running,
+and config errors go to `notify-send` rather than only to a log. Verified live
+in a nested compositor: breaking the config logged "Config edit not applied,
+keeping the last working one", the compositor kept serving IPC, and fixing the
+file reloaded for real.
+
+**6. A lock-screen keybinding.** "do we have a lockscreen binding?" - there
+was no way to reach the built-in lock screen from Lua at all, and the shipped
+config's only lock key ran an external script. New native `srd.lock()`, bound
+to `Mod4+Ctrl+l` by default. Native rather than shelling out to the control
+CLI, because a lock binding that shells out fails silently when that binary is
+not on `PATH`.
+
+**7. Dialogs open centred.** "even dialog/starter windows spawn that side,
+most times should be centered". Dialogs now centre on the target monitor's
+usable area, and are excluded from the remembered-geometry path in both
+directions: `remembered_geometry` is keyed by `app_id`, which a dialog shares
+with the window that spawned it, so a dialog was being given that app's last
+main-window position *and size* - and would then overwrite that memory with
+its own small rect.
+
+**8. Titlebar buttons that follow the program.** "ideally we can also set
+titlebar to have inhouse decorations/buttons of the program/dynamic". New
+`theme.decorations.title_bar.button_mode` (`dynamic`, the default, or
+`fixed`), live-settable via `srd set button_mode` and readable back through
+`srd settings`. In dynamic mode a window whose client pinned min == max size
+gets no Maximize button, because pressing it can do nothing - what GNOME, KDE
+and Windows all do. Maximize is removed from the slot list rather than skipped
+in place, in both the renderer and the hit-test, so the remaining buttons
+close the gap identically on both sides; three tests pin that agreement, which
+is the part that fails silently when it drifts.
+
+Also fixed, and the reason several of these took two attempts: the nested
+backend's screencopy pass was still missing tiers. It now draws the titlebar
+context menu, the desktop menu, the Snap-Layouts flyout and the drag snap
+preview as well as the popups and shadows added earlier today. Four separate
+investigations in one day started from a screenshot that was quietly lying --
+`winit/capture.rs` now carries an explicit list of what it still does not
+draw (border strips and the desktop icon grid), and `winit/render.rs` carries
+a pointer to it at the place a new tier gets added.
+
+**One interaction worth knowing.** A config reload rebuilds `ThemeConfig` from
+the config file, so it discards live `srd set` theme changes - correct
+precedence, and pre-existing, but auto-reload makes it happen on every save
+rather than only when the reload key is pressed. A titlebar customised live
+through the right-click menu reverts the next time `init.lua` is saved.
+
+Full workspace build/test/clippy clean: 512 tests (262 core / 160 wayland /
+43 platform / 34 config / 13 ctl), 0 failed, 0 clippy warnings.
+
 ## Nemo's right-click menu: confirmed working, and two real bugs found doing it (2026-08-28)
 
 The last open punch-list item. It is closed on a real end-to-end repro, not

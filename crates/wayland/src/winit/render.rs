@@ -135,6 +135,26 @@ impl WaylandPlatform {
                 Err(e) => log::warn!("failed to import context menu buffer: {e}"),
             }
         }
+        // ADDING A TIER HERE? THIS BACKEND RENDERS THE SCENE TWICE. What a
+        // screenshot shows comes from `winit/capture.rs`'s own separate
+        // offscreen pass, not from this loop, so anything pushed here and
+        // not there is on screen but invisible to `grim` - which reads as
+        // the feature being broken. That gap has now cost two separate
+        // investigations in one day (popups, then this very preview). The
+        // DRM backend has no equivalent trap: it serves screencopy out of
+        // the frame it just drew.
+        //
+        // The drag snap preview - below the flyout (which the pointer is
+        // actively aiming at) but above every window, since it is showing
+        // where one of them is about to go.
+        if let Some(rect) = self.wm.borrow().drag_snap_preview() {
+            let accent = self.wm.borrow().theme.default_border_color;
+            custom_elements.extend(
+                crate::elements::snap_preview_elements(&mut self.state.snap_preview_buffers, rect, accent, (0, 0))
+                    .into_iter()
+                    .map(|e| crate::rounded_corners::WinitElement::Base(crate::elements::OverlayElement::Solid(e))),
+            );
+        }
         // The Snap-Layouts flyout, if open - same topmost placement.
         if let (Some(flyout), Some(buffer)) = (self.state.snap_flyout.as_ref(), self.state.snap_flyout_buffer.as_ref()) {
             let pos = (flyout.pos.0 as f64, flyout.pos.1 as f64);
