@@ -51,6 +51,22 @@ impl WindowManager {
     pub fn drain_refresh_request(&mut self) -> bool {
         std::mem::take(&mut self.refresh_requested)
     }
+
+    /// Records that `key` was set live to `value_json`. See
+    /// `live_settings`' own doc comment.
+    ///
+    /// Last write wins, so setting the same key twice leaves one entry and
+    /// the replay applies each key exactly once.
+    pub fn record_live_setting(&mut self, key: &str, value_json: String) {
+        self.live_settings.insert(key.to_string(), value_json);
+    }
+
+    /// Every live setting recorded so far, for replay after a config
+    /// reload. Cloned rather than borrowed: the replay mutates the same
+    /// `WindowManager` this came from.
+    pub fn live_settings(&self) -> Vec<(String, String)> {
+        self.live_settings.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
 }
 
 #[cfg(test)]

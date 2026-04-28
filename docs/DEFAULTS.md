@@ -867,10 +867,17 @@ checks the config directory's `.lua` modification times once a second and
 reloads when one changes. Set it to `false` for a config that does expensive
 work at load time. `Mod4+Ctrl+r` still reloads on demand in either case.
 
-Two limits to know. A reload does not re-register key *grabs* with the
+**A hand-made change is not undone by a reload.** A reload rebuilds the
+theme and general settings from the config file, which is right for a file
+edit but would also wipe every live `srd set` - and the titlebar
+right-click menu's "Customize" rows are all live `srd set`s. Every setting
+changed live is recorded and re-applied after each reload, so changing a
+button style from that menu and then saving `init.lua` for an unrelated
+reason keeps the change. A live value stays until it is changed again or the
+session ends; it is a session override, not a persisted setting, so write it
+into the config to keep it across restarts.
+
+One limit to know: a reload does not re-register key *grabs* with the
 backend, so a brand new key combination needs a restart before the
-compositor sees that key at all; an existing combination picks up its new
-action immediately. And a reload rebuilds the theme from the config file, so
-it discards live `srd set` theme changes - including titlebar settings
-changed through the right-click menu. That is the correct precedence, but
-with reload-on-write it now happens every time the config is saved.
+compositor sees that key at all. An existing combination picks up its new
+action immediately.

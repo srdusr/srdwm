@@ -12,7 +12,7 @@ mod appmenu_registrar;
 pub use appmenu_registrar::{AppmenuRegistrarState, RegistrarEvent};
 
 mod ipc;
-pub use ipc::IpcServer;
+pub use ipc::{replay_live_settings, IpcServer};
 
 #[cfg(unix)]
 mod pam_auth;

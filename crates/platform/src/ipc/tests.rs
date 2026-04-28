@@ -26,6 +26,45 @@ fn read_line(reader: &mut std::io::BufReader<UnixStream>) -> String {
 }
 
 #[test]
+fn a_live_setting_is_recorded_and_survives_a_replay() {
+    // The concrete regression: a config reload rebuilds the theme from the
+    // file, so a value changed by hand (the titlebar menu's own Customize
+    // rows are all live `srd set`s) was silently reverted.
+    let wm = std::rc::Rc::new(std::cell::RefCell::new(WindowManager::new()));
+    let req = serde_json::json!({"cmd": "set", "key": "button_side", "value": "left"});
+    let (_, changed) = super::dispatch::handle_request(serde_json::to_vec(&req).unwrap().as_slice(), &wm);
+    assert!(changed);
+    assert!(wm.borrow().theme.buttons_left);
+
+    // Stand in for what a reload does to the theme.
+    wm.borrow_mut().theme = srdwm_core::ThemeConfig::default();
+    assert!(!wm.borrow().theme.buttons_left, "the rebuild really did drop it");
+
+    assert_eq!(super::replay_live_settings(&wm), 1);
+    assert!(wm.borrow().theme.buttons_left, "the live change must come back");
+}
+
+#[test]
+fn a_rejected_value_is_never_recorded_for_replay() {
+    let wm = std::rc::Rc::new(std::cell::RefCell::new(WindowManager::new()));
+    let req = serde_json::json!({"cmd": "set", "key": "button_side", "value": "sideways"});
+    let (_, changed) = super::dispatch::handle_request(serde_json::to_vec(&req).unwrap().as_slice(), &wm);
+    assert!(!changed, "an invalid value must be rejected");
+    assert_eq!(super::replay_live_settings(&wm), 0, "nothing should have been recorded");
+}
+
+#[test]
+fn setting_the_same_key_twice_replays_only_the_last_value() {
+    let wm = std::rc::Rc::new(std::cell::RefCell::new(WindowManager::new()));
+    for value in ["left", "right"] {
+        let req = serde_json::json!({"cmd": "set", "key": "button_side", "value": value});
+        super::dispatch::handle_request(serde_json::to_vec(&req).unwrap().as_slice(), &wm);
+    }
+    assert_eq!(super::replay_live_settings(&wm), 1, "one entry per key, not one per call");
+    assert!(!wm.borrow().theme.buttons_left, "the last value written is the one that survives");
+}
+
+#[test]
 fn subscribe_gets_an_immediate_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();

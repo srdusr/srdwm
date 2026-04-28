@@ -437,6 +437,29 @@ pub struct WindowManager {
     /// Set by `request_refresh`, drained by the main loop. Same
     /// cross-boundary queued-request shape as `lock_requested`.
     refresh_requested: bool,
+    /// Every setting changed live since startup, as `srd set` key -> the
+    /// raw JSON text of its value, in insertion-independent key order.
+    ///
+    /// Exists so a config reload does not silently undo a change the user
+    /// just made by hand. `apply_general_settings` rebuilds the whole
+    /// `ThemeConfig` and general-settings block from the config file, which
+    /// is the correct precedence for a *file* edit - but it also wiped
+    /// every live `srd set`, and the titlebar right-click menu's own
+    /// "Customize" section is built entirely out of live `srd set`s. So
+    /// changing a button style from that menu and then saving `init.lua`
+    /// for any unrelated reason silently reverted it.
+    ///
+    /// That was survivable while reloads only happened on an explicit
+    /// `Mod4+Ctrl+r`. `general.config_reload_on_write` makes a reload
+    /// happen on every save, which turns a rare surprise into a reliable
+    /// one - a control that silently reverts is worse than no control.
+    ///
+    /// Raw JSON text rather than a typed value because this crate has no
+    /// serde dependency and no business gaining one for this; the platform
+    /// crate parses it back and replays it through the same `handle_set`
+    /// that recorded it, so a replayed setting cannot diverge from a real
+    /// one. `BTreeMap` for a deterministic replay order.
+    live_settings: std::collections::BTreeMap<String, String>,
     drag: Option<DragState>,
     resize: Option<ResizeState>,
     rules: Vec<WindowRule>,
@@ -601,6 +624,7 @@ impl WindowManager {
             theme: ThemeConfig::default(),
             lock: LockConfig::default(),
             refresh_requested: false,
+            live_settings: std::collections::BTreeMap::new(),
             drag: None,
             resize: None,
             rules: Vec::new(),

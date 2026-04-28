@@ -37,6 +37,7 @@ use std::path::PathBuf;
 use srdwm_core::WindowManager;
 
 mod dispatch;
+pub use dispatch::replay_live_settings;
 mod types;
 #[cfg(test)]
 mod tests;

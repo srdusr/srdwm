@@ -437,6 +437,44 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
 /// predicate is what the two colour/width arms below walk existing
 /// windows with, rather than touching every window unconditionally.
 fn handle_set(req: &serde_json::Value, wm: &std::rc::Rc<std::cell::RefCell<WindowManager>>) -> (Vec<u8>, bool) {
+    let (response, changed) = apply_set(req, wm);
+    // Recorded only on success, so a rejected value is never replayed --
+    // and only for a real client call, not for the replay itself (see
+    // `replay_live_settings`, which calls `apply_set` directly and would
+    // otherwise rewrite what it is currently reading).
+    if changed {
+        if let (Some(key), Some(value)) = (req.get("key").and_then(|v| v.as_str()), req.get("value")) {
+            wm.borrow_mut().record_live_setting(key, value.to_string());
+        }
+    }
+    (response, changed)
+}
+
+/// Re-applies every setting changed live since startup.
+///
+/// Called after a config reload, which rebuilds the theme and general
+/// settings from the config file and would otherwise silently undo them --
+/// see `WindowManager::live_settings`' own doc comment for why that matters
+/// more now that a reload happens on every save.
+///
+/// Replayed through `apply_set`, the same function that applied them
+/// originally, so a replayed setting cannot behave differently from a real
+/// one. Failures are ignored: a value that no longer applies (a monitor
+/// that has gone away, say) should not stop the rest being restored.
+pub fn replay_live_settings(wm: &std::rc::Rc<std::cell::RefCell<WindowManager>>) -> usize {
+    let recorded = wm.borrow().live_settings();
+    let mut applied = 0;
+    for (key, raw) in recorded {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+        let req = serde_json::json!({ "cmd": "set", "key": key, "value": value });
+        if apply_set(&req, wm).1 {
+            applied += 1;
+        }
+    }
+    applied
+}
+
+fn apply_set(req: &serde_json::Value, wm: &std::rc::Rc<std::cell::RefCell<WindowManager>>) -> (Vec<u8>, bool) {
     let key = req.get("key").and_then(|v| v.as_str()).unwrap_or("");
     let value = req.get("value");
     match key {

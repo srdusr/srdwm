@@ -104,14 +104,30 @@ investigations in one day started from a screenshot that was quietly lying --
 draw (border strips and the desktop icon grid), and `winit/render.rs` carries
 a pointer to it at the place a new tier gets added.
 
-**One interaction worth knowing.** A config reload rebuilds `ThemeConfig` from
-the config file, so it discards live `srd set` theme changes - correct
-precedence, and pre-existing, but auto-reload makes it happen on every save
-rather than only when the reload key is pressed. A titlebar customised live
-through the right-click menu reverts the next time `init.lua` is saved.
+**A follow-on defect, found and fixed rather than documented away.** A config
+reload rebuilds `ThemeConfig` from the config file, so it discarded every
+live `srd set` - and the titlebar right-click menu's "Customize" rows are
+built entirely out of live `srd set`s. That was survivable while reloads only
+happened on `Mod4+Ctrl+r`; reload-on-write turned a rare surprise into a
+reliable one, and a control that silently reverts is worse than no control.
+Flagged independently by the AGS peer session while deciding whether to build
+Settings controls against these values, which is the same conclusion from the
+other side.
 
-Full workspace build/test/clippy clean: 512 tests (262 core / 160 wayland /
-43 platform / 34 config / 13 ctl), 0 failed, 0 clippy warnings.
+Every setting changed live is now recorded (`WindowManager::live_settings`,
+key -> raw JSON text) and replayed after each reload through the very same
+`handle_set` that applied it, so a replayed setting cannot behave differently
+from a real one. Recorded only on success, so a rejected value is never
+replayed; last write wins per key. Verified live: set `button_side left` and
+`button_mode fixed`, saved an unrelated config edit, both survived and the
+log reported "re-applied 2 live setting(s) after the reload".
+
+A live value is still a session override rather than a persisted setting --
+it lasts until changed again or the session ends. That distinction is now
+documented in `DEFAULTS.md` instead of being a trap.
+
+Full workspace build/test/clippy clean: 515 tests (262 core / 160 wayland /
+46 platform / 34 config / 13 ctl), 0 failed, 0 clippy warnings.
 
 ## Nemo's right-click menu: confirmed working, and two real bugs found doing it (2026-08-28)
 

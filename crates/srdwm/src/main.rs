@@ -798,6 +798,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(e) => report_config_error(&format!("Config edit not applied, keeping the last working one.\n{e}")),
                     }
                     apply_general_settings(&engine, &wm);
+                    // After `apply_general_settings`, which rebuilds the
+                    // theme from the config file - see
+                    // `WindowManager::live_settings` for why a hand-made
+                    // change has to win over that on a *reload*, even
+                    // though the file wins at startup.
+                    let replayed = srdwm_platform::replay_live_settings(&wm);
+                    if replayed > 0 {
+                        log::info!("re-applied {replayed} live setting(s) after the reload");
+                    }
                 }
             }
         }
@@ -810,6 +819,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(()) => log::info!("config reloaded (desktop refresh)"),
                 Err(e) => report_config_error(&format!("Config reload failed, keeping the last working one.\n{e}")),
             }
+            apply_general_settings(&engine, &wm);
+            srdwm_platform::replay_live_settings(&wm);
             // After the reload, so a handler edited in the config since
             // startup is the one that runs.
             engine.dispatch_event("refresh");
@@ -825,6 +836,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(()) => log::info!("config reloaded"),
                             Err(e) => report_config_error(&format!("Config reload failed, keeping the last working one.\n{e}")),
                         }
+                        apply_general_settings(&engine, &wm);
+                        srdwm_platform::replay_live_settings(&wm);
                     } else if !engine.dispatch_keybinding(&combo) {
                         log::debug!("no binding for '{combo}'");
                     }
