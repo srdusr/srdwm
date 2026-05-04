@@ -1,5 +1,58 @@
 # TODO / planned features - master checklist
 
+## A wrong "blocked" of my own, corrected: monitor split works in a nested compositor (2026-08-28)
+
+Written earlier the same day, as the reason the monitor-seam shadow fix could
+not be checked on screen: "the nested backend cannot produce a second monitor
+- `set output split` and `create fake-monitor` both need real head machinery
+that only the DRM backend has". The first half of that is now false and the
+second half was never checked.
+
+What actually happened: both commands returned `{"ok":true}` and changed
+nothing, and the cause was inferred from that rather than read. The real
+cause is that `udev/platform.rs` was the only backend draining those request
+queues. The winit backend never took them off the queue, so the request sat
+there forever and the dispatch looked like it had worked. Nothing about
+split is DRM-bound: `MonitorSplit` is bookkeeping in `WindowManager` and
+`split_rect` is pure geometry in `core`.
+
+Wired up: the winit poll drains split requests the same way the udev one
+does, and its `monitors()` expands a split into one `Monitor` per part with
+its own `full_geometry`/`maximize_geometry`, matching the udev expansion
+exactly. `srd dispatch set output split winit 2 columns` now really does
+report two 640x800 monitors with a seam at x=640, which is what a
+multi-monitor repro needs. Fake monitors remain udev-only and that half was
+not re-checked, so it stays stated as unverified rather than as a fact.
+
+Prompted by the AGS peer session, which had carried its own "no typechecker
+works offline" as settled for a day and disproved it in twenty minutes once
+challenged. Their generalisation is the useful part and it applied here
+immediately: a "blocked" is a measurement and it decays, and two commands
+failing is two commands failing, not proof that the space is empty.
+
+**The seam check itself is still not done, and here is exactly where it
+stopped.** With the split working, a floating window was placed with its
+right edge exactly on the seam and the pixels just past it sampled: no
+shadow, correctly. But the negative control failed - the same window off
+the seam had no shadow either, so the test proved nothing. Running both
+clients in one instance settled why: Alacritty renders a shadow in a capture
+(a real measured gradient, 24 -> 27 -> 32 -> 35 -> 36 over ~24px), and Nemo
+renders none, with `shadows: true`, both floating, in the same instance,
+regardless of which is focused. Nemo is server-side decorated and Alacritty
+is not, which is a lead and not a conclusion - it has not been root-caused
+and is recorded here rather than guessed at. Finishing the seam check needs
+either that answer or a shadow-rendering client that can be positioned onto
+a seam (Alacritty has no titlebar to drag).
+
+One real inconsistency was found and fixed on the way: the winit capture
+pass measured the shadow from `w.geometry` while both on-screen loops
+measure it from `effective_frame`, which is the client's real committed
+size. `src` indexes into a buffer rasterised at the frame's size, so the two
+disagreeing reads the wrong region whenever a client settles on a different
+size than it was asked for. Corrected to match. It did not change the Nemo
+result, so it is not the cause of that - stated plainly rather than
+implied.
+
 ## Eight asks recovered from the previous session's transcript, all built (2026-08-28)
 
 Reported as "there was more stuff from previous agent", then "please do all of
@@ -204,11 +257,11 @@ the fragment list is clipped.
 Six tests, built on the incident's own numbers (two 1920x1080 outputs, seam
 at x=1920): flush against the seam from either side, straddling it,
 mid-monitor, the desktop's outer edge, and no monitors at all.
-**Not confirmed on screen.** The nested backend cannot produce a second
-monitor - `set output split` and `create fake-monitor` both return
-`{"ok":true}` and change nothing there, because both need real head
-machinery that only the DRM backend has. Confirming it needs the user's own
-two-monitor session.
+**Not confirmed on screen** - and the reason first given for that was
+wrong. See the correction entry at the top of this file: monitor split works
+in a nested instance now, so the seam itself is reproducible; what is still
+missing is a window that both renders a shadow and can be positioned onto
+the seam.
 
 Correcting the entry below, which called this moot because the user had
 turned shadows off: `srd settings` against the live session reports

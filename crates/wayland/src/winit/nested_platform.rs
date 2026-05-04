@@ -79,6 +79,28 @@ impl Platform for WaylandPlatform {
         for (pid, window) in self.wm.borrow_mut().drain_pin_input_requests() {
             self.state.set_virtual_pointer_pin(pid, window);
         }
+        // Monitor split, drained the same way `udev/platform.rs` drains it.
+        //
+        // This backend used to ignore the request entirely: the dispatch
+        // returned `{"ok":true}`, the request queued, and nothing ever
+        // took it off the queue, so `srd dispatch set output split` looked
+        // like it had worked and changed nothing. That silence cost real
+        // time - a two-monitor rendering bug could not be reproduced in a
+        // nested instance, and the conclusion drawn was "split needs DRM
+        // head machinery", which is not true of any part of it: `Monitor
+        // Split` is bookkeeping in `WindowManager` and `split_rect` is
+        // pure geometry in `core`. Splitting the one nested output into
+        // several logical monitors is exactly what a multi-monitor repro
+        // needs, and it works here for the same reason it works there.
+        let split_requests = self.wm.borrow_mut().drain_monitor_split_requests();
+        if !split_requests.is_empty() {
+            for (name, parts, rows) in split_requests {
+                self.wm.borrow_mut().set_monitor_split(name, parts, rows);
+            }
+            // Same "just go recompute the monitor list" event the udev
+            // drain pushes - the payload is ignored by the handler.
+            self.pending.borrow_mut().push(CoreEvent::MonitorAdded(srdwm_core::Monitor::new(0, "", srdwm_core::Rect::new(0, 0, 0, 0))));
+        }
         let wait = TARGET_FRAME_TIME.saturating_sub(self.last_frame.elapsed());
         let _ = self.idle_event_loop.dispatch(Some(wait), &mut self.state);
         self.last_frame = Instant::now();
@@ -92,8 +114,32 @@ impl Platform for WaylandPlatform {
         // single output at the global origin, so the output-local zone
         // rectangle already is the usable global-space rect.
         let zone = layer_map_for_output(&self.output).non_exclusive_zone();
+        let usable = srdwm_core::Rect::new(zone.loc.x, zone.loc.y, zone.size.w as u32, zone.size.h as u32);
+        let full_size = self.backend.window_size();
+        let full = srdwm_core::Rect::new(0, 0, full_size.w as u32, full_size.h as u32);
+        let maximize = crate::input::maximize_geometry_for(&self.output, full);
+        // Expanded into one `Monitor` per split part, exactly as
+        // `udev/platform.rs`'s own `monitors()` does - see the split drain
+        // in `poll` above for why this backend supports it at all.
+        let split = self.wm.borrow().monitor_split("winit");
+        let parts = split.map(|s| s.parts).unwrap_or(1).max(1);
+        let rows = split.map(|s| s.rows).unwrap_or(false);
+        if parts > 1 {
+            return Ok((0..parts)
+                .map(|part| {
+                    let mut m = srdwm_core::Monitor::new(part, format!("winit-{}", part + 1), srdwm_core::monitor::split_rect(usable, part, parts, rows));
+                    m.full_geometry = srdwm_core::monitor::split_rect(full, part, parts, rows);
+                    m.maximize_geometry = srdwm_core::monitor::split_rect(maximize, part, parts, rows);
+                    // Exactly one primary, same rule as the udev backend:
+                    // the split parts share one underlying output.
+                    m.primary = part == 0;
+                    m.split = true;
+                    m
+                })
+                .collect());
+        }
         Ok(vec![{
-            let rect = srdwm_core::Rect::new(zone.loc.x, zone.loc.y, zone.size.w as u32, zone.size.h as u32);
+            let rect = usable;
             let mut m = srdwm_core::Monitor::new(0, "winit", rect);
             // Same fix as `udev/platform.rs`'s matching function: `Monitor::new`
             // defaults `full_geometry` to `geometry`, which is already

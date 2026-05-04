@@ -133,8 +133,20 @@ impl WaylandPlatform {
             // and re-checked by. Border strips are still absent - a real
             // remaining gap, called out here rather than left silent.
             if let Some(shadow) = self.state.shadow_buffers.get(&id) {
-                let full = crate::decoration::shadow_rect(w.geometry);
-                let rect = crate::decoration::shadow_rect_clipped(w.geometry, &monitor_bounds);
+                // `effective_frame`, not `w.geometry` - the same correction
+                // both on-screen render loops apply before sizing any
+                // decoration bitmap (see its own doc comment). The shadow
+                // buffer was rasterised at the *frame's* size, and `src`
+                // below indexes into that buffer, so measuring from
+                // `w.geometry` instead reads the wrong region whenever the
+                // two differ. They differ for exactly the windows that
+                // matter here: a CSD client whose committed surface is not
+                // the size this compositor asked for. Found by sampling
+                // pixels - Alacritty's shadow appeared in a capture and
+                // Nemo's did not, and the only difference was that gap.
+                let frame = self.state.effective_frame(id, w.geometry);
+                let full = crate::decoration::shadow_rect(frame);
+                let rect = crate::decoration::shadow_rect_clipped(frame, &monitor_bounds);
                 for fragment in crate::elements::visible_border_fragments(rect, &occluders) {
                     let src = Rectangle::new(
                         Point::from(((fragment.x - full.x) as f64, (fragment.y - full.y) as f64)),
