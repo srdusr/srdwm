@@ -30,19 +30,34 @@ challenged. Their generalisation is the useful part and it applied here
 immediately: a "blocked" is a measurement and it decays, and two commands
 failing is two commands failing, not proof that the space is empty.
 
-**The seam check itself is still not done, and here is exactly where it
-stopped.** With the split working, a floating window was placed with its
-right edge exactly on the seam and the pixels just past it sampled: no
-shadow, correctly. But the negative control failed - the same window off
-the seam had no shadow either, so the test proved nothing. Running both
-clients in one instance settled why: Alacritty renders a shadow in a capture
-(a real measured gradient, 24 -> 27 -> 32 -> 35 -> 36 over ~24px), and Nemo
-renders none, with `shadows: true`, both floating, in the same instance,
-regardless of which is focused. Nemo is server-side decorated and Alacritty
-is not, which is a lead and not a conclusion - it has not been root-caused
-and is recorded here rather than guessed at. Finishing the seam check needs
-either that answer or a shadow-rendering client that can be positioned onto
-a seam (Alacritty has no titlebar to drag).
+**The seam check is done, and the "SSD versus CSD" lead recorded here first
+was wrong.** With the split working, the first attempt looked like a pass --
+window's right edge on the seam, no shadow past it - but the negative
+control failed: the same window off the seam had no shadow either, so it
+proved nothing. Running both clients in one instance narrowed it to
+"Alacritty gets a shadow, Nemo does not", and decorated-versus-CSD was
+written down as the lead.
+
+One temporary diagnostic in the build path settled it in a single run, and
+it was neither: `max=true`. Nemo restores its own maximized state on
+startup, and the shadow gate correctly excludes a maximized window (it has
+no neighbour to separate from). There was no bug and decoration had nothing
+to do with it. Recorded because the lead was stated here as a lead and has
+to be retracted in the same place - one log line beat two rounds of
+reasoning from symptoms.
+
+With Nemo un-maximized the real A/B ran, same window, same settings, same
+instance, same scanline:
+
+- control, right edge at x=320 with no seam nearby: a real shadow, `(9,9,13)`
+  two pixels out, fading through `(11,11,17)` and `(12,12,19)` to the bare
+  desktop `(13,13,20)` by 23px - a full 24px falloff.
+- seam, right edge exactly on the boundary at x=640: `(13,13,20)` at every
+  sample from two pixels out onward. Nothing crosses.
+
+So `shadow_rect_clipped` does what its tests say it does, on screen, and the
+monitor-seam bleed the owner reported as "windows show a bit in the other
+monitor" is confirmed fixed rather than only unit-tested.
 
 One real inconsistency was found and fixed on the way: the winit capture
 pass measured the shadow from `w.geometry` while both on-screen loops
@@ -257,11 +272,9 @@ the fragment list is clipped.
 Six tests, built on the incident's own numbers (two 1920x1080 outputs, seam
 at x=1920): flush against the seam from either side, straddling it,
 mid-monitor, the desktop's outer edge, and no monitors at all.
-**Not confirmed on screen** - and the reason first given for that was
-wrong. See the correction entry at the top of this file: monitor split works
-in a nested instance now, so the seam itself is reproducible; what is still
-missing is a window that both renders a shadow and can be positioned onto
-the seam.
+**Confirmed on screen** - see the correction entry at the top of this file
+for the measurement (a real 24px shadow falloff where there is no seam, and
+nothing at all past the boundary when the window's edge sits on it).
 
 Correcting the entry below, which called this moot because the user had
 turned shadows off: `srd settings` against the live session reports
