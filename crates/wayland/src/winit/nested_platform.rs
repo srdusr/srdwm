@@ -117,7 +117,7 @@ impl Platform for WaylandPlatform {
         let usable = srdwm_core::Rect::new(zone.loc.x, zone.loc.y, zone.size.w as u32, zone.size.h as u32);
         let full_size = self.backend.window_size();
         let full = srdwm_core::Rect::new(0, 0, full_size.w as u32, full_size.h as u32);
-        let maximize = crate::input::maximize_geometry_for(&self.output, full);
+        let maximize = crate::input::maximize_geometry_for(&self.output, full, self.wm.borrow().maximize_covers_dock);
         // Expanded into one `Monitor` per split part, exactly as
         // `udev/platform.rs`'s own `monitors()` does - see the split drain
         // in `poll` above for why this backend supports it at all.
@@ -149,7 +149,7 @@ impl Platform for WaylandPlatform {
             // "usable, shrunk rect" `toggle_maximize` targets.
             let full = self.backend.window_size();
             m.full_geometry = srdwm_core::Rect::new(0, 0, full.w as u32, full.h as u32);
-            m.maximize_geometry = crate::input::maximize_geometry_for(&self.output, m.full_geometry);
+            m.maximize_geometry = crate::input::maximize_geometry_for(&self.output, m.full_geometry, self.wm.borrow().maximize_covers_dock);
             m.primary = true;
             m
         }])

@@ -334,7 +334,16 @@ impl CompState {
                         // be_masked` degenerates to just `w.decorated` when
                         // masking can never succeed).
                         let border_curve_is_safe = w.decorated;
-                        if w.border_width > 0 {
+                        // No border on a maximized window. A maximized window's own
+                        // edges are the screen's edges, so a border has nothing to
+                        // separate it from - and where maximize *does* stop short (the
+                        // strip a top bar reserves) the border lands in that gap, drawn
+                        // as a hard line right against the bar. Reported live with a
+                        // screenshot: a 4px accent line between the bar and the window,
+                        // and none anywhere else, because the left/right/bottom strips
+                        // fall off-screen. Fullscreen is already borderless for the
+                        // same reason, via `decorated` being cleared.
+                        if w.border_width > 0 && !w.maximized {
                             let strips = decoration::border_strips(geom, w.border_width);
                             if let Some(buffer) = self.border_top_decorations.get(&id) {
                                 let (row0, rows, shift) = decoration::border_top_visible_rows(border_curve_is_safe, w.border_width, w.corner_radius);

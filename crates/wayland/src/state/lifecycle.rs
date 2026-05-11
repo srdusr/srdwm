@@ -131,9 +131,29 @@ impl CompState {
             }
             true
         });
+        // The client's own declared minimum, read from the same place
+        // `resizable` above comes from. A rule's `min_size` still wins --
+        // it is applied at map time and this must not undo it - so this
+        // only ever raises the floor above the global default, never
+        // overwrites a deliberate override.
+        let declared_min = self.id_to_window.get(&id).and_then(|dw| {
+            if let Some(toplevel) = dw.toplevel() {
+                let min = smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
+                    let mut cached = states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
+                    cached.current().min_size
+                });
+                return (min.w > 0 && min.h > 0).then_some((min.w as u32, min.h as u32));
+            }
+            dw.x11_surface().and_then(|x| x.min_size()).and_then(|m| (m.w > 0 && m.h > 0).then_some((m.w as u32, m.h as u32)))
+        });
         if let Some(win) = self.wm.borrow_mut().window_mut(id) {
             win.is_dialog = is_dialog;
             win.resizable = resizable;
+            if let Some(min) = declared_min {
+                if !win.min_size_from_rule {
+                    win.min_size = min;
+                }
+            }
         }
         let show_maximize = {
             let wm = self.wm.borrow();

@@ -258,8 +258,8 @@ impl WindowManager {
 
     pub fn resize_window(&mut self, id: WindowId, width: u32, height: u32) {
         if let Some(w) = self.windows.get_mut(&id) {
-            w.geometry.width = width.max(MIN_WINDOW_WIDTH);
-            w.geometry.height = height.max(MIN_WINDOW_HEIGHT);
+            w.geometry.width = width.max(w.min_size.0);
+            w.geometry.height = height.max(w.min_size.1);
         }
     }
 

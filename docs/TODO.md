@@ -1,5 +1,73 @@
 # TODO / planned features - master checklist
 
+## Spawn placement, per-window minimum sizes, and how maximize looks (2026-08-28)
+
+Four reports after the owner restarted into the day's build, with a
+screenshot. The screenshot was measured rather than eyeballed: at 1920x1080,
+the top bar occupies y=0..29, a 4px accent border sits at y=30..33, the
+window's titlebar starts at y=34, the bottom border is at y=1027..1030, and
+49px of bare desktop sits below it.
+
+**Windows spawning too close to the top bar - a real bug, and the reason it
+was "sometimes".** A remembered position was validated only by asking whether
+it landed on some monitor's `full_geometry`, which *includes* the strip a top
+bar reserves. So an app whose remembered `y` was small reopened with its
+titlebar underneath the bar, unreachable. It depended entirely on the stored
+value, which is why it happened for some apps and not others: the live store
+holds `org.wezfurlong.wezterm` at y=44 and `firefox` at y=69 against a 30px
+bar. Remembered positions are now clamped into the monitor's *usable* area.
+
+**"Doesn't remember placement after logout" - half true, and the half that
+failed is now fixed.** Window memory does persist (`~/.local/state/srd/
+window-memory.json`, written on close, drag-end and resize-end, loaded at
+startup by both backends). But five of the eleven entries in the live store
+were saved while a second monitor was connected, at x >= 2000. Those points
+are on no current monitor, and the old code discarded them outright and fell
+back to a fresh cascade - so those apps appeared to remember nothing at all.
+A remembered position with no matching monitor is now clamped onto the
+monitor the window would have been placed on anyway, keeping as much of the
+remembered placement as still fits.
+
+**Per-window minimum sizes.** One global floor for every window is wrong in
+both directions. Three sources now, in increasing precedence: the global
+floor, the client's own declared minimum (`xdg_toplevel.set_min_size`, or
+ICCCM size hints for XWayland), and a `min_width`/`min_height` window rule
+that overrides both. A rule wins permanently - the backend refreshes the
+client's declared minimum on every decoration redraw and must not quietly
+undo a deliberate override, which is what `Window::min_size_from_rule`
+guards. The minimum applies to interactive resize, to a size restored from
+window memory, and to programmatic resizes.
+
+**Maximize.** Three separate faults in one report:
+
+- *Borders.* A maximized window now draws none. Its edges are the screen's
+  edges, so a border has nothing to separate it from - and the only place
+  maximize stops short is the bar strip, which is exactly where the measured
+  4px line was. The left/right/bottom strips were falling off-screen, which
+  is why the screenshot showed a line under the bar and nowhere else.
+- *Stopping above the dock.* `maximize_geometry_for` subtracted every
+  exclusive zone including a bottom-anchored dock's, which is the 49px band
+  in the screenshot. Bottom zones are now skipped, so maximize runs to the
+  bottom of the screen and the dock floats over it. Top/left/right are still
+  honoured, so a maximized window never hides the bar.
+  `general.maximize_covers_dock = false` restores the old behaviour.
+- *Sitting too close to the bar.* With the border gone the window sits flush
+  under the bar rather than with an accent line crowding it.
+
+**Verification, stated plainly.** The placement and minimum-size work is
+covered by seven new tests (269 core tests total) built on the real numbers
+from the live store and a 30px bar. Maximize geometry was measured live in a
+nested instance: a window maximized on a split half reports exactly that
+half's rect. The border removal and the dock behaviour are **not** confirmed
+on screen - the nested backend has no bar or dock to reserve a zone, so
+there is nothing there to test against, and an attempt to check the border
+produced a control that failed (`srd set border_width` only affects windows
+created after the call, so neither the maximized nor the unmaximized window
+had one). Confirming those two needs either the owner's own session or a
+purpose-built layer-shell client for the nested one.
+
+515 tests pass, clippy clean.
+
 ## A wrong "blocked" of my own, corrected: monitor split works in a nested compositor (2026-08-28)
 
 Written earlier the same day, as the reason the monitor-seam shadow fix could

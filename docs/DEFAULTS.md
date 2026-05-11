@@ -20,6 +20,7 @@ srd.set("general.gpu", false)                          -- Default: false - udev 
 srd.set("general.desktop_icons", true)                 -- Default: true - see "Desktop icons" below
 srd.set("general.desktop_icons_all_monitors", true)    -- Default: true - mirror icons onto every monitor, not just primary
 srd.set("general.config_reload_on_write", true)         -- Default: true - re-read init.lua when it changes on disk
+srd.set("general.maximize_covers_dock", true)          -- Default: true - maximize runs under a bottom dock, not above it
 srd.set("general.reserve_top", 0)                      -- Default: 0 - static space reserved before any bar/dock connects
 srd.set("general.reserve_bottom", 0)                   -- Default: 0 - see "Startup space reservation" below
 srd.set("general.reserve_left", 0)                     -- Default: 0
@@ -881,3 +882,56 @@ One limit to know: a reload does not re-register key *grabs* with the
 backend, so a brand new key combination needs a restart before the
 compositor sees that key at all. An existing combination picks up its new
 action immediately.
+
+## Window minimum sizes
+
+Every window has a minimum size it cannot be resized below. Three sources,
+in increasing precedence:
+
+1. A global floor, used when nothing else applies.
+2. The client's own declared minimum - `xdg_toplevel.set_min_size` for a
+   native Wayland window, the ICCCM size hints for an XWayland one. Read
+   from the client and refreshed as it changes.
+3. A `min_width`/`min_height` window rule, which overrides both. Either may
+   be given alone; the other axis keeps the global floor.
+
+```lua
+srd.rule({ class = "Alacritty" }, { min_width = 480, min_height = 320 })
+```
+
+A rule wins permanently: the client's own declared minimum is never allowed
+to overwrite it, so an application that reports a minimum too large for a
+small screen can be overridden. The minimum applies to interactive resizing,
+to a size restored from window memory, and to any programmatic resize.
+
+## Maximize
+
+Maximize targets the monitor's full rectangle minus the space reserved by
+top, left and right layer-shell surfaces. A bottom-anchored dock is
+deliberately not subtracted, so a maximized window runs to the bottom of the
+screen and the dock floats over it - the usual behaviour for an auto-hiding
+dock. Set `general.maximize_covers_dock = false` to have maximize stop above
+the dock instead.
+
+A maximized window draws no border. Its edges are the screen's edges, so a
+border has nothing to separate it from, and where maximize does stop short
+(the strip a top bar reserves) a border would otherwise draw as a hard line
+directly against the bar.
+
+## Where a window opens
+
+In order: a `geometry` window rule wins outright; otherwise a position and
+size remembered for that `app_id` are restored; otherwise smart placement
+picks a free grid cell, falling back to a cascade.
+
+A remembered position is clamped into the target monitor's *usable* area --
+the region left after bars and docks reserve their space. Without that
+clamp, an app whose remembered `y` was smaller than the top bar's height
+reopened with its titlebar underneath the bar, where it could not be
+grabbed. A position remembered on a monitor that is no longer connected is
+clamped onto a current monitor rather than discarded, so undocking does not
+make an app forget where it lives.
+
+Dialogs are centred instead, and take neither a remembered position nor a
+remembered size - window memory is keyed by `app_id`, which a dialog shares
+with the window that spawned it.

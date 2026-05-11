@@ -19,7 +19,7 @@ pub use layout::{Layout, MasterStackLayout, NoOpLayout, TilingConfig};
 pub use lock_config::LockConfig;
 pub use manager::{CaptureRequest, ColorFilter, Direction, WindowManager};
 pub use monitor::{Monitor, MonitorId};
-pub use placement::{centered_in, PlacementConfig, SmartPlacement, SnapZoneKind, SNAP_FLYOUT_EDGE};
+pub use placement::{centered_in, PlacementConfig, SmartPlacement, SnapZoneKind, MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, SNAP_FLYOUT_EDGE};
 pub use regex::Regex;
 pub use rules::{WindowMatch, WindowRule, WindowRuleActions};
 pub use theme::{format_hex_color, parse_hex_color, ThemeConfig};

@@ -434,6 +434,11 @@ pub struct WindowManager {
     /// Read from `theme.lock.*`. See `LockConfig`'s own doc comment for
     /// why this isn't just folded into `theme` above.
     pub lock: LockConfig,
+    /// `general.maximize_covers_dock`: whether maximize runs to the bottom
+    /// of the screen, under a bottom-anchored dock, rather than stopping
+    /// above it. A top bar's own reservation is always honoured either
+    /// way. Default `true` - see `input::layers::maximize_geometry_for`.
+    pub maximize_covers_dock: bool,
     /// Set by `request_refresh`, drained by the main loop. Same
     /// cross-boundary queued-request shape as `lock_requested`.
     refresh_requested: bool,
@@ -623,6 +628,7 @@ impl WindowManager {
             auto_raise: false,
             theme: ThemeConfig::default(),
             lock: LockConfig::default(),
+            maximize_covers_dock: true,
             refresh_requested: false,
             live_settings: std::collections::BTreeMap::new(),
             drag: None,

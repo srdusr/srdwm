@@ -60,6 +60,10 @@ impl WindowManager {
             if let Some(margin) = a.resize_margin {
                 window.resize_margin = Some(margin);
             }
+            if let Some(min) = a.min_size {
+                window.min_size = min;
+                window.min_size_from_rule = true;
+            }
             if let Some(ratio) = a.aspect_ratio {
                 window.aspect_ratio = Some(ratio);
             }
@@ -87,8 +91,8 @@ impl WindowManager {
         let mut remembered_position: Option<(i32, i32)> = None;
         if !window.app_id.is_empty() && !window.is_dialog {
             if let Some((x, y, w, h)) = self.remembered_geometry.get(&window.app_id).copied() {
-                window.geometry.width = w.max(MIN_WINDOW_WIDTH);
-                window.geometry.height = h.max(MIN_WINDOW_HEIGHT);
+                window.geometry.width = w.max(window.min_size.0);
+                window.geometry.height = h.max(window.min_size.1);
                 remembered_position = Some((x, y));
             }
         }
@@ -137,7 +141,16 @@ impl WindowManager {
         // current monitor's own *full* geometry (not the exclusive-zone-
         // shrunk usable one): a remembered position under where a bar now
         // sits is still "a real monitor, just partly covered", not invalid.
-        let remembered_monitor = remembered_position.and_then(|(x, y)| self.monitors.iter().find(|m| m.full_geometry.contains_point(x, y)));
+        // Whichever monitor a remembered position lands on, else the one
+        // the window would have been placed on anyway - a position saved
+        // while a second monitor was connected must not be thrown away
+        // just because that monitor is gone. Clamped onto the surviving
+        // monitor below instead, which keeps "reopen where I left it"
+        // meaningful across a docking change rather than silently falling
+        // back to a fresh cascade.
+        let remembered_monitor = remembered_position
+            .and_then(|(x, y)| self.monitors.iter().find(|m| m.full_geometry.contains_point(x, y)))
+            .or(target_monitor);
         // A dialog is centred, and neither cascaded nor restored to a
         // remembered spot. Reported as "even dialog/starter windows spawn
         // that side, most times should be centered".
@@ -160,8 +173,25 @@ impl WindowManager {
             }
         } else if let (Some((x, y)), Some(monitor)) = (remembered_position, remembered_monitor) {
             window.monitor = monitor.id;
-            window.geometry.x = x;
-            window.geometry.y = y;
+            // Clamped into the monitor's *usable* area, not its full one.
+            //
+            // The check above only asked whether the remembered point was
+            // on some monitor at all, and `full_geometry` includes the
+            // strip a top bar reserves - so an app whose remembered `y`
+            // was small reopened with its titlebar tucked under the bar,
+            // unreachable. Reported as windows spawning "so close to top
+            // bar", and "sometimes" precisely because it depended on the
+            // remembered value: this store currently holds a window at
+            // y=44 with a 30px bar above it.
+            //
+            // The same clamp is what makes a position from a
+            // now-disconnected monitor usable rather than discarded: it is
+            // pulled back onto a monitor that exists, keeping as much of
+            // the remembered placement as still fits.
+            let area = monitor.geometry;
+            let (w, h) = (window.geometry.width as i32, window.geometry.height as i32);
+            window.geometry.x = x.clamp(area.x, (area.right() - w).max(area.x));
+            window.geometry.y = y.clamp(area.y, (area.bottom() - h).max(area.y));
         } else if let Some(monitor) = target_monitor {
             window.monitor = monitor.id;
             let layout_name = self.workspace(workspace).map(|w| w.layout.clone()).unwrap_or_default();
@@ -279,6 +309,10 @@ impl WindowManager {
         }
         if let Some(margin) = actions.resize_margin {
             window.resize_margin = Some(margin);
+        }
+        if let Some(min) = actions.min_size {
+            window.min_size = min;
+            window.min_size_from_rule = true;
         }
         if let Some(ratio) = actions.aspect_ratio {
             window.aspect_ratio = Some(ratio);

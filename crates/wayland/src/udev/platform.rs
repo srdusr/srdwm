@@ -830,7 +830,7 @@ impl Platform for UdevPlatform {
             // deliberately *not* defaulted from `usable` the way `Monitor::
             // new` alone would (see the fullscreen note below).
             let full = srdwm_core::Rect::new(head.location.x, head.location.y, head.size.0 as u32, head.size.1 as u32);
-            let maximize = crate::input::maximize_geometry_for(&head.output, full);
+            let maximize = crate::input::maximize_geometry_for(&head.output, full, wm.maximize_covers_dock);
             let name = head.output.name();
             let split = wm.monitor_split(&name);
             let parts = split.map(|s| s.parts).unwrap_or(1).max(1);

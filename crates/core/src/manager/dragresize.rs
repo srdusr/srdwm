@@ -211,13 +211,16 @@ impl WindowManager {
             self.adjust_master_ratio_for_drag(window, &ids, dx, orig_master_ratio);
             return;
         }
-        let mut new_geom = edge.apply_delta(orig, dx, dy, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+        // This window's own minimum, not the one global floor - see
+        // `Window::min_size`.
+        let (min_w, min_h) = self.windows.get(&window).map(|w| w.min_size).unwrap_or((MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT));
+        let mut new_geom = edge.apply_delta(orig, dx, dy, min_w, min_h);
         // `Window::aspect_ratio`'s own doc comment: a locked-ratio window
         // (the "phone monitor" case, concretely) re-derives one dimension
         // from the other here, on top of the ordinary delta above, rather
         // than needing a second, separate resize code path.
         if let Some(ratio) = self.windows.get(&window).and_then(|w| w.aspect_ratio) {
-            new_geom = edge.apply_aspect_ratio(new_geom, ratio, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT);
+            new_geom = edge.apply_aspect_ratio(new_geom, ratio, min_w, min_h);
         }
         // Same live `w.monitor` correction as `update_drag`'s own doc
         // comment explains - a resize can cross a monitor boundary at

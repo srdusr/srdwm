@@ -799,6 +799,121 @@
         assert!(wm.drag_top_edge_monitor().is_none());
     }
 
+    /// A monitor with a 30px top bar reserved, like the real session.
+    fn wm_with_top_bar() -> WindowManager {
+        let mut wm = WindowManager::new();
+        wm.set_monitors(vec![{
+            let mut m = Monitor::new(0, "primary", Rect::new(0, 30, 1920, 1050));
+            m.full_geometry = Rect::new(0, 0, 1920, 1080);
+            m.primary = true;
+            m
+        }]);
+        wm
+    }
+
+    #[test]
+    fn a_remembered_position_under_the_top_bar_is_pushed_clear_of_it() {
+        // The reported bug: an app whose remembered y predates the bar (or
+        // was saved on a monitor without one) reopened with its titlebar
+        // tucked underneath, unreachable.
+        let mut wm = wm_with_top_bar();
+        wm.set_remembered_geometry("someapp".to_string(), (100, 5, 800, 600));
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "w");
+        w.app_id = "someapp".into();
+        wm.add_window(w);
+        let g = wm.window(a).unwrap().geometry;
+        assert_eq!(g.x, 100, "x was fine and must be left alone");
+        assert_eq!(g.y, 30, "pushed down to the usable area's own top edge");
+    }
+
+    #[test]
+    fn a_remembered_position_that_already_clears_the_bar_is_untouched() {
+        let mut wm = wm_with_top_bar();
+        wm.set_remembered_geometry("someapp".to_string(), (100, 200, 800, 600));
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "w");
+        w.app_id = "someapp".into();
+        wm.add_window(w);
+        assert_eq!((wm.window(a).unwrap().geometry.x, wm.window(a).unwrap().geometry.y), (100, 200));
+    }
+
+    #[test]
+    fn a_position_remembered_on_a_now_disconnected_monitor_is_pulled_back_on_screen() {
+        // Five of the eleven entries in the real store were saved with a
+        // second monitor attached. They used to be discarded outright, so
+        // those apps stopped remembering anything at all.
+        let mut wm = wm_with_top_bar();
+        wm.set_remembered_geometry("someapp".to_string(), (2400, 300, 800, 600));
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "w");
+        w.app_id = "someapp".into();
+        wm.add_window(w);
+        let g = wm.window(a).unwrap().geometry;
+        assert_eq!(g.x, 1120, "clamped so its right edge sits on the monitor's own right edge");
+        assert_eq!(g.y, 300, "y was already valid and is kept");
+        assert!(g.x >= 0 && g.x + g.width as i32 <= 1920, "fully on screen: {g:?}");
+    }
+
+    #[test]
+    fn a_remembered_window_larger_than_the_screen_still_starts_at_the_usable_origin() {
+        let mut wm = wm_with_top_bar();
+        wm.set_remembered_geometry("someapp".to_string(), (500, 500, 4000, 3000));
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "w");
+        w.app_id = "someapp".into();
+        wm.add_window(w);
+        let g = wm.window(a).unwrap().geometry;
+        assert_eq!((g.x, g.y), (0, 30), "clamped to the usable origin, not left off-screen");
+    }
+
+    #[test]
+    fn a_min_size_rule_raises_the_floor_an_interactive_resize_stops_at() {
+        let mut wm = wm_with_monitor();
+        wm.add_rule(WindowRule {
+            matcher: WindowMatch { class: Some("bigapp".into()), ..Default::default() },
+            actions: WindowRuleActions { min_size: Some((600, 400)), ..Default::default() },
+        });
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "w");
+        w.app_id = "bigapp".into();
+        w.geometry = Rect::new(100, 100, 900, 700);
+        wm.add_window(w);
+        assert_eq!(wm.window(a).unwrap().min_size, (600, 400));
+
+        // Drag the bottom-right corner far past the minimum.
+        wm.start_resize(a, ResizeEdge::BottomRight, 1000, 800);
+        wm.update_resize(-5000, -5000);
+        let g = wm.window(a).unwrap().geometry;
+        assert_eq!((g.width, g.height), (600, 400), "must stop at the rule's own minimum");
+    }
+
+    #[test]
+    fn without_a_rule_a_window_keeps_the_global_minimum() {
+        let mut wm = wm_with_monitor();
+        let a = wm.alloc_window_id();
+        wm.add_window(Window::new(a, "w"));
+        assert_eq!(wm.window(a).unwrap().min_size, (MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT));
+    }
+
+    #[test]
+    fn a_min_size_rule_also_floors_a_remembered_size() {
+        // A size remembered from before the rule existed must not reopen
+        // the window below its new minimum.
+        let mut wm = wm_with_monitor();
+        wm.add_rule(WindowRule {
+            matcher: WindowMatch { class: Some("bigapp".into()), ..Default::default() },
+            actions: WindowRuleActions { min_size: Some((700, 500)), ..Default::default() },
+        });
+        wm.set_remembered_geometry("bigapp".to_string(), (100, 100, 300, 200));
+        let a = wm.alloc_window_id();
+        let mut w = Window::new(a, "w");
+        w.app_id = "bigapp".into();
+        wm.add_window(w);
+        let g = wm.window(a).unwrap().geometry;
+        assert_eq!((g.width, g.height), (700, 500));
+    }
+
     #[test]
     fn a_dialog_opens_centered_not_cascaded_into_the_corner() {
         let mut wm = wm_with_monitor();

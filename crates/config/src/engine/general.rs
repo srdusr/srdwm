@@ -172,6 +172,23 @@ impl Engine {
                     _ => None,
                 }
             };
+            // `min_width`/`min_height` - the smallest this window may be
+            // resized to, overriding whatever the client itself declared.
+            // Two plain numbers rather than a `"WxH"` string: unlike an
+            // aspect ratio, a size is not conventionally written as one
+            // token, and `width`/`height` above already set the precedent
+            // for separate keys.
+            let min_size: Option<(u32, u32)> = {
+                let min_width: Option<u32> = actions.get("min_width")?;
+                let min_height: Option<u32> = actions.get("min_height")?;
+                match (min_width, min_height) {
+                    (None, None) => None,
+                    // One alone is meaningful - a terminal that needs
+                    // width but no particular height, say. The unset axis
+                    // keeps the global floor.
+                    (w, h) => Some((w.unwrap_or(srdwm_core::MIN_WINDOW_WIDTH), h.unwrap_or(srdwm_core::MIN_WINDOW_HEIGHT))),
+                }
+            };
             // `aspect_ratio = "9:16"` - the "phone monitor / special
             // workspace" ask's own real, scoped answer (see `Window::
             // aspect_ratio`'s own doc comment in `crates/core`): a rule
@@ -210,6 +227,7 @@ impl Engine {
                     opacity: actions.get("opacity")?,
                     resize_margin: actions.get("resize_margin")?,
                     aspect_ratio,
+                    min_size,
                 },
             };
             state.borrow().wm.borrow_mut().add_rule(rule);

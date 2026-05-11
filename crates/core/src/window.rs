@@ -197,6 +197,25 @@ pub struct Window {
     /// (GNOME, KDE, Windows) hides or disables it in exactly this case.
     /// Asked for as titlebars with "buttons of the program/dynamic".
     pub resizable: bool,
+    /// This window's own minimum size, in physical pixels. Defaults to the
+    /// global [`crate::placement::MIN_WINDOW_WIDTH`]/`MIN_WINDOW_HEIGHT`.
+    ///
+    /// Two sources, in order of precedence: a `min_size` window rule, and
+    /// the client's own declared minimum (`xdg_toplevel.set_min_size`, or
+    /// an XWayland window's ICCCM size hints), which the backend fills in
+    /// the same way it fills `resizable`.
+    ///
+    /// One global minimum for every window is wrong in both directions: it
+    /// is far too small for an application that needs room to lay out at
+    /// all, and too large for a small utility or palette window. Asked for
+    /// as "different windows should have minimum sizes depending on what
+    /// window is".
+    pub min_size: (u32, u32),
+    /// Set when `min_size` came from a `min_size` window rule rather than
+    /// from the client or the default. The backend refreshes a client's
+    /// declared minimum on every decoration redraw, and must not overwrite
+    /// a deliberate rule with it.
+    pub min_size_from_rule: bool,
     /// `decorated`'s value from just before entering fullscreen, restored
     /// on exit - see `WindowManager::toggle_fullscreen`'s doc comment on
     /// why this can't just hardcode `true` back.
@@ -302,6 +321,8 @@ impl Window {
             decorated: true,
             is_dialog: false,
             resizable: true,
+            min_size: (crate::placement::MIN_WINDOW_WIDTH, crate::placement::MIN_WINDOW_HEIGHT),
+            min_size_from_rule: false,
             restore_decorated: None,
             floating: false,
             minimized: false,

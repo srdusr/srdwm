@@ -313,7 +313,16 @@ impl WaylandPlatform {
             // doc comment further down; that's an overlap between two
             // pieces of this window's own decoration, not with its content,
             // so it doesn't contradict this paragraph.)
-            if w.border_width > 0 {
+            // No border on a maximized window. A maximized window's own
+            // edges are the screen's edges, so a border has nothing to
+            // separate it from - and where maximize *does* stop short (the
+            // strip a top bar reserves) the border lands in that gap, drawn
+            // as a hard line right against the bar. Reported live with a
+            // screenshot: a 4px accent line between the bar and the window,
+            // and none anywhere else, because the left/right/bottom strips
+            // fall off-screen. Fullscreen is already borderless for the
+            // same reason, via `decorated` being cleared.
+            if w.border_width > 0 && !w.maximized {
                 let color = crate::state::effective_border_color(w.border_color, focused == Some(id), self.wm.borrow().theme.border_inactive_dim);
                 let strips = decoration::border_strips(frame, w.border_width);
                 // Strips 0/1 (top/bottom) are rounded on their own two

@@ -182,6 +182,9 @@ pub(super) fn default_config() -> HashMap<String, ConfigValue> {
     // Re-read `init.lua` when it changes on disk, no reload key needed.
     // See `main.rs`'s `config_mtime`/`CONFIG_POLL_INTERVAL`.
     set("general.config_reload_on_write", Bool(true));
+    // Maximize runs to the bottom of the screen, under a dock, rather than
+    // stopping above it. A top bar is still always honoured.
+    set("general.maximize_covers_dock", Bool(true));
     set("general.smart_placement", Bool(true));
     set("general.window_gap", Number(8.0));
     set("general.animations", Bool(true));

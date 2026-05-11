@@ -142,7 +142,7 @@ pub(super) fn background_layer_surface_under(state: &CompState, pos: Point<f64, 
 /// respecting every edge here is what every mainstream desktop's own
 /// maximize convention already does. Fullscreen is unaffected - it never
 /// called this function, and still doesn't.
-pub(crate) fn maximize_geometry_for(output: &Output, full: srdwm_core::Rect) -> srdwm_core::Rect {
+pub(crate) fn maximize_geometry_for(output: &Output, full: srdwm_core::Rect, covers_dock: bool) -> srdwm_core::Rect {
     let mut rect = full;
     // `exclusive_zone`/`margin` are logical (a layer-shell client reports
     // its own reservation the same way every other layer-shell geometry
@@ -162,7 +162,15 @@ pub(crate) fn maximize_geometry_for(output: &Output, full: srdwm_core::Rect) -> 
             rect.y += shrink;
             rect.height = rect.height.saturating_sub(shrink as u32);
         }
-        if data.anchor.contains(Anchor::BOTTOM) && !data.anchor.contains(Anchor::TOP) {
+        // A bottom-anchored zone (a dock) is deliberately NOT subtracted
+        // when `covers_dock` is set: maximize runs to the bottom of the
+        // screen and the dock floats over it. Asked for directly - "not
+        // sure why it doesn't go all the way down past where dock would
+        // be" - and it matches the common dock convention (macOS, and any
+        // auto-hiding dock), where the dock overlays a maximized window
+        // rather than permanently shortening it. Top/left/right zones are
+        // still honoured, so a maximized window never hides the bar.
+        if data.anchor.contains(Anchor::BOTTOM) && !data.anchor.contains(Anchor::TOP) && !covers_dock {
             let shrink = scaled(data.margin.bottom);
             rect.height = rect.height.saturating_sub(shrink as u32);
         }

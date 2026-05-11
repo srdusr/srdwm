@@ -100,6 +100,11 @@ pub struct WindowRuleActions {
     /// binding (`crates/config`), not here - this crate has no config
     /// engine of its own to own that parsing.
     pub aspect_ratio: Option<(u32, u32)>,
+    /// `(width, height)` this window may never be resized below, in
+    /// physical pixels - see `Window::min_size`. Overrides whatever the
+    /// client itself declared, so a rule can both raise a minimum the app
+    /// set too low and lower one it set too high.
+    pub min_size: Option<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, Default)]
