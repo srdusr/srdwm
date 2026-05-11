@@ -121,6 +121,60 @@ fn find_best_font(dir: &std::path::Path, best: &mut Option<(std::path::PathBuf, 
     }
 }
 
+/// Composites a glyph over whatever is already in `buf`, honouring the
+/// destination's own alpha - straight (non-premultiplied) BGRA, the same
+/// convention `rgb_to_bgra` writes everywhere else in this module.
+///
+/// [`blit_glyph`] below blends the glyph against one flat opaque colour and
+/// writes alpha 255, which is right for a surface that has an opaque
+/// background of its own (a titlebar, a menu row). It is wrong for text
+/// drawn straight onto a transparent surface: every glyph pixel would
+/// become an opaque block of the assumed background colour, so the text
+/// would sit in a solid rectangle of exactly the box this was meant to
+/// remove. Used by the lock screen's password field, which draws over the
+/// blurred wallpaper with no panel behind it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn blit_glyph_over(
+    buf: &mut [u8],
+    width: usize,
+    height: usize,
+    glyph_x: i32,
+    glyph_y: i32,
+    metrics: &fontdue::Metrics,
+    coverage: &[u8],
+    foreground: (u8, u8, u8),
+) {
+    for row in 0..metrics.height {
+        let y = glyph_y + row as i32;
+        if y < 0 || y as usize >= height {
+            continue;
+        }
+        for col in 0..metrics.width {
+            let x = glyph_x + col as i32;
+            if x < 0 || x as usize >= width {
+                continue;
+            }
+            let sa = coverage[row * metrics.width + col] as f32 / 255.0;
+            if sa <= 0.0 {
+                continue;
+            }
+            let idx = (y as usize * width + x as usize) * 4;
+            let (db, dg, dr, da) = (buf[idx] as f32, buf[idx + 1] as f32, buf[idx + 2] as f32, buf[idx + 3] as f32 / 255.0);
+            let out_a = sa + da * (1.0 - sa);
+            if out_a <= 0.0 {
+                continue;
+            }
+            // Un-premultiplied source-over: each channel weighted by its
+            // own coverage, then divided back out by the result's alpha.
+            let mix = |fg: f32, dst: f32| -> u8 { (((fg * sa) + (dst * da * (1.0 - sa))) / out_a).round().clamp(0.0, 255.0) as u8 };
+            buf[idx] = mix(foreground.2 as f32, db);
+            buf[idx + 1] = mix(foreground.1 as f32, dg);
+            buf[idx + 2] = mix(foreground.0 as f32, dr);
+            buf[idx + 3] = (out_a * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn blit_glyph(
     buf: &mut [u8],

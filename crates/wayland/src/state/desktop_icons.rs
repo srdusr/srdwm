@@ -342,7 +342,8 @@ impl CompState {
                 (i.id.clone(), (top_left.0 - primary_top_left.0, top_left.1 - primary_top_left.1))
             })
             .collect();
-        self.desktop_icon_drag = Some(crate::desktop_icons::DesktopIconDrag { grab_offset, primary_pos: primary_top_left, members });
+        self.desktop_icon_drag =
+            Some(crate::desktop_icons::DesktopIconDrag { grab_offset, primary_pos: primary_top_left, members, pressed: (id.to_string(), pointer), moved: false });
         for id in changed {
             self.rebuild_icon_buffer(&id);
         }
@@ -354,6 +355,14 @@ impl CompState {
     /// `WindowManager::update_resize`'s own per-motion-event update.
     pub(crate) fn update_desktop_icon_drag(&mut self, pointer: (i32, i32)) {
         if let Some(drag) = &mut self.desktop_icon_drag {
+            // Latched, never cleared: a gesture that once travelled far
+            // enough to be a drag stays one even if the pointer wanders
+            // back over the press point before release.
+            if (pointer.0 - drag.pressed.1 .0).abs() > crate::desktop_icons::DRAG_THRESHOLD
+                || (pointer.1 - drag.pressed.1 .1).abs() > crate::desktop_icons::DRAG_THRESHOLD
+            {
+                drag.moved = true;
+            }
             drag.primary_pos = (pointer.0 - drag.grab_offset.0, pointer.1 - drag.grab_offset.1);
         }
     }
@@ -363,6 +372,18 @@ impl CompState {
     /// its own nearest free grid cell, independently but never colliding
     /// with each other - walking outward from each one's own raw target,
     /// closest first - and persists all of them.
+    /// The icon a still-open drag was pressed on, if the pointer never
+    /// travelled far enough for it to become a real drag - i.e. the
+    /// gesture was a click. `None` once it has moved, or with no drag
+    /// open at all.
+    ///
+    /// Read on release so the open happens there rather than on press,
+    /// which is what makes an icon draggable in single-click mode at all.
+    pub(crate) fn desktop_icon_click(&self) -> Option<String> {
+        let drag = self.desktop_icon_drag.as_ref()?;
+        (!drag.moved).then(|| drag.pressed.0.clone())
+    }
+
     pub(crate) fn end_desktop_icon_drag(&mut self) {
         let Some(drag) = self.desktop_icon_drag.take() else { return };
         // The cell math below needs the origin of whichever monitor the

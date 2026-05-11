@@ -1145,6 +1145,24 @@ impl CompState {
                 Vec::new()
             };
 
+            // The pointer, on a locked head too. A locked head renders only
+            // the lock element list below, and the cursor push further up
+            // is inside `if !locked`, so a locked screen had no pointer
+            // drawn at all - and on a bare TTY nothing else draws one.
+            // The on-screen keyboard's clicks were being handled correctly
+            // the whole time (`native_lock_click`); they simply could not
+            // be aimed. Reported live as "there is no mouse input to
+            // interact with the screen keyboard in lockscreen".
+            //
+            // Built here rather than reusing `custom_elements` because that
+            // list is assembled inside the same `if !locked` branch. First
+            // in the list, so it stays above the lock UI it is used to
+            // click on.
+            let locked_cursor: Vec<crate::elements::OverlayElement<PixmanRenderer>> = if locked {
+                crate::cursor::render_elements(&cursor_status, &cursor_buffers, &mut udev.renderer, udev.pointer_pos, origin, udev.heads[index].size)
+            } else {
+                Vec::new()
+            };
             let head = &mut udev.heads[index];
             let mut framebuffer = match udev.renderer.bind(&mut head.buffers[back].image) {
                 Ok(fb) => fb,
@@ -1161,13 +1179,17 @@ impl CompState {
             // external locker's surface the same way, and nothing else;
             // unlocked heads draw the normal scene.
             let result = if locked && is_native {
+                let mut elements = locked_cursor;
+                elements.extend(native_elements.into_iter().map(crate::elements::OverlayElement::Memory));
                 head.damage_tracker
-                    .render_output(&mut udev.renderer, &mut framebuffer, 0, &native_elements, [0.0, 0.0, 0.0, 1.0])
+                    .render_output(&mut udev.renderer, &mut framebuffer, 0, &elements, [0.0, 0.0, 0.0, 1.0])
                     .map(|r| (r.damage.is_some(), Vec::new()))
                     .map_err(|e| e.to_string())
             } else if locked {
+                let mut elements = locked_cursor;
+                elements.extend(lock_elements.into_iter().map(crate::elements::OverlayElement::Surface));
                 head.damage_tracker
-                    .render_output(&mut udev.renderer, &mut framebuffer, 0, &lock_elements, [0.0, 0.0, 0.0, 1.0])
+                    .render_output(&mut udev.renderer, &mut framebuffer, 0, &elements, [0.0, 0.0, 0.0, 1.0])
                     .map(|r| (r.damage.is_some(), Vec::new()))
                     .map_err(|e| e.to_string())
             } else {

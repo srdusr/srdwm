@@ -729,27 +729,30 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
                     .and_then(|icons| icons.icon_at(pos.x as i32, pos.y as i32).map(|(i, origin)| (icons.icons[i].id.clone(), origin)));
                 match icon_hit {
                     Some((id, origin)) => {
-                        let single_click_opens = state.wm.borrow().desktop_icon_single_click;
-                        if single_click_opens || state.is_double_click_icon(&id, time) {
+                        // Always a *potential* drag, whichever activation
+                        // mode is configured. Opening is decided on
+                        // release instead (see the release handler's own
+                        // `desktop_icon_click` branch), because deciding
+                        // it here cannot distinguish a click from the
+                        // first instant of a drag - which is exactly what
+                        // made single-click mode unable to move an icon at
+                        // all.
+                        //
+                        // Don't collapse an existing multi-selection just
+                        // because the drag grabbed one of its own members
+                        // - `start_desktop_icon_drag` itself carries every
+                        // currently-selected icon along when the one
+                        // grabbed is already selected (see its own doc
+                        // comment), the same "drag one of several selected
+                        // files, they all move" convention every real
+                        // desktop uses. Grabbing an icon *outside* the
+                        // current selection still replaces it, same as
+                        // before.
+                        let already_selected = state.desktop_icons.as_ref().is_some_and(|icons| icons.icons.iter().any(|i| i.id == id && i.selected));
+                        if !already_selected {
                             state.select_desktop_icon(Some(&id));
-                            state.open_desktop_icon(&id);
-                        } else {
-                            // Don't collapse an existing multi-selection
-                            // just because the drag grabbed one of its own
-                            // members - `start_desktop_icon_drag` itself
-                            // carries every currently-selected icon along
-                            // when the one grabbed is already selected
-                            // (see its own doc comment), the same "drag one
-                            // of several selected files, they all move"
-                            // convention every real desktop uses. Grabbing
-                            // an icon *outside* the current selection still
-                            // replaces it, same as before.
-                            let already_selected = state.desktop_icons.as_ref().is_some_and(|icons| icons.icons.iter().any(|i| i.id == id && i.selected));
-                            if !already_selected {
-                                state.select_desktop_icon(Some(&id));
-                            }
-                            state.start_desktop_icon_drag(&id, origin, (pos.x as i32, pos.y as i32));
                         }
+                        state.start_desktop_icon_drag(&id, origin, (pos.x as i32, pos.y as i32));
                     }
                     // Genuinely bare desktop, not just "no icon under the
                     // pointer" - starts a rubber-band selection instead of
@@ -806,6 +809,17 @@ pub(crate) fn handle_pointer_button(state: &mut CompState, pos: Point<f64, Logic
         // A no-op via `Option::take()` when no icon drag was active --
         // always checked on release, same as `was_dragging`/`was_resizing`
         // below, just for a desktop icon instead of a window.
+        // A press that never travelled far enough to be a drag is a click:
+        // decide activation here, not on press, so an icon stays draggable
+        // in single-click mode. `time` is the release's, used consistently
+        // for both clicks of a double so the interval stays comparable.
+        if let Some(id) = state.desktop_icon_click() {
+            let single_click_opens = state.wm.borrow().desktop_icon_single_click;
+            if single_click_opens || state.is_double_click_icon(&id, time) {
+                state.select_desktop_icon(Some(&id));
+                state.open_desktop_icon(&id);
+            }
+        }
         state.end_desktop_icon_drag();
         state.end_desktop_marquee();
         // Releasing a drag over a cell of the drag-triggered Snap-Layouts

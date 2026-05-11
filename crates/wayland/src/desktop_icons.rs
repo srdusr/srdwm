@@ -79,7 +79,31 @@ pub(crate) struct DesktopIconDrag {
     /// `(icon id, fixed offset from primary's own top-left at drag
     /// start)` - primary included at offset `(0, 0)`.
     pub(crate) members: Vec<(String, (i32, i32))>,
+    /// The icon the press actually landed on, and where the pointer was.
+    /// Release compares against this to decide whether the gesture was a
+    /// click or a drag - see `DRAG_THRESHOLD`.
+    pub(crate) pressed: (String, (i32, i32)),
+    /// Set once the pointer leaves `DRAG_THRESHOLD` of `pressed`. A press
+    /// that never does is a click, not a move.
+    pub(crate) moved: bool,
 }
+
+/// How far the pointer must travel from the press point before a desktop
+/// icon gesture counts as a drag rather than a click, in logical pixels.
+///
+/// Every press on an icon now starts a *potential* drag, and release
+/// decides which it was. Without that, single-click mode (`general.
+/// desktop_icon_single_click`) made dragging impossible: the press opened
+/// the icon immediately, so the drag branch was unreachable and an icon
+/// could never be moved at all. Reported live as "i can't move the desktop
+/// icons anymore since making it single click ... impossible to hold and
+/// drag move desktop icons".
+///
+/// Small, because the cost is asymmetric: too large and a genuine short
+/// drag is swallowed as a click that opens something the user did not want
+/// opened; too small only means an unusually shaky click moves an icon a
+/// cell, which is visible and trivially undone.
+pub(crate) const DRAG_THRESHOLD: i32 = 4;
 
 pub(crate) struct DesktopIcons {
     /// Top-left of the grid's own `(0, 0)` cell, in global space, one per

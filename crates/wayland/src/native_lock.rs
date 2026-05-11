@@ -780,14 +780,22 @@ fn render_header_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Ve
 /// `rgb_to_bgra`), promoted to `pub(crate)` there rather than duplicated
 /// here.
 fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8>, (i32, i32)) {
-    use crate::decoration::{blit_glyph, find_system_font, rgb_to_bgra, round_bottom_corners, round_top_corners, FONT_PIXELS, TEXT_LEFT_PADDING};
+    use crate::decoration::{blit_glyph_over, find_system_font, rgb_to_bgra, round_bottom_corners, round_top_corners, FONT_PIXELS, TEXT_LEFT_PADDING};
 
     const WIDTH: usize = 340;
     const HEIGHT: usize = 120;
     let mut buf = vec![0u8; WIDTH * HEIGHT * 4];
-    let bg = rgb_to_bgra(theme.box_bg, 255);
-    for px in buf.chunks_exact_mut(4) {
-        px.copy_from_slice(&bg);
+    // `box_opacity` 0 (the default) leaves the buffer fully transparent, so
+    // the dots and status text sit straight on the blurred background with
+    // no panel behind them at all - see `LockConfig::box_opacity`. Above
+    // 0 the panel comes back at that opacity, border and rounded corners
+    // included, exactly as it used to look at 1.0.
+    let panel_alpha = (theme.box_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if panel_alpha > 0 {
+        let bg = rgb_to_bgra(theme.box_bg, panel_alpha);
+        for px in buf.chunks_exact_mut(4) {
+            px.copy_from_slice(&bg);
+        }
     }
 
     let font = find_system_font();
@@ -814,7 +822,7 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
             if metrics.width > 0 && metrics.height > 0 {
                 let glyph_x = pen_x + metrics.xmin as f32;
                 let glyph_y = y - metrics.height as f32 - metrics.ymin as f32;
-                blit_glyph(&mut buf, WIDTH, HEIGHT, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, theme.box_bg, color);
+                blit_glyph_over(&mut buf, WIDTH, HEIGHT, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, color);
             }
             pen_x += metrics.advance_width;
         }
@@ -827,7 +835,11 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
     // (GNOME, macOS): dimmer than the real text colour, never mistakable
     // for an actual password once one is entered.
     if native.password.is_empty() && !native.show_error {
-        let placeholder = crate::decoration::mix_rgb(theme.text_color, theme.box_bg, 0.5);
+        // Dimmed toward the panel colour when there is a panel, and toward
+        // plain black otherwise - mixing toward a background that is not
+        // actually drawn would tint the placeholder for no visible reason.
+        let toward = if panel_alpha > 0 { theme.box_bg } else { (0, 0, 0) };
+        let placeholder = crate::decoration::mix_rgb(theme.text_color, toward, 0.5);
         draw_line_centered("Enter Password", 65.0, placeholder);
     } else {
         let dots: String = std::iter::repeat_n(theme.dot_char, native.password.chars().count()).collect();
@@ -850,6 +862,13 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
     // this box's size read as a thin, easy-to-miss hairline rather than a
     // deliberate frame around the box.
     const BORDER: usize = 2;
+    // Border and corner rounding belong to the panel: with no panel there
+    // is nothing to frame, and a floating rounded outline around bare text
+    // is the "horrendus box" with its middle removed rather than the box
+    // gone.
+    if panel_alpha == 0 {
+        return (buf, (WIDTH as i32, HEIGHT as i32));
+    }
     let border_px = rgb_to_bgra(theme.box_border, 255);
     for t in 0..BORDER {
         for x in 0..WIDTH {

@@ -341,6 +341,7 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     if let Some(rgb) = srdwm_core::parse_hex_color(&engine.get_string("theme.lock.error_color", "#bf616a")) {
         lock.error_color = rgb;
     }
+    lock.box_opacity = engine.get_f64("theme.lock.box_opacity", lock.box_opacity as f64).clamp(0.0, 1.0) as f32;
     lock.corner_radius = engine.get_f64("theme.lock.corner_radius", lock.corner_radius as f64).max(0.0) as u32;
     lock.blur_radius = engine.get_f64("theme.lock.blur_radius", lock.blur_radius as f64).max(0.0) as u32;
     lock.show_caps_lock = engine.get_bool("theme.lock.show_caps_lock", lock.show_caps_lock);
