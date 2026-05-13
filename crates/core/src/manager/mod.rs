@@ -439,6 +439,17 @@ pub struct WindowManager {
     /// above it. A top bar's own reservation is always honoured either
     /// way. Default `true` - see `input::layers::maximize_geometry_for`.
     pub maximize_covers_dock: bool,
+    /// Every key binding as `(combo, description)`, published by the main
+    /// loop after the config loads and after every reload.
+    ///
+    /// Core neither owns nor interprets these - it has no Lua state and
+    /// never dispatches a key itself. It holds them so the IPC layer, which
+    /// is handed a `WindowManager` and nothing else, can serve them to a
+    /// panel or launcher that wants to show the user what their keys do.
+    /// Asked for as whether "our bindings show in ags's launcher": they
+    /// could not, because nothing published them anywhere a client could
+    /// read.
+    pub keybindings: Vec<(String, String)>,
     /// Set by `request_refresh`, drained by the main loop. Same
     /// cross-boundary queued-request shape as `lock_requested`.
     refresh_requested: bool,
@@ -628,6 +639,7 @@ impl WindowManager {
             auto_raise: false,
             theme: ThemeConfig::default(),
             lock: LockConfig::default(),
+            keybindings: Vec::new(),
             maximize_covers_dock: true,
             refresh_requested: false,
             live_settings: std::collections::BTreeMap::new(),

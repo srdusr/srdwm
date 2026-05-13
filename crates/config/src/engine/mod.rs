@@ -26,6 +26,15 @@ struct SharedState {
     wm: Rc<RefCell<WindowManager>>,
     values: HashMap<String, ConfigValue>,
     key_bindings: HashMap<String, RegistryKey>,
+    /// Human-readable description for a binding, from `srd.bind`'s optional
+    /// third argument. Separate from `key_bindings` so a binding without one
+    /// costs nothing, and cleared alongside it on reload.
+    ///
+    /// Exists so a launcher or cheat-sheet can list what the keys actually
+    /// do - a bare combo is close to useless in a UI. Published to
+    /// `WindowManager` by `main.rs` and served over IPC as
+    /// `srd keybindings`.
+    key_descriptions: HashMap<String, String>,
     /// Combos registered with `srd.bind_repeat`, which fire repeatedly while
     /// held (Hyprland's `binde`). A subset of `key_bindings`.
     repeat_keys: std::collections::HashSet<String>,
@@ -67,6 +76,7 @@ impl Engine {
             wm,
             values: default_config(),
             key_bindings: HashMap::new(),
+            key_descriptions: HashMap::new(),
             repeat_keys: std::collections::HashSet::new(),
             event_handlers: HashMap::new(),
             config_dir: config_dir.into(),
@@ -187,6 +197,18 @@ impl Engine {
 
     pub fn bound_keys(&self) -> Vec<String> {
         self.state.borrow().key_bindings.keys().cloned().collect()
+    }
+
+    /// Every binding as `(combo, description)`, sorted by combo so the list
+    /// is stable between calls - a UI listing them should not reshuffle on
+    /// every refresh. `description` is empty when the binding did not give
+    /// one.
+    pub fn bound_keys_with_descriptions(&self) -> Vec<(String, String)> {
+        let state = self.state.borrow();
+        let mut out: Vec<(String, String)> =
+            state.key_bindings.keys().map(|combo| (combo.clone(), state.key_descriptions.get(combo).cloned().unwrap_or_default())).collect();
+        out.sort();
+        out
     }
 
     /// Combos that should auto-repeat while held.

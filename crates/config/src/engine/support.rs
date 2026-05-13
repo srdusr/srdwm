@@ -33,16 +33,18 @@ pub(super) fn do_reload(lua: &Lua, state: &Rc<RefCell<SharedState>>) -> Result<(
             std::mem::take(&mut s.key_bindings),
             std::mem::take(&mut s.event_handlers),
             std::mem::take(&mut s.repeat_keys),
+            std::mem::take(&mut s.key_descriptions),
         );
         (s.config_dir.clone(), previous)
     };
-    let restore = |state: &Rc<RefCell<SharedState>>, previous: (_, _, _)| {
+    let restore = |state: &Rc<RefCell<SharedState>>, previous: (_, _, _, _)| {
         let mut s = state.borrow_mut();
         // Whatever the failed run managed to register before erroring is
         // discarded, not merged: half of a broken config is not a config.
         s.key_bindings = previous.0;
         s.event_handlers = previous.1;
         s.repeat_keys = previous.2;
+        s.key_descriptions = previous.3;
     };
     let path = config_dir.join("init.lua");
     let src = match std::fs::read_to_string(&path) {

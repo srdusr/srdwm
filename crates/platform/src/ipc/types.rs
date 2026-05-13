@@ -122,6 +122,20 @@ pub(crate) struct MonitorsResponse {
     pub(crate) monitors: Vec<MonitorInfo>,
 }
 
+/// One key binding, for `srd keybindings`. `description` is empty when the
+/// binding did not give one - an empty string rather than `null`, so a
+/// consumer can render it without a branch.
+#[derive(Serialize)]
+pub(crate) struct KeybindingInfo {
+    pub(crate) combo: String,
+    pub(crate) description: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct KeybindingsResponse {
+    pub(crate) keybindings: Vec<KeybindingInfo>,
+}
+
 #[derive(Serialize)]
 pub(crate) struct WorkspacesResponse {
     pub(crate) workspaces: Vec<WorkspaceInfo>,

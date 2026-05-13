@@ -104,6 +104,16 @@ const RELOAD_COMBO_LITERAL: &str = "Mod4+Ctrl+r";
 /// `general.config_reload_on_write` is on. See `config_mtime`.
 const CONFIG_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Copies the loaded config's key bindings into the `WindowManager`, where
+/// the IPC layer can serve them (`srd keybindings`).
+///
+/// Called after the initial load and after every reload, so a rebound key
+/// shows up without a restart - unlike the *grab*, which `main.rs` only
+/// registers once at startup (see `Engine::reload`'s own doc comment).
+fn publish_keybindings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
+    wm.borrow_mut().keybindings = engine.bound_keys_with_descriptions();
+}
+
 /// Puts a config error in front of the user instead of only in a log they
 /// have no reason to be reading.
 ///
@@ -698,6 +708,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             report_config_error(&format!("Config failed to load, using built-in defaults.\n{e}"));
         }
     }
+    publish_keybindings(&engine, &wm);
     apply_workspace_count(&engine, &wm);
     apply_general_settings(&engine, &wm);
     apply_default_layout(&engine, &wm);
@@ -803,6 +814,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Err(e) => report_config_error(&format!("Config edit not applied, keeping the last working one.\n{e}")),
                     }
                     apply_general_settings(&engine, &wm);
+                    publish_keybindings(&engine, &wm);
                     // After `apply_general_settings`, which rebuilds the
                     // theme from the config file - see
                     // `WindowManager::live_settings` for why a hand-made
@@ -825,6 +837,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => report_config_error(&format!("Config reload failed, keeping the last working one.\n{e}")),
             }
             apply_general_settings(&engine, &wm);
+            publish_keybindings(&engine, &wm);
             srdwm_platform::replay_live_settings(&wm);
             // After the reload, so a handler edited in the config since
             // startup is the one that runs.
@@ -842,6 +855,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Err(e) => report_config_error(&format!("Config reload failed, keeping the last working one.\n{e}")),
                         }
                         apply_general_settings(&engine, &wm);
+                        publish_keybindings(&engine, &wm);
                         srdwm_platform::replay_live_settings(&wm);
                     } else if !engine.dispatch_keybinding(&combo) {
                         log::debug!("no binding for '{combo}'");

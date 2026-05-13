@@ -417,6 +417,17 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
         // `redraw_decoration`/`apply_geometry` for every visible window
         // unconditionally - this only has to mutate the right field and
         // let that existing machinery do the rest.
+        // `{"cmd":"keybindings"}` - every binding the loaded config
+        // registered, as `(combo, description)`. Read-only, and the one
+        // way a panel or launcher can show the user what their own keys
+        // do: `srd.bind` lives entirely in the Lua engine, so nothing
+        // outside this process could see a binding at all before this.
+        "keybindings" => {
+            let wm = wm.borrow();
+            let list: Vec<KeybindingInfo> =
+                wm.keybindings.iter().map(|(combo, description)| KeybindingInfo { combo: combo.clone(), description: description.clone() }).collect();
+            (serde_json::to_vec(&KeybindingsResponse { keybindings: list }).unwrap_or_default(), false)
+        }
         "set" => handle_set(&req, wm),
         _ => (err("unknown command"), false),
     }

@@ -935,3 +935,30 @@ make an app forget where it lives.
 Dialogs are centred instead, and take neither a remembered position nor a
 remembered size - window memory is keyed by `app_id`, which a dialog shares
 with the window that spawned it.
+
+## Listing key bindings
+
+`srd keybindings` returns every binding the loaded config registered, with a
+description if it gave one:
+
+```
+{"keybindings":[{"combo":"Mod4+Return","description":"Open a terminal"}, ...]}
+```
+
+`srd.bind` takes an optional third argument for that description:
+
+```lua
+srd.bind("Mod4+Return", function() srd.spawn("alacritty") end, "Open a terminal")
+```
+
+Bindings live entirely inside the Lua engine, so before this nothing outside
+the compositor could see that a binding existed at all - a launcher or
+cheat-sheet had no way to show the user their own keys. The list is
+republished after every config reload, so a rebound key appears without a
+restart. Note that a brand new *combination* still needs a restart before the
+compositor grabs that key at all; an existing combination picks up its new
+action immediately.
+
+Combos are reported in canonical order (`Ctrl+Mod4+l`), which is what the
+compositor matches a real keypress against - not necessarily how the combo
+was written in the config.

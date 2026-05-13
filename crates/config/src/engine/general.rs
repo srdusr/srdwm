@@ -109,7 +109,7 @@ impl Engine {
 
     pub(super) fn fn_bind(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
-        Ok(self.lua.create_function(move |lua, (combo, f): (String, mlua::Function)| {
+        Ok(self.lua.create_function(move |lua, (combo, f, description): (String, mlua::Function, Option<String>)| {
             // `key_bindings` is keyed by whatever string dispatch builds
             // from a real keypress (`srdwm_core::key_combo_string`, fixed
             // Ctrl/Shift/Alt/Mod4 order) - storing the config's own
@@ -119,7 +119,11 @@ impl Engine {
             // grabbed/intercepted. See `parse_key_combo`'s doc comment.
             let combo = srdwm_core::canonicalize_key_combo(&combo);
             let key = lua.create_registry_value(f)?;
-            state.borrow_mut().key_bindings.insert(combo, key);
+            let mut s = state.borrow_mut();
+            if let Some(description) = description.filter(|d| !d.trim().is_empty()) {
+                s.key_descriptions.insert(combo.clone(), description);
+            }
+            s.key_bindings.insert(combo, key);
             Ok(())
         })?)
     }

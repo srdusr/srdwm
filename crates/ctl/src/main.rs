@@ -7,6 +7,7 @@
 //! Usage:
 //!   srd clients                        list windows, one JSON object
 //!   srd workspaces                     list workspaces, one JSON object
+//!   srd keybindings                    list key bindings and descriptions
 //!   srd settings                       current shadows/rounded_corners/
 //!                                       animations/night_light/reading_mode
 //!                                       state, one JSON object
@@ -144,6 +145,10 @@ fn build_request(args: &[String]) -> Result<String, String> {
         Some("clients") => Ok(r#"{"cmd":"clients"}"#.to_string()),
         Some("monitors") => Ok(r#"{"cmd":"monitors"}"#.to_string()),
         Some("workspaces") => Ok(r#"{"cmd":"workspaces"}"#.to_string()),
+        // Every binding the loaded config registered, with its description
+        // if it gave one - what a launcher or cheat-sheet needs to show
+        // the user their own keys.
+        Some("keybindings") => Ok(r#"{"cmd":"keybindings"}"#.to_string()),
         Some("settings") => Ok(r#"{"cmd":"settings"}"#.to_string()),
         Some("pinned") if args.get(1).map(String::as_str) == Some("inputs") => Ok(r#"{"cmd":"pinned_inputs"}"#.to_string()),
         Some("pinned") => Err("did you mean 'srd pinned inputs'?".to_string()),
@@ -221,7 +226,7 @@ fn build_request(args: &[String]) -> Result<String, String> {
             Ok(format!(r#"{{"cmd":"set","key":"{key}","value":{value}}}"#))
         }
         _ => Err(
-            "expected 'clients', 'monitors', 'workspaces', 'settings', 'keyboard layout', 'subscribe', 'dispatch <action> <id>', 'capture workspace <id> <path>', or 'set <key> <value>'"
+            "expected 'clients', 'monitors', 'workspaces', 'keybindings', 'settings', 'keyboard layout', 'subscribe', 'dispatch <action> <id>', 'capture workspace <id> <path>', or 'set <key> <value>'"
                 .to_string(),
         ),
     }
@@ -409,6 +414,7 @@ fn print_usage() {
     eprintln!("  srd clients");
     eprintln!("  srd monitors");
     eprintln!("  srd workspaces");
+    eprintln!("  srd keybindings");
     eprintln!("  srd settings");
     eprintln!("  srd pinned inputs");
     eprintln!("  srd keyboard layout");
