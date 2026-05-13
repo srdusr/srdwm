@@ -85,6 +85,29 @@ struct ResizeState {
 /// state and layout policy. Backends (X11, Wayland, ...) drive this via
 /// `add_window`/`remove_window`/input events, and apply the `Rect`s it
 /// computes back onto real surfaces.
+/// One key binding, as reported by `srd keybindings`.
+#[derive(Debug, Clone)]
+pub struct KeyBinding {
+    /// Canonical form (`"Ctrl+Mod4+l"`), which is what a real keypress is
+    /// matched against - not necessarily how it was written in the config.
+    pub combo: String,
+    /// `srd.bind`'s optional third argument, empty when it gave none.
+    pub description: String,
+    /// Whether the compositor actually intercepts this key.
+    ///
+    /// `main.rs` hands the backend one combo list, once, before connecting:
+    /// the X11 backend turns it into `XGrabKey` calls and the Wayland one
+    /// into its intercept set. A reload re-registers the *actions* but
+    /// cannot re-register the grabs, so a combination added to the config
+    /// since startup is bound as far as the config engine is concerned and
+    /// still goes straight to the focused client when pressed.
+    ///
+    /// Reported here so a launcher or cheat-sheet can say so rather than
+    /// listing a shortcut that silently does nothing - which is exactly
+    /// the failure this field exists to make visible.
+    pub grabbed: bool,
+}
+
 pub struct WindowManager {
     windows: HashMap<WindowId, Window>,
     order: Vec<WindowId>,
@@ -449,7 +472,10 @@ pub struct WindowManager {
     /// Asked for as whether "our bindings show in ags's launcher": they
     /// could not, because nothing published them anywhere a client could
     /// read.
-    pub keybindings: Vec<(String, String)>,
+    pub keybindings: Vec<KeyBinding>,
+    /// The exact combo list handed to the backend at startup, which is the
+    /// only set it ever grabs - see `KeyBinding::grabbed`.
+    grabbed_keys: std::collections::HashSet<String>,
     /// Set by `request_refresh`, drained by the main loop. Same
     /// cross-boundary queued-request shape as `lock_requested`.
     refresh_requested: bool,
@@ -640,6 +666,7 @@ impl WindowManager {
             theme: ThemeConfig::default(),
             lock: LockConfig::default(),
             keybindings: Vec::new(),
+            grabbed_keys: std::collections::HashSet::new(),
             maximize_covers_dock: true,
             refresh_requested: false,
             live_settings: std::collections::BTreeMap::new(),

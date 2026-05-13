@@ -129,6 +129,11 @@ pub(crate) struct MonitorsResponse {
 pub(crate) struct KeybindingInfo {
     pub(crate) combo: String,
     pub(crate) description: String,
+    /// `false` when the config binds this combo but the compositor does not
+    /// actually intercept it - see `srdwm_core::KeyBinding::grabbed`. A UI
+    /// listing bindings should say so rather than showing a shortcut that
+    /// silently does nothing.
+    pub(crate) grabbed: bool,
 }
 
 #[derive(Serialize)]

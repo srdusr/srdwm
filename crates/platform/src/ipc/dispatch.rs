@@ -424,8 +424,11 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
         // outside this process could see a binding at all before this.
         "keybindings" => {
             let wm = wm.borrow();
-            let list: Vec<KeybindingInfo> =
-                wm.keybindings.iter().map(|(combo, description)| KeybindingInfo { combo: combo.clone(), description: description.clone() }).collect();
+            let list: Vec<KeybindingInfo> = wm
+                .keybindings
+                .iter()
+                .map(|b| KeybindingInfo { combo: b.combo.clone(), description: b.description.clone(), grabbed: b.grabbed })
+                .collect();
             (serde_json::to_vec(&KeybindingsResponse { keybindings: list }).unwrap_or_default(), false)
         }
         "set" => handle_set(&req, wm),

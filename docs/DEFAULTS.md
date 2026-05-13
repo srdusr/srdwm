@@ -942,8 +942,17 @@ with the window that spawned it.
 description if it gave one:
 
 ```
-{"keybindings":[{"combo":"Mod4+Return","description":"Open a terminal"}, ...]}
+{"keybindings":[{"combo":"Mod4+Return","description":"Open a terminal","grabbed":true}, ...]}
 ```
+
+`grabbed` is `false` when the config binds that combo but the compositor
+does not actually intercept it. The backend is handed one combo list, once,
+before connecting - X11 turns it into `XGrabKey` calls, Wayland into its
+intercept set. A reload re-registers the *actions* but cannot re-register
+the grabs, so a combination added to the config since startup is bound as
+far as the config engine is concerned and still goes straight to the focused
+client when pressed. Anything listing bindings should show that rather than
+offering a shortcut that silently does nothing.
 
 `srd.bind` takes an optional third argument for that description:
 
@@ -955,9 +964,9 @@ Bindings live entirely inside the Lua engine, so before this nothing outside
 the compositor could see that a binding existed at all - a launcher or
 cheat-sheet had no way to show the user their own keys. The list is
 republished after every config reload, so a rebound key appears without a
-restart. Note that a brand new *combination* still needs a restart before the
-compositor grabs that key at all; an existing combination picks up its new
-action immediately.
+restart - with `grabbed: false` until the compositor is restarted, since an
+existing combination picks up its new action immediately but a brand new one
+is not intercepted until the next startup.
 
 Combos are reported in canonical order (`Ctrl+Mod4+l`), which is what the
 compositor matches a real keypress against - not necessarily how the combo

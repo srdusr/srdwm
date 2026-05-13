@@ -111,7 +111,15 @@ const CONFIG_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 /// shows up without a restart - unlike the *grab*, which `main.rs` only
 /// registers once at startup (see `Engine::reload`'s own doc comment).
 fn publish_keybindings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
-    wm.borrow_mut().keybindings = engine.bound_keys_with_descriptions();
+    let listed = engine.bound_keys_with_descriptions();
+    let mut wm = wm.borrow_mut();
+    wm.keybindings = listed
+        .into_iter()
+        .map(|(combo, description)| {
+            let grabbed = wm.is_grabbed(&combo);
+            srdwm_core::KeyBinding { combo, description, grabbed }
+        })
+        .collect();
 }
 
 /// Puts a config error in front of the user instead of only in a log they
@@ -723,20 +731,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_config_mtime = config_mtime(&dir);
     let mut last_config_poll = std::time::Instant::now();
 
+    // One snapshot, handed to whichever backend is built below and also
+    // recorded on the `WindowManager` so `srd keybindings` can report which
+    // combos are really grabbed. Taken here rather than inside each arm so
+    // the reported set and the grabbed set cannot drift apart.
+    let startup_combos = engine.bound_keys();
+    wm.borrow_mut().set_grabbed_keys(&startup_combos);
+    publish_keybindings(&engine, &wm);
     let mut platform: Box<dyn Platform> = match kind {
         #[cfg(all(unix, not(target_os = "macos")))]
         PlatformKind::X11 => {
             let mut p = srdwm_x11::X11Platform::connect(wm.clone())?;
-            let combos = engine.bound_keys();
-            p.grab_keybindings(&combos)?;
-            log::info!("grabbed {} keybinding(s)", combos.len());
+            p.grab_keybindings(&startup_combos)?;
+            log::info!("grabbed {} keybinding(s)", startup_combos.len());
             Box::new(p)
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         PlatformKind::Wayland => {
-            let combos = engine.bound_keys();
-            log::info!("{} keybinding(s) will be intercepted from clients", combos.len());
-            srdwm_wayland::connect(wm.clone(), &combos, &engine.repeat_keys())?
+            log::info!("{} keybinding(s) will be intercepted from clients", startup_combos.len());
+            srdwm_wayland::connect(wm.clone(), &startup_combos, &engine.repeat_keys())?
         }
         #[cfg(windows)]
         PlatformKind::Windows => Box::new(srdwm_windows::WindowsPlatform::new()?),

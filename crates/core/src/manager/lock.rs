@@ -52,6 +52,18 @@ impl WindowManager {
         std::mem::take(&mut self.refresh_requested)
     }
 
+    /// Records the combos the backend was given at startup, so
+    /// `KeyBinding::grabbed` can be answered. Called once, from `main.rs`,
+    /// right where that same list is handed to the platform.
+    pub fn set_grabbed_keys(&mut self, combos: &[String]) {
+        self.grabbed_keys = combos.iter().cloned().collect();
+    }
+
+    /// Whether `combo` is one the backend actually grabs.
+    pub fn is_grabbed(&self, combo: &str) -> bool {
+        self.grabbed_keys.contains(combo)
+    }
+
     /// Records that `key` was set live to `value_json`. See
     /// `live_settings`' own doc comment.
     ///
@@ -80,6 +92,28 @@ mod tests {
         wm.request_lock();
         assert!(wm.drain_lock_request(), "must report the pending request");
         assert!(!wm.drain_lock_request(), "must not report the same request twice");
+    }
+
+    #[test]
+    fn only_the_combos_handed_to_the_backend_count_as_grabbed() {
+        // The whole point of the flag: a binding added after startup is
+        // registered by the config engine but never grabbed, so pressing it
+        // goes to the focused client instead.
+        let mut wm = WindowManager::new();
+        assert!(!wm.is_grabbed("Mod4+Return"), "nothing grabbed before startup records a set");
+        wm.set_grabbed_keys(&["Mod4+Return".to_string(), "Ctrl+Mod4+l".to_string()]);
+        assert!(wm.is_grabbed("Mod4+Return"));
+        assert!(wm.is_grabbed("Ctrl+Mod4+l"));
+        assert!(!wm.is_grabbed("Ctrl+Shift+Mod4+F9"), "added since startup: bound, not grabbed");
+    }
+
+    #[test]
+    fn recording_the_grabbed_set_again_replaces_it_rather_than_accumulating() {
+        let mut wm = WindowManager::new();
+        wm.set_grabbed_keys(&["Mod4+a".to_string()]);
+        wm.set_grabbed_keys(&["Mod4+b".to_string()]);
+        assert!(!wm.is_grabbed("Mod4+a"), "the previous set must not linger");
+        assert!(wm.is_grabbed("Mod4+b"));
     }
 
     #[test]
