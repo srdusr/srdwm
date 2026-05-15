@@ -142,6 +142,20 @@ pub fn centered_in(area: Rect, width: u32, height: u32) -> Rect {
     Rect::new(x.max(area.x), y.max(area.y), width, height)
 }
 
+/// Moves `rect` so it sits inside `area` where it can, shrinking it only if
+/// it is genuinely larger than `area`.
+///
+/// Position is corrected before size on purpose: a window that merely
+/// overhangs an edge should slide back on screen at the size it asked for,
+/// not be cut down to fit where it happened to land.
+pub fn clamp_into(rect: Rect, area: Rect) -> Rect {
+    let width = rect.width.min(area.width);
+    let height = rect.height.min(area.height);
+    let x = rect.x.clamp(area.x, (area.right() - width as i32).max(area.x));
+    let y = rect.y.clamp(area.y, (area.bottom() - height as i32).max(area.y));
+    Rect::new(x, y, width, height)
+}
+
 pub struct SmartPlacement;
 
 impl SmartPlacement {
@@ -166,10 +180,10 @@ impl SmartPlacement {
         if existing.is_empty() {
             return Self::cascade(monitor, size, cfg, cascade_step);
         }
-        Self::grid(monitor, existing, size, cfg).unwrap_or_else(|| Self::cascade(monitor, size, cfg, cascade_step))
+        Self::grid(monitor, existing, size, cfg, cascade_step).unwrap_or_else(|| Self::cascade(monitor, size, cfg, cascade_step))
     }
 
-    fn grid(monitor: &Monitor, existing: &[Rect], size: (u32, u32), cfg: &PlacementConfig) -> Option<Rect> {
+    fn grid(monitor: &Monitor, existing: &[Rect], size: (u32, u32), cfg: &PlacementConfig, cascade_step: u32) -> Option<Rect> {
         let count = existing.len() + 1;
         let grid_size = (count as f64).sqrt().ceil() as u32;
         let grid_size = grid_size.clamp(1, cfg.max_grid);
@@ -185,14 +199,33 @@ impl SmartPlacement {
             return None;
         }
 
-        for gy in 0..grid_size {
-            for gx in 0..grid_size {
-                let x = area.x + cfg.grid_margin as i32 + (gx * (cell_w + cfg.grid_margin)) as i32;
-                let y = area.y + cfg.grid_margin as i32 + (gy * (cell_h + cfg.grid_margin)) as i32;
-                let candidate = Rect::new(x, y, cell_w, cell_h);
-                if !existing.iter().any(|w| w.overlaps(&candidate)) {
-                    return Some(Rect::new(x, y, size.0.min(cell_w), size.1.min(cell_h)));
-                }
+        // Cells are visited starting from a different one each time rather
+        // than always from the top-left, so consecutive windows do not all
+        // pile into the same corner. Reported as windows spawning
+        // "predominantly left side": the scan returned the first free cell
+        // in reading order, which is the leftmost one that happens to be
+        // free, over and over.
+        let cells = grid_size * grid_size;
+        let start = cascade_step % cells.max(1);
+        for offset in 0..cells {
+            let cell = (start + offset) % cells;
+            let (gx, gy) = (cell % grid_size, cell / grid_size);
+            let x = area.x + cfg.grid_margin as i32 + (gx * (cell_w + cfg.grid_margin)) as i32;
+            let y = area.y + cfg.grid_margin as i32 + (gy * (cell_h + cfg.grid_margin)) as i32;
+            let candidate = Rect::new(x, y, cell_w, cell_h);
+            if !existing.iter().any(|w| w.overlaps(&candidate)) {
+                // The window keeps the size it actually asked for. Shrinking
+                // it to the cell is what made every window come out the same
+                // boxy shape regardless of what it wanted - reported as
+                // windows spawning "as squares". The cell decides *where* a
+                // window goes, not how big it is.
+                //
+                // Clamped into the usable area afterwards so a window bigger
+                // than its cell still lands fully on screen rather than
+                // hanging off the edge with its border out of view --
+                // reported in the same breath as spawning "a little bit out
+                // of view, ie i can't see a border".
+                return Some(clamp_into(Rect::new(x, y, size.0, size.1), area));
             }
         }
         None
@@ -228,9 +261,9 @@ impl SmartPlacement {
         let max_steps = max_steps_x.min(max_steps_y).max(1);
 
         let step = (cascade_step as i32) % max_steps;
-        let x = (area.x + cfg.cascade_offset + step * cfg.cascade_offset).min(area.right() - width as i32).max(area.x);
-        let y = (area.y + cfg.cascade_offset + step * cfg.cascade_offset).min(area.bottom() - height as i32).max(area.y);
-        Rect::new(x, y, width, height)
+        let x = area.x + cfg.cascade_offset + step * cfg.cascade_offset;
+        let y = area.y + cfg.cascade_offset + step * cfg.cascade_offset;
+        clamp_into(Rect::new(x, y, width, height), area)
     }
 
     /// Given a window being dragged (its live geometry) and the monitor it's
@@ -369,6 +402,52 @@ mod tests {
         let cfg = PlacementConfig::default();
         let dragged = Rect::new(700, 400, 400, 300);
         assert!(SmartPlacement::snap_zone(dragged, &monitor(), &cfg).is_none());
+    }
+
+    #[test]
+    fn grid_placement_keeps_the_size_the_window_asked_for() {
+        // The reported "windows spawn as squares": every window used to be
+        // shrunk to its grid cell, so they all came out the same shape no
+        // matter what size they wanted.
+        let cfg = PlacementConfig::default();
+        let existing = [Rect::new(0, 0, 100, 100)];
+        let r = SmartPlacement::place(&monitor(), &existing, (1200, 400), &cfg, 0);
+        assert_eq!((r.width, r.height), (1200, 400), "the requested size must survive placement");
+    }
+
+    #[test]
+    fn a_window_never_lands_partly_off_screen() {
+        // "sometimes a little bit out of view, ie i can't see a border".
+        let cfg = PlacementConfig::default();
+        let area = monitor().geometry;
+        for step in 0..40u32 {
+            for size in [(400, 300), (1600, 900), (1900, 1000)] {
+                let r = SmartPlacement::place(&monitor(), &[Rect::new(0, 0, 50, 50)], size, &cfg, step);
+                assert!(
+                    r.x >= area.x && r.y >= area.y && r.right() <= area.right() && r.bottom() <= area.bottom(),
+                    "step {step} size {size:?} landed at {r:?}, outside {area:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn consecutive_windows_do_not_all_pile_into_the_same_corner() {
+        // "windows predominately spawn left side": the grid scan always
+        // returned the first free cell in reading order.
+        let cfg = PlacementConfig::default();
+        let existing = [Rect::new(900, 500, 80, 80)];
+        let xs: Vec<i32> = (0..4).map(|step| SmartPlacement::place(&monitor(), &existing, (300, 200), &cfg, step).x).collect();
+        assert!(xs.iter().any(|&x| x != xs[0]), "every placement started at the same x: {xs:?}");
+    }
+
+    #[test]
+    fn a_window_larger_than_the_whole_screen_is_cut_down_to_it() {
+        let cfg = PlacementConfig::default();
+        let r = SmartPlacement::place(&monitor(), &[Rect::new(0, 0, 50, 50)], (4000, 3000), &cfg, 0);
+        let area = monitor().geometry;
+        assert_eq!((r.width, r.height), (area.width, area.height));
+        assert_eq!((r.x, r.y), (area.x, area.y));
     }
 
     #[test]

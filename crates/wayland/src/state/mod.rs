@@ -589,6 +589,12 @@ pub(crate) struct CompState {
     /// one drag is in progress at a time. See
     /// `elements::snap_preview_elements`.
     pub(crate) snap_preview_buffers: Vec<SolidColorBuffer>,
+    /// Persistent solid-colour buffers for the border strips drawn into the
+    /// winit backend's screencopy pass - same stable-`Id` reasoning as
+    /// `border_side_buffers`. One shared pool rather than one per window:
+    /// a capture pass runs to completion in a single frame, so nothing
+    /// needs to persist per window between windows.
+    pub(crate) capture_border_buffers: Vec<SolidColorBuffer>,
     /// Persistent solid-colour buffer backing the whole-output night-light/
     /// reading-mode overlay, one per output name - same "reuse the buffer
     /// so its `Id` stays stable across frames" reasoning as `border_side_

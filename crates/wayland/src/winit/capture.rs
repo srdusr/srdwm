@@ -96,6 +96,7 @@ impl WaylandPlatform {
         // as both on-screen render loops do it.
         let monitor_bounds: Vec<srdwm_core::Rect> = self.wm.borrow().monitors().iter().map(|m| m.full_geometry).collect();
         let mut occluders: Vec<srdwm_core::Rect> = Vec::new();
+        let focused = self.wm.borrow().focused_id();
         for id in self.wm.borrow().visible_windows_front_to_back().map(|w| w.id).collect::<Vec<_>>() {
             let Some(w) = self.wm.borrow().window(id).cloned() else { continue };
             if let Some(deco) = self.state.decorations.get(&id) {
@@ -155,6 +156,32 @@ impl WaylandPlatform {
                     match MemoryRenderBufferRenderElement::from_buffer(renderer, (fragment.x as f64, fragment.y as f64), shadow, None, Some(src), None, Kind::Unspecified) {
                         Ok(elem) => custom_elements.push(crate::elements::OverlayElement::Memory(elem)),
                         Err(e) => log::warn!("screencopy: failed to import shadow buffer for window {id}: {e}"),
+                    }
+                }
+            }
+            // Border strips, as plain solid fills.
+            //
+            // The on-screen loop draws the top and bottom strips from
+            // cached bitmaps so their corners round into the titlebar's
+            // curve, and only the sides as fills. This pass approximates
+            // all four with fills: corner rounding is not reproduced, so a
+            // capture is not pixel-exact at the four corners. Everything
+            // that matters for checking a border - whether one is drawn at
+            // all, where, how thick, and in what colour - is faithful.
+            //
+            // Without this a screenshot could not answer "is there a border
+            // here", which is exactly the question a border bug asks. That
+            // gap was documented and then walked into twice: a maximize
+            // border fix was checked against a capture that never draws
+            // borders, and the control silently passed for the wrong
+            // reason both times.
+            if w.border_width > 0 && !w.maximized {
+                let color = crate::state::effective_border_color(w.border_color, focused == Some(id), self.wm.borrow().theme.border_inactive_dim);
+                let frame = self.state.effective_frame(id, w.geometry);
+                for (index, strip) in crate::decoration::border_strips(frame, w.border_width).into_iter().enumerate() {
+                    for fragment in crate::elements::visible_border_fragments(strip, &occluders) {
+                        let buf = crate::elements::border_fragment_buffer(&mut self.state.capture_border_buffers, index);
+                        custom_elements.push(crate::elements::OverlayElement::Solid(crate::elements::border_side_render_element(buf, fragment, color, (0, 0))));
                     }
                 }
             }

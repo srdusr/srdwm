@@ -668,7 +668,14 @@ impl CompState {
                     // instead, since `custom_elements` composites earlier-
                     // pushed entries over later ones - exactly backwards
                     // from what this overlap needs.
-                    if w.border_width > 0 {
+                    // No border on a maximized window - see the matching
+                    // gate on the GPU path above. This is the Pixman path,
+                    // the one a real DRM session actually runs: the earlier
+                    // fix landed only on the GPU branch, so the border kept
+                    // being drawn on real hardware and was reported again as
+                    // "i still see the border or at least the top border
+                    // when maximized".
+                    if w.border_width > 0 && !w.maximized {
                         let strips = decoration::border_strips(frame, w.border_width);
                         // Strip 0 (top) rounded on its own two corners - see
                         // `render_border_top`'s own doc comment - so it's a
@@ -773,7 +780,7 @@ impl CompState {
                     // (unlike the bottom strip) *do* need cropping against
                     // this same top/bottom-strip overlap, a real bug this
                     // comment used to claim didn't exist here at all.
-                    if w.border_width > 0 {
+                    if w.border_width > 0 && !w.maximized {
                         let color = crate::state::effective_border_color(w.border_color, focused == Some(id), self.wm.borrow().theme.border_inactive_dim);
                         let strips = decoration::border_strips(frame, w.border_width);
                         // Strip 1 (bottom), the top strip's own mirror --

@@ -268,6 +268,7 @@ impl UdevPlatform {
             rounded_content_buffers: HashMap::new(),
             border_side_buffers: HashMap::new(),
             snap_preview_buffers: Vec::new(),
+            capture_border_buffers: Vec::new(),
             color_filter_buffers: HashMap::new(),
             last_synced_size: HashMap::new(),
             provisional_size: HashSet::new(),

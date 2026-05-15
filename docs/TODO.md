@@ -1,5 +1,63 @@
 # TODO / planned features - master checklist
 
+## Five reports after the second restart: a fix that landed on the wrong branch, and a config that fought itself (2026-08-28)
+
+**The maximize border was still there because the fix landed on the wrong
+code path.** `udev/render.rs` has three border blocks, not one: the GPU
+(`SRDWM_GPU=1`) path at the top, and two Pixman ones below it. The earlier
+patch replaced the first match in the file, which is the GPU branch - the
+one a real DRM session never runs. Both Pixman blocks are now gated too, and
+so is the winit one. Four sites, checked by grep rather than assumed.
+
+The verification failed twice before this for a separate reason worth
+recording: `winit/capture.rs` did not draw border strips at all, a gap this
+file had already documented, so a screenshot could never answer "is there a
+border here" - and the control silently passed for the wrong reason both
+times. Border strips are now drawn into that pass as solid fills (corner
+rounding is not reproduced, so a capture is not pixel-exact at the four
+corners; presence, position, thickness and colour are). With that closed the
+test finally has a real control:
+
+    unmaximized  6 accent pixels at x=800..805, exactly border_width = 6
+    maximized    0 accent pixels at the right edge, 0 along the top row
+
+That proves the winit path. The user runs the Pixman path, which is the same
+change at two more sites and is not separately confirmed on screen.
+
+**Windows spawning as squares, off-screen, and always on the left - all
+three were `SmartPlacement::grid`.** It returned `size.min(cell)`, shrinking
+every window to its grid cell, so windows came out the same boxy shape
+whatever size they asked for. It scanned cells in reading order and returned
+the first free one, which is the leftmost. And nothing clamped the result, so
+a window bigger than its cell could hang off the edge with its border out of
+view. The cell now decides only *where* a window goes; the window keeps its
+requested size, the scan starts from a rotating cell so consecutive windows
+do not pile into one corner, and both grid and cascade clamp into the usable
+area. Four tests, one per reported symptom.
+
+**"Setting to right side decorations doesn't survive reboot" - it never
+survived the config load.** `init.lua:86` sets
+`theme.decorations.title_bar.button_side = "right"`, and `init.lua:141` then
+`srd.load("themes")`, whose active Catppuccin preset set `button_side =
+"left"`. Later write wins, so the explicit setting was silently overridden
+every start. Fixed in the user's own config by dropping that key from the
+preset, with a comment saying why, so the explicit choice in `init.lua`
+stands. Backup at `~/.config/srd/themes.lua.bak-20260828-195412`. Verified by
+loading their real config in a nested instance with `srd.load("startup")`
+stripped: `button_side` now reports `right`.
+
+**"Some windows are still using traffic lights" - those are not srdwm's
+buttons.** `rules.lua` sets `decorated = false` for firefox and nemo, and
+`likely_draws_own_titlebar` matches `org.gnome.*`/`org.pwmt.*`, so srdwm
+draws no titlebar for any of them - deliberately, since that is the
+double-titlebar fix. What shows is each app's own GTK header, and on the
+WhiteSur-Dark theme those buttons are macOS-style dots. `button_style` only
+controls srdwm's own titlebar and cannot restyle another toolkit's. Changing
+them means changing the GTK theme, or removing `decorated = false` for that
+app and accepting srdwm's titlebar stacked on the app's own.
+
+525 tests pass, clippy clean.
+
 ## Spawn placement, per-window minimum sizes, and how maximize looks (2026-08-28)
 
 Four reports after the owner restarted into the day's build, with a
