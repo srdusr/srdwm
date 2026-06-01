@@ -971,3 +971,77 @@ is not intercepted until the next startup.
 Combos are reported in canonical order (`Ctrl+Mod4+l`), which is what the
 compositor matches a real keypress against - not necessarily how the combo
 was written in the config.
+
+## Making client-side decorated apps match srdwm's titlebar
+
+A window's chrome is drawn by one of two parties, and which one is decided
+by the `xdg-decoration` protocol. Three behaviours were measured directly
+against a nested srdwm, not assumed:
+
+| toolkit | creates a decoration object | asks for |
+|---|---|---|
+| Qt / KDE (Dolphin) | yes | server-side |
+| winit (Alacritty) | yes | **client-side** |
+| GTK 3 / GTK 4 (Nemo) | **no, never** | - |
+
+That table is the whole problem. The protocol says "the compositor can
+decide not to use the client's mode and enforce a different mode instead",
+and "the specified mode must be obeyed by the client" - so the first two
+rows are srdwm's to control. But it also says "if compositor and client do
+not negotiate the use of a server-side decoration ... clients continue to
+self-decorate as they see fit", and GTK never negotiates at all. No
+compositor setting can reach a GTK window's buttons, because GTK is not
+having the conversation.
+
+### For toolkits that negotiate: force server-side
+
+```lua
+srd.set("theme.decorations.force_server_side", true)
+```
+
+Off by default. It makes every negotiating client take srdwm's titlebar,
+including one that asked for client-side. Verified: with it off, Alacritty
+draws its own content straight to the window's top edge; with it on, the
+same window gets srdwm's titlebar band.
+
+The reason it is not the default is that it cannot help the case it looks
+like it should, and can hurt: a client that draws its own chrome regardless
+of what it negotiated (Firefox, historically) ends up with srdwm's titlebar
+stacked on top of its own. Use `rules.lua`'s `decorated = false` for those.
+
+### For GTK: set the desktop's button layout
+
+GTK reads its button layout from the desktop, not from the compositor. GTK 4
+on Wayland reads it from `xdg-desktop-portal`
+(`org.freedesktop.portal.Settings`, key `org.gnome.desktop.wm.preferences`
+`button-layout`); GTK 3 reads the `gtk-decoration-layout` GtkSettings
+property. Both resolve to the same string on a normal setup.
+
+```sh
+gsettings set org.gnome.desktop.wm.preferences button-layout ':minimize,maximize,close'
+```
+
+The colon separates the left corner from the right, so a leading colon puts
+every button on the right. Match it to srdwm's own `button_side`:
+
+| srdwm `button_side` | button-layout |
+|---|---|
+| `"right"` (default) | `:minimize,maximize,close` |
+| `"left"` | `close,minimize,maximize:` |
+
+This is exactly how KDE does it - `kde-gtk-config` exists to write GTK's
+setting to match KWin's own decoration. The value persists in dconf, so it
+survives a reboot without any startup script.
+
+Verified with a screenshot A/B on one Nemo window, changing only this
+setting: buttons moved from x=25/49/73 (left) to x=817/841/865 (right),
+landing in the same place and the same order as srdwm's own titlebar buttons
+directly above them.
+
+### What still cannot match
+
+The button *style*. srdwm's `button_style` draws srdwm's own titlebar; a
+GTK app draws its buttons with its GTK theme. Position and order can be made
+identical, as above; whether they are flat glyphs or coloured dots is the
+GTK theme's decision. On WhiteSur-Dark they are macOS-style dots by design.
+Changing that means changing the GTK theme.

@@ -1,5 +1,63 @@
 # TODO / planned features - master checklist
 
+## Deep dive: can every window use the same decorations, client- or server-side (2026-08-28)
+
+Asked after being told "srdwm can only control its own titlebar" - correctly
+pushed back on, because that answer was too quick. It is half wrong, and the
+half that is right is right for a different reason than given.
+
+**Measured first, against a nested srdwm, one client at a time:**
+
+    Qt/KDE (Dolphin)     creates a decoration object, asks for server-side
+    winit (Alacritty)    creates a decoration object, asks for CLIENT-side
+    GTK3/4 (Nemo)        never creates a decoration object at all
+
+**The spec, read rather than remembered** (`xdg-decoration-unstable-v1`):
+"The compositor can decide not to use the client's mode and enforce a
+different mode instead", and "the specified mode must be obeyed by the
+client". So rows one and two are entirely srdwm's to decide - it had simply
+been choosing to defer. The same spec closes the door on row three: "if
+compositor and client do not negotiate the use of a server-side decoration
+... clients continue to self-decorate as they see fit". GTK is not having
+the conversation, so no compositor setting can reach its buttons.
+
+**What the other desktops actually do.** KWin defaults to server-side on
+Wayland and offers a per-window rule ("No titlebar and frame", Force/No) to
+push CSD clients back to server-side - the same override this protocol text
+allows. For GTK it does not use the protocol at all: `kde-gtk-config` exists
+purely to write GTK's own setting so GTK draws its buttons where KWin would
+have. GNOME goes the other way: GTK reads the layout from the desktop, and
+on Wayland GTK4 takes it from `xdg-desktop-portal`'s
+`org.freedesktop.portal.Settings`, key `org.gnome.desktop.wm.preferences`
+`button-layout`.
+
+**Both halves built and verified.**
+
+1. `theme.decorations.force_server_side` (default off). With it off,
+   Alacritty draws its own content straight to the window's top edge; with
+   it on, the same window gets srdwm's titlebar - sampled at three rows,
+   `(0,0,0)` content versus `(46,52,64)` titlebar. Off by default because it
+   cannot move a GTK button and *can* stack srdwm's titlebar on a client
+   that draws its own regardless, which is the Firefox case this project
+   already hit.
+
+2. The GTK half needs no srdwm code, only the right desktop setting. The
+   portal on this machine was serving `close,minimize,maximize:` - buttons
+   on the left - while srdwm's own `button_side` was `right`. That single
+   contradiction is the whole "some windows are still using traffic lights
+   on the wrong side" report. Setting
+   `org.gnome.desktop.wm.preferences button-layout` to
+   `:minimize,maximize,close` moved Nemo's own buttons from x=25/49/73 to
+   x=817/841/865 - the same position and order as srdwm's own buttons
+   directly above them, screenshotted before and after with nothing else
+   changed.
+
+**What genuinely cannot match:** button *style*. Position and order can be
+made identical; whether the buttons are flat glyphs or coloured dots is the
+GTK theme's decision, and on WhiteSur-Dark they are macOS dots by design.
+
+275 core tests, 525 total, clippy clean.
+
 ## Five reports after the second restart: a fix that landed on the wrong branch, and a config that fought itself (2026-08-28)
 
 **The maximize border was still there because the fix landed on the wrong

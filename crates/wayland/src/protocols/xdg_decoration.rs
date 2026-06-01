@@ -37,7 +37,12 @@ impl XdgDecorationHandler for CompState {
     /// the way for exactly those clients, while everything that accepts
     /// (or has no preference and gets offered) server-side still gets our
     /// titlebar as before.
+    /// `theme.decorations.force_server_side` overrides the client's request
+    /// - see `ThemeConfig::force_server_side` for why that is allowed and
+    /// why it is off by default.
     fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
+        let forced = self.wm.borrow().theme.force_server_side;
+        let mode = if forced { DecorationMode::ServerSide } else { mode };
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(mode);
         });

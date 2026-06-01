@@ -321,6 +321,7 @@ fn apply_general_settings(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
     // "dynamic" (default: only the buttons the window can actually use) or
     // "fixed" (always the full set) - see `ThemeConfig::dynamic_buttons`.
     theme.dynamic_buttons = engine.get_string("theme.decorations.title_bar.button_mode", "dynamic") != "fixed";
+    theme.force_server_side = engine.get_bool("theme.decorations.force_server_side", false);
     let border_width = engine.get_f64("theme.decorations.border.width", 2.0).max(0.0) as u32;
     theme.default_border_width = border_width;
     // 12, not the original 6: matches real macOS's own ~0.36 radius-to-

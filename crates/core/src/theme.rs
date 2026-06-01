@@ -175,6 +175,28 @@ pub struct ThemeConfig {
     /// Asked for as titlebars able to use "decorations/buttons of the
     /// program/dynamic".
     pub dynamic_buttons: bool,
+    /// Enforce server-side decoration on every client that negotiates it,
+    /// instead of honouring what the client asked for.
+    ///
+    /// `xdg-decoration` explicitly allows this: "The compositor can decide
+    /// not to use the client's mode and enforce a different mode instead",
+    /// and "the specified mode must be obeyed by the client". So a toolkit
+    /// that asks for client-side - winit does, measured - can be given
+    /// srdwm's titlebar anyway, which is what makes every negotiating
+    /// window look the same.
+    ///
+    /// Off by default, because it cannot help the case it looks like it
+    /// should. A client that never creates a decoration object at all is
+    /// outside the protocol: "if compositor and client do not negotiate
+    /// the use of a server-side decoration ... clients continue to
+    /// self-decorate as they see fit". GTK is exactly that client - it
+    /// creates no decoration object, measured directly - so forcing this
+    /// on cannot move a single GTK button, while it *can* stack srdwm's
+    /// titlebar on top of a client that draws its own regardless (the
+    /// Firefox case this project already hit once). Turn it on to make
+    /// negotiating toolkits uniform; use `rules.lua`'s `decorated = false`
+    /// for the ones that draw their own anyway.
+    pub force_server_side: bool,
 }
 
 impl Default for ThemeConfig {
@@ -194,6 +216,7 @@ impl Default for ThemeConfig {
             button_glyph_always: false,
             traffic_light_buttons: true,
             dynamic_buttons: true,
+            force_server_side: false,
         }
     }
 }
