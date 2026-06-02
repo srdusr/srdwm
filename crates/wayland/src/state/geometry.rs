@@ -556,6 +556,12 @@ impl CompState {
         let width = ((content.size.w as f64 * scale).round() as u32).max(srdwm_core::placement::MIN_WINDOW_WIDTH);
         let height = ((content.size.h as f64 * scale).round() as u32).max(srdwm_core::placement::MIN_WINDOW_HEIGHT) + band;
         let Some(w) = wm.window_mut(id) else { return };
+        // The client has now made a real choice, so this size is no longer
+        // a guess. Clearing the core flag is what lets `remove_window`
+        // remember it: that path deliberately refuses to remember a size
+        // that was never chosen, and without this every window would look
+        // provisional forever and nothing would ever be remembered again.
+        w.size_is_provisional = false;
         w.geometry.width = width;
         w.geometry.height = height;
         if let Some(monitor) = monitor_geometry {

@@ -1,5 +1,67 @@
 # TODO / planned features - master checklist
 
+## The real cause of "windows spawn as squares": window memory was poisoning itself (2026-08-28)
+
+Reported again after a restart that already had the placement fixes live, so
+those were not it. Measured on the live session rather than guessed:
+`firefox` was `800x632`, and so were four other apps - and `800x632` is
+exactly `new_managed_window`'s placeholder guess (`800 x 600 +
+TITLEBAR_HEIGHT`). Firefox's remembered size earlier the same day had been
+`1389x933`.
+
+**The loop, which hides itself:**
+
+1. a window closes while its size is still the placeholder, and the
+   placeholder is written to window memory
+2. the next launch finds a remembered size, so the window is no longer
+   "provisional"
+3. being non-provisional, the client is *forced* to that size instead of
+   being asked to choose (`state.size = None` is only sent for a
+   provisional window)
+4. on close the same placeholder is written back
+
+Every app that ever closed early ends up pinned to one identical box, which
+is the "squares", and no amount of placement work touches it because the
+size never came from placement.
+
+Fixed at the root: `remove_window` refuses to remember a size the client
+never chose. That needed a second change to be correct - the backend's
+`adopt_provisional_size` cleared its own tracking set but never cleared
+`Window::size_is_provisional`, so with only the first change *nothing* would
+ever have been remembered again. Two tests pin both halves: a guess is not
+remembered, a real choice is.
+
+Five poisoned entries were dropped from the live store (firefox,
+google-chrome, niri, wlroots, xdg-desktop-portal-gtk); the six real ones
+were kept. Backup at
+`~/.local/state/srd/window-memory.json.bak-20260828-211945`.
+
+## Decoration side now governs every application, not just srdwm's titlebars
+
+Asked for directly: "when user sets decorations should override all
+applications". The previous answer - that GTK cannot be reached because it
+never negotiates - was true about the *protocol* and wrong about the
+outcome, because the protocol is not the only channel.
+
+srdwm now publishes its own `button_side` as the desktop's button-layout
+preference at startup and after every reload, which is the channel GTK
+actually reads (GTK4 via `xdg-desktop-portal`, GTK3 via
+`gtk-decoration-layout`). Verified both directions from a deliberately
+neutral starting value, so neither result could pass by luck:
+
+    button_side = "left"   ->  close,minimize,maximize:
+    button_side = "right"  ->  :minimize,maximize,close
+
+Best-effort by design: it shells out to `gsettings` and logs at debug if
+that is unavailable. This is the same job `kde-gtk-config` does for KWin.
+
+An ordering bug was caught by testing the second direction rather than
+stopping at the first: the publish originally ran before
+`apply_general_settings`, so it broadcast the built-in default instead of
+the user's configured side. The `left` case is what exposed it.
+
+277 core tests, 527 total, clippy clean.
+
 ## Deep dive: can every window use the same decorations, client- or server-side (2026-08-28)
 
 Asked after being told "srdwm can only control its own titlebar" - correctly

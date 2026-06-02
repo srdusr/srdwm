@@ -369,8 +369,25 @@ impl WindowManager {
         // simply never consulted again on the read side once `layout_name
         // == "tiling"`, so remembering it anyway is harmless, not wasted
         // work worth a special case.
+        //
+        // `size_is_provisional` still set means the client never actually
+        // chose a size: the window closed while still carrying the
+        // backend's placeholder guess. Remembering that guess poisons this
+        // table permanently, and does so in a way that hides itself:
+        //
+        //   1. a window closes early, the placeholder is remembered
+        //   2. next launch finds a remembered size, so it is NOT provisional
+        //   3. the client is therefore forced to the placeholder instead of
+        //      being asked to pick, and looks identical to every other
+        //      poisoned app
+        //   4. on close the same placeholder is written back
+        //
+        // Reported as windows "spawning in squares" - every app coming out
+        // the same shape whatever it is. Five of eleven entries in the live
+        // store had been captured this way, including Firefox, whose real
+        // remembered size earlier the same day had been 1389x933.
         if let Some(w) = &window {
-            if !w.app_id.is_empty() {
+            if !w.app_id.is_empty() && !w.size_is_provisional {
                 self.remembered_geometry.insert(w.app_id.clone(), (w.geometry.x, w.geometry.y, w.geometry.width, w.geometry.height));
             }
         }

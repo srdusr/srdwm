@@ -915,6 +915,39 @@
     }
 
     #[test]
+    fn a_size_the_client_never_chose_is_not_remembered() {
+        // The poisoning loop: remember a placeholder once and every future
+        // launch is forced to it, which looks like "every window spawns the
+        // same shape".
+        let mut wm = wm_with_monitor();
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "w");
+        w.app_id = "someapp".into();
+        wm.add_window(w);
+        assert!(wm.window(id).unwrap().size_is_provisional, "no remembered size, so the guess is provisional");
+        wm.remove_window(id);
+        assert!(wm.remembered_geometry_for("someapp").is_none(), "a guess must never be remembered");
+    }
+
+    #[test]
+    fn a_size_the_client_did_choose_is_remembered() {
+        let mut wm = wm_with_monitor();
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "w");
+        w.app_id = "someapp".into();
+        wm.add_window(w);
+        // What the backend does once the client commits a real buffer.
+        if let Some(w) = wm.window_mut(id) {
+            w.size_is_provisional = false;
+            w.geometry.width = 1389;
+            w.geometry.height = 933;
+        }
+        wm.remove_window(id);
+        let remembered = wm.remembered_geometry_for("someapp").expect("a real choice must be remembered");
+        assert_eq!((remembered.2, remembered.3), (1389, 933));
+    }
+
+    #[test]
     fn a_dialog_opens_centered_not_cascaded_into_the_corner() {
         let mut wm = wm_with_monitor();
         let a = wm.alloc_window_id();

@@ -1009,7 +1009,21 @@ like it should, and can hurt: a client that draws its own chrome regardless
 of what it negotiated (Firefox, historically) ends up with srdwm's titlebar
 stacked on top of its own. Use `rules.lua`'s `decorated = false` for those.
 
-### For GTK: set the desktop's button layout
+### For GTK: srdwm publishes the layout for you
+
+srdwm writes the desktop's button-layout preference to match its own
+`button_side` at startup and after every config reload, so setting the side
+once governs GTK's self-drawn buttons too. Verified both directions from a
+neutral starting value:
+
+    button_side = "left"   ->  close,minimize,maximize:
+    button_side = "right"  ->  :minimize,maximize,close
+
+This is best-effort: it shells out to `gsettings`, and a machine without it
+simply keeps whatever layout it had. srdwm's own titlebars are correct
+either way; this only brings the self-decorating clients into line.
+
+### Setting the layout by hand
 
 GTK reads its button layout from the desktop, not from the compositor. GTK 4
 on Wayland reads it from `xdg-desktop-portal`

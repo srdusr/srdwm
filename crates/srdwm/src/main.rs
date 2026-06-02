@@ -104,6 +104,40 @@ const RELOAD_COMBO_LITERAL: &str = "Mod4+Ctrl+r";
 /// `general.config_reload_on_write` is on. See `config_mtime`.
 const CONFIG_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Publishes srdwm's own titlebar button placement to the toolkits that
+/// draw their own decorations, so one setting governs every window.
+///
+/// GTK never negotiates decoration with the compositor - it creates no
+/// `xdg_toplevel_decoration` object at all, measured directly - so the
+/// protocol cannot reach its buttons. What GTK *does* read is the desktop's
+/// own button-layout preference: GTK4 through `xdg-desktop-portal`
+/// (`org.freedesktop.portal.Settings`, key
+/// `org.gnome.desktop.wm.preferences` `button-layout`), GTK3 through the
+/// `gtk-decoration-layout` setting. Both resolve from the same GSettings
+/// key on an ordinary system.
+///
+/// So this writes that key to match `button_side`. It is exactly what KDE
+/// does - `kde-gtk-config` exists for no other reason than to keep GTK's
+/// own setting in step with KWin's decoration - and it is what makes
+/// "set the decoration side once and every application follows" true rather
+/// than only true of srdwm's own titlebars.
+///
+/// Best-effort by design: `gsettings` missing, or no dconf to write to, is
+/// not an error worth interrupting startup for. The compositor's own
+/// titlebars are already correct either way; this only brings the
+/// self-decorating clients into line.
+fn publish_gtk_button_layout(wm: &Rc<RefCell<WindowManager>>) {
+    let layout = if wm.borrow().theme.buttons_left { "close,minimize,maximize:" } else { ":minimize,maximize,close" };
+    match std::process::Command::new("gsettings")
+        .args(["set", "org.gnome.desktop.wm.preferences", "button-layout", layout])
+        .status()
+    {
+        Ok(status) if status.success() => log::info!("published GTK button-layout {layout:?}"),
+        Ok(status) => log::debug!("gsettings exited {status} publishing button-layout; self-decorating clients keep their own"),
+        Err(e) => log::debug!("gsettings unavailable ({e}); self-decorating clients keep their own button layout"),
+    }
+}
+
 /// Copies the loaded config's key bindings into the `WindowManager`, where
 /// the IPC layer can serve them (`srd keybindings`).
 ///
@@ -720,6 +754,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     publish_keybindings(&engine, &wm);
     apply_workspace_count(&engine, &wm);
     apply_general_settings(&engine, &wm);
+    // After `apply_general_settings`, which is what copies the config's
+    // `button_side` into the theme - publishing before it would broadcast
+    // the built-in default rather than the user's choice.
+    publish_gtk_button_layout(&wm);
     apply_default_layout(&engine, &wm);
     let running = engine.running_flag();
     // `general.config_reload_on_write` - on by default. A programmable
@@ -829,6 +867,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     apply_general_settings(&engine, &wm);
                     publish_keybindings(&engine, &wm);
+                    publish_gtk_button_layout(&wm);
                     // After `apply_general_settings`, which rebuilds the
                     // theme from the config file - see
                     // `WindowManager::live_settings` for why a hand-made
@@ -852,6 +891,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             apply_general_settings(&engine, &wm);
             publish_keybindings(&engine, &wm);
+            publish_gtk_button_layout(&wm);
             srdwm_platform::replay_live_settings(&wm);
             // After the reload, so a handler edited in the config since
             // startup is the one that runs.
@@ -870,6 +910,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         apply_general_settings(&engine, &wm);
                         publish_keybindings(&engine, &wm);
+                        publish_gtk_button_layout(&wm);
                         srdwm_platform::replay_live_settings(&wm);
                     } else if !engine.dispatch_keybinding(&combo) {
                         log::debug!("no binding for '{combo}'");

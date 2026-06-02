@@ -387,6 +387,14 @@ impl WindowManager {
     /// Every remembered `app_id` and its geometry - what `window_memory.rs`
     /// iterates to persist the full table (e.g. on a clean shutdown), not
     /// just whatever changed most recently.
+    /// This app's remembered geometry, if any. `None` means nothing has
+    /// been recorded for it - which is what a window that closed while its
+    /// size was still a placeholder deliberately leaves behind, so its next
+    /// launch gets to pick its own size again.
+    pub fn remembered_geometry_for(&self, app_id: &str) -> Option<(i32, i32, u32, u32)> {
+        self.remembered_geometry.get(app_id).copied()
+    }
+
     pub fn all_remembered_geometry(&self) -> impl Iterator<Item = (&str, (i32, i32, u32, u32))> {
         self.remembered_geometry.iter().map(|(k, &v)| (k.as_str(), v))
     }
