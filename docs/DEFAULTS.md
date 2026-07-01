@@ -1052,10 +1052,35 @@ setting: buttons moved from x=25/49/73 (left) to x=817/841/865 (right),
 landing in the same place and the same order as srdwm's own titlebar buttons
 directly above them.
 
-### What still cannot match
+### Button style: a user CSS override
 
-The button *style*. srdwm's `button_style` draws srdwm's own titlebar; a
-GTK app draws its buttons with its GTK theme. Position and order can be made
-identical, as above; whether they are flat glyphs or coloured dots is the
-GTK theme's decision. On WhiteSur-Dark they are macOS-style dots by design.
-Changing that means changing the GTK theme.
+srdwm's `button_style` draws srdwm's own titlebar. A GTK app draws its own
+buttons from its GTK theme, and no compositor setting reaches those - but
+the theme is not the last word either. A user stylesheet at
+`~/.config/gtk-3.0/gtk.css` (and the GTK 4 equivalent) loads *after* the
+theme and can restyle the controls to match.
+
+One trap makes this harder than it looks. A theme may paint the control as
+the button's own `background-image` rather than as a child `image` widget.
+WhiteSur does, from its compiled `gtk.gresource`, so simply clearing the
+background leaves a button with nothing drawn in it at all - the coloured
+dots vanish and are replaced by blank space, not by glyphs. The icon has to
+be supplied explicitly:
+
+```css
+headerbar button.titlebutton.close {
+  background-image: -gtk-icontheme("window-close-symbolic");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 16px 16px;
+}
+```
+
+Keeping the alternatives as separate files and copying one over `gtk.css`
+makes switching a one-line operation, and is the same arrangement Firefox's
+own `chrome/` directory uses for `userChrome-traditional.css` versus
+`userChrome-traffic-lights.css`.
+
+Firefox is a separate surface again: it draws its window buttons itself and
+takes them from `userChrome.css`, which needs
+`toolkit.legacyUserProfileCustomizations.stylesheets` set to `true`.

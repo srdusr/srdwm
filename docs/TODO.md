@@ -1,5 +1,47 @@
 # TODO / planned features - master checklist
 
+## Firefox and Nemo's traffic lights: the compositor was never drawing them (2026-08-28)
+
+Reported as still using traffic lights after the button *side* was fixed.
+Traced to configuration the user already had, not to srdwm.
+
+**Nemo, and every other GTK app:** `~/.config/gtk-3.0/gtk.css` (and the GTK
+4 copy) contained a deliberate override, written on 2026-08-22, painting
+each titlebutton as a glossy macOS dot - `radial-gradient` fills in
+ff5f57/ffbd2e/28c840, with the glyph explicitly hidden by `opacity: 0`. Its
+own comment records why: at the time srdwm's own decoration drew traffic
+lights, and this was added so every window matched. srdwm's style has since
+been changed to `traditional`, and the stylesheet was still enforcing the
+old look.
+
+**Firefox:** already on the traditional variant - `userChrome.css` is
+byte-identical to `userChrome-traditional.css`, and
+`toolkit.legacyUserProfileCustomizations.stylesheets` is `true`. It needs a
+Firefox restart, nothing more.
+
+**What the fix needed that a first attempt got wrong.** Clearing the
+override's coloured backgrounds and un-hiding the child `image` produced
+*invisible* buttons, confirmed by screenshot: blank space where the dots had
+been. WhiteSur paints the control as the button's own `background-image`,
+from its compiled `gtk.gresource` rather than any editable CSS file, so
+there is no child image to reveal. The working version supplies the icon
+explicitly with `-gtk-icontheme("window-close-symbolic")` and friends.
+
+Verified by screenshot: Nemo's own header now draws a dash, a square and an
+X, monochrome, on the right, directly under srdwm's own titlebar drawing the
+same three in the same style.
+
+Left as a swappable pair, matching the convention the Firefox chrome
+directory already uses: `gtk-traditional.css` (now active as `gtk.css`) and
+`gtk-traffic-lights.css` (the previous look, preserved).
+
+**Deliberately not automated.** srdwm publishes the button *layout* itself,
+because that is a single well-defined desktop setting with an obvious
+mapping from `button_side`. It does not write GTK CSS: that file is the
+user's, it already contained hand-written work, and a compositor silently
+overwriting it would destroy customisation it cannot understand. The
+mechanism is documented in `DEFAULTS.md` instead.
+
 ## The real cause of "windows spawn as squares": window memory was poisoning itself (2026-08-28)
 
 Reported again after a restart that already had the placement fixes live, so
