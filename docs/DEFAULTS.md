@@ -1052,7 +1052,30 @@ setting: buttons moved from x=25/49/73 (left) to x=817/841/865 (right),
 landing in the same place and the same order as srdwm's own titlebar buttons
 directly above them.
 
-### Button style: a user CSS override
+### Button style: srdwm generates the CSS
+
+srdwm writes `~/.config/gtk-3.0/srdwm-buttons.css` (and the GTK 4 copy) from
+`theme.decorations.title_bar.button_style`, and rewrites it on every start
+and every config reload. It adds one line to your own `gtk.css`:
+
+```css
+@import url("srdwm-buttons.css");
+```
+
+That line is added once if missing and nothing else in the file is ever
+touched. The import sits first because CSS only allows `@import` before
+other rules - which also means your own rules come after it and win, so
+anything you write in `gtk.css` still overrides the generated style.
+
+Verified end to end on a real GTK app, both ways: with `button_style =
+"traffic_lights"` Nemo's own header draws coloured dots, and with
+`"traditional"` it draws a dash, a square and an X - in both cases matching
+srdwm's own titlebar directly above it.
+
+srdwm writes only its own file, and skips a GTK version whose config
+directory does not exist rather than creating one.
+
+### Doing it by hand instead
 
 srdwm's `button_style` draws srdwm's own titlebar. A GTK app draws its own
 buttons from its GTK theme, and no compositor setting reaches those - but

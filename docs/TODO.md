@@ -1,5 +1,38 @@
 # TODO / planned features - master checklist
 
+## srdwm now generates the GTK button stylesheet too (2026-08-28)
+
+The previous entry recorded a deliberate decision *not* to write GTK CSS,
+because the user's `gtk.css` holds hand-written work a compositor cannot
+safely rewrite. Asked to build it anyway, which is reasonable - the
+objection was to clobbering their file, not to the feature.
+
+The split solves both: srdwm owns `srdwm-buttons.css`, generated from
+`button_style` and rewritten on every start and reload, and adds exactly one
+`@import` line to `gtk.css` if it is missing. Nothing else in that file is
+ever touched. The import is first because CSS only permits `@import` ahead
+of other rules, which conveniently also leaves the user's own rules last and
+therefore winning.
+
+The generated CSS sets a background per button rather than un-hiding a child
+`image`, for the reason the previous attempt found the hard way: WhiteSur
+paints the control as the button's own `background-image` from a compiled
+gresource, so clearing the background leaves a blank button.
+
+Verified end to end on a real GTK app, both directions, through the
+generated file rather than a hand-written one: `traffic_lights` gives Nemo
+coloured dots, `traditional` gives it a dash, a square and an X, each time
+matching srdwm's own titlebar directly above. Also verified that the import
+is added once and not duplicated on a second run, that switching the style
+rewrites only the generated file, and that a home directory without GTK
+config directories has nothing written to it at all.
+
+Left in place: `gtk-traffic-lights.css`, the user's original hand-written
+override, kept as reference. `gtk.css` is now the import plus a comment
+saying what owns what.
+
+277 core tests, 527 total, clippy clean.
+
 ## Firefox and Nemo's traffic lights: the compositor was never drawing them (2026-08-28)
 
 Reported as still using traffic lights after the button *side* was fixed.
