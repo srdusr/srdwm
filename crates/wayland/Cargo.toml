@@ -52,6 +52,12 @@ xcursor = "0.3.11"
 # other "pinned to smithay's own version" dependency above - both need to
 # see one identical `Keysym` type, not two incompatible ones.
 xkbcommon = { version = "0.8", features = ["wayland"] }
+# Raster decoding for the lock screen's user avatar (`~/.face` and the
+# AccountsService icon are conventionally JPEG or PNG, not SVG, so `resvg`
+# below cannot read them). Default features off: this needs two codecs, not
+# the whole format zoo, on a compositor that has to build on a low-spec
+# machine.
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 resvg = "0.48.1"
 usvg = "0.48.1"
 tiny-skia = "0.12.0"
@@ -84,3 +90,7 @@ features = [
     "wayland_frontend",
     "xwayland",
 ]
+
+[dev-dependencies]
+# Avatar decoding tests write a real image to a throwaway directory.
+tempfile = "3"

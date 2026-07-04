@@ -1107,3 +1107,26 @@ own `chrome/` directory uses for `userChrome-traditional.css` versus
 Firefox is a separate surface again: it draws its window buttons itself and
 takes them from `userChrome.css`, which needs
 `toolkit.legacyUserProfileCustomizations.stylesheets` set to `true`.
+
+## Lock screen: avatar and on-screen keyboard
+
+**Avatar.** The lock screen shows the user's own picture, looked for in the
+conventional places, most specific first:
+
+1. `~/.face`
+2. `~/.face.icon`
+3. `/var/lib/AccountsService/icons/$USER` - where GNOME and KDE store the
+   picture set through their own settings UI
+
+These are conventionally JPEG or PNG. The image is scaled to *cover* the
+circle and centre-cropped, not letterboxed into it, and masked with a
+one-pixel-soft edge. With no avatar set, or a file that cannot be decoded,
+it falls back to the coloured circle with the user's initial
+(`theme.lock.avatar_bg`).
+
+**On-screen keyboard.** `theme.lock.show_keyboard` (default on) draws a
+QWERTY layout for a session with no reachable physical keyboard. Every
+printable ASCII character is typable, shifted or unshifted - letters,
+digits, and all of ``-_=+[]{}\|;:'",.<>/?~`` plus space. A test asserts
+the full range, because a lock screen that cannot type some character in
+the password is a lockout rather than an inconvenience.

@@ -685,6 +685,97 @@ fn local_time_now() -> (i32, i32, i32, i32, i32, i32) {
 /// `round_bottom_corners` cut a rect's *corners* to an arc; neither fills
 /// a standalone circle, so this is a small, self-contained addition
 /// rather than a reuse of either).
+/// The user's own avatar picture, decoded and scaled to fill a circle of
+/// `radius`, as straight BGRA. `None` when there is no avatar to show or it
+/// cannot be read.
+///
+/// Looked for in the conventional places, most specific first:
+/// `~/.face`, `~/.face.icon`, then AccountsService's own per-user icon,
+/// which is where GNOME and KDE store the picture set through their
+/// settings UI. These are conventionally JPEG or PNG rather than SVG, which
+/// is why this needs a raster decoder rather than the `resvg` path the
+/// desktop icons use.
+///
+/// Scaled to *cover* the circle rather than fit inside it: a portrait
+/// letterboxed into a round frame looks like a mistake, and every desktop
+/// that shows one crops instead. The shorter side is matched to the
+/// diameter and the longer one centre-cropped.
+fn load_avatar(radius: i32) -> Option<Vec<u8>> {
+    let home = std::env::var("HOME").ok()?;
+    let user = std::env::var("USER").unwrap_or_default();
+    decode_avatar(&avatar_path(&home, &user)?, radius)
+}
+
+/// The first avatar file that exists, most specific first. Split from
+/// `load_avatar` so the search order and the decoding can each be tested
+/// without touching process-wide environment variables.
+fn avatar_path(home: &str, user: &str) -> Option<std::path::PathBuf> {
+    [
+        std::path::PathBuf::from(home).join(".face"),
+        std::path::PathBuf::from(home).join(".face.icon"),
+        std::path::PathBuf::from("/var/lib/AccountsService/icons").join(user),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
+}
+
+fn decode_avatar(path: &std::path::Path, radius: i32) -> Option<Vec<u8>> {
+    let decoded = match image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode() {
+        Ok(image) => image,
+        Err(e) => {
+            log::debug!("lock: couldn't decode avatar {path:?} ({e}); falling back to the initial");
+            return None;
+        }
+    };
+    let diameter = (radius * 2).max(1) as u32;
+    // `resize_to_fill` is exactly the cover-and-centre-crop described above.
+    let scaled = decoded.resize_to_fill(diameter, diameter, image::imageops::FilterType::Lanczos3).to_rgba8();
+    let mut out = vec![0u8; (diameter * diameter * 4) as usize];
+    for (i, px) in scaled.pixels().enumerate() {
+        let [r, g, b, a] = px.0;
+        // Straight BGRA, the same convention `rgb_to_bgra` uses everywhere
+        // else in this codebase.
+        out[i * 4..i * 4 + 4].copy_from_slice(&[b, g, r, a]);
+    }
+    Some(out)
+}
+
+/// Blits `avatar` (a `2*radius` square, straight BGRA) into `buf` centred on
+/// `(cx, cy)`, masked to a circle with a one-pixel-soft edge so it does not
+/// read as a jagged cut-out.
+fn blit_avatar_circle(buf: &mut [u8], width: usize, height: usize, cx: i32, cy: i32, radius: i32, avatar: &[u8]) {
+    let diameter = radius * 2;
+    for row in 0..diameter {
+        for col in 0..diameter {
+            let (dx, dy) = (col - radius, row - radius);
+            let dist = ((dx * dx + dy * dy) as f32).sqrt();
+            // Feathered over the outermost pixel rather than a hard test, so
+            // the circle's edge is not visibly stepped.
+            let coverage = (radius as f32 - dist).clamp(0.0, 1.0);
+            if coverage <= 0.0 {
+                continue;
+            }
+            let (x, y) = (cx - radius + col, cy - radius + row);
+            if x < 0 || y < 0 || x as usize >= width || y as usize >= height {
+                continue;
+            }
+            let src = ((row * diameter + col) * 4) as usize;
+            let dst = (y as usize * width + x as usize) * 4;
+            let alpha = (avatar[src + 3] as f32 / 255.0) * coverage;
+            if alpha <= 0.0 {
+                continue;
+            }
+            for channel in 0..3 {
+                let s = avatar[src + channel] as f32;
+                let d = buf[dst + channel] as f32;
+                buf[dst + channel] = (s * alpha + d * (1.0 - alpha)).round().clamp(0.0, 255.0) as u8;
+            }
+            let existing = buf[dst + 3] as f32 / 255.0;
+            buf[dst + 3] = ((alpha + existing * (1.0 - alpha)) * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
 fn fill_circle_on_transparent(buf: &mut [u8], width: usize, height: usize, cx: i32, cy: i32, radius: i32, color: (u8, u8, u8)) {
     for y in (cy - radius - 1).max(0)..(cy + radius + 1).min(height as i32) {
         for x in (cx - radius - 1).max(0)..(cx + radius + 1).min(width as i32) {
@@ -753,13 +844,22 @@ fn render_header_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Ve
     draw_centered(&mut buf, WIDTH, HEIGHT, &font, &date_str, 84.0, DATE_SIZE, theme.text_color);
 
     let avatar_cy = 84.0 + 24.0 + AVATAR_RADIUS as f32;
-    fill_circle_on_transparent(&mut buf, WIDTH, HEIGHT, WIDTH as i32 / 2, avatar_cy as i32, AVATAR_RADIUS, theme.avatar_bg);
-    if let Some(font) = &font {
-        let initial = native.username.chars().next().unwrap_or('?').to_ascii_uppercase();
-        let (metrics, coverage) = font.rasterize(initial, AVATAR_RADIUS as f32);
-        let glyph_x = WIDTH as i32 / 2 - metrics.width as i32 / 2;
-        let glyph_y = avatar_cy as i32 - metrics.height as i32 / 2;
-        blit_glyph_on_transparent(&mut buf, WIDTH, HEIGHT, glyph_x, glyph_y, &metrics, &coverage, theme.text_color);
+    // The user's real picture when there is one, the coloured initial only
+    // as a fallback. `~/.face` is the long-standing convention and was
+    // simply never read: this drew the initial unconditionally, so a
+    // machine with an avatar set still showed a letter.
+    match load_avatar(AVATAR_RADIUS) {
+        Some(avatar) => blit_avatar_circle(&mut buf, WIDTH, HEIGHT, WIDTH as i32 / 2, avatar_cy as i32, AVATAR_RADIUS, &avatar),
+        None => {
+            fill_circle_on_transparent(&mut buf, WIDTH, HEIGHT, WIDTH as i32 / 2, avatar_cy as i32, AVATAR_RADIUS, theme.avatar_bg);
+            if let Some(font) = &font {
+                let initial = native.username.chars().next().unwrap_or('?').to_ascii_uppercase();
+                let (metrics, coverage) = font.rasterize(initial, AVATAR_RADIUS as f32);
+                let glyph_x = WIDTH as i32 / 2 - metrics.width as i32 / 2;
+                let glyph_y = avatar_cy as i32 - metrics.height as i32 / 2;
+                blit_glyph_on_transparent(&mut buf, WIDTH, HEIGHT, glyph_x, glyph_y, &metrics, &coverage, theme.text_color);
+            }
+        }
     }
 
     let username_y = avatar_cy + AVATAR_RADIUS as f32 + 24.0;
@@ -921,6 +1021,16 @@ const fn wide_key(lower: &'static str, upper: &'static str, name: &'static str, 
 /// A plain, real, usable QWERTY-shaped layout - not a full XKB layout
 /// translation (that needs real integration with this session's own
 /// keymap, a separate and much larger piece of work), but every letter,
+/// digit and every ASCII punctuation character a US layout can type.
+///
+/// The punctuation is not decoration. This keyboard exists for a session
+/// with no reachable physical keyboard, and it previously offered only the
+/// digits' own shifted symbols (`!` through `)`) - so a password
+/// containing any of `-_=+[]{}\\|;:'\",.<>/?~` could not be entered at all,
+/// and the only way out of the lock screen was a keyboard the user did not
+/// have. Every ASCII character now has a key, shifted or unshifted.
+///
+/// Original doc continues: every letter,
 /// digit, the digit row's own shifted symbols (covering the punctuation a
 /// real password most commonly needs), Backspace, Return, Shift, and
 /// Space. Scoped deliberately: a touchscreen session with no physical
@@ -939,6 +1049,8 @@ fn keyboard_rows() -> [Vec<KeySpec>; 5] {
             key("8", "*"),
             key("9", "("),
             key("0", ")"),
+            key("-", "_"),
+            key("=", "+"),
             wide_key("Back", "Back", "BackSpace", 1.6),
         ],
         vec![
@@ -952,6 +1064,9 @@ fn keyboard_rows() -> [Vec<KeySpec>; 5] {
             key("i", "I"),
             key("o", "O"),
             key("p", "P"),
+            key("[", "{"),
+            key("]", "}"),
+            key("\\", "|"),
         ],
         vec![
             key("a", "A"),
@@ -963,6 +1078,8 @@ fn keyboard_rows() -> [Vec<KeySpec>; 5] {
             key("j", "J"),
             key("k", "K"),
             key("l", "L"),
+            key(";", ":"),
+            key("'", "\""),
             wide_key("Enter", "Enter", "Return", 1.6),
         ],
         vec![
@@ -974,8 +1091,11 @@ fn keyboard_rows() -> [Vec<KeySpec>; 5] {
             key("b", "B"),
             key("n", "N"),
             key("m", "M"),
+            key(",", "<"),
+            key(".", ">"),
+            key("/", "?"),
         ],
-        vec![wide_key("Space", "Space", "space", 6.0)],
+        vec![key("`", "~"), wide_key("Space", "Space", "space", 6.0)],
     ]
 }
 
@@ -1082,6 +1202,81 @@ mod tests {
             let offset = shake_offset(Duration::from_millis(ms));
             assert!(offset.abs() <= SHAKE_AMPLITUDE + 0.001, "offset {offset} exceeded amplitude at {ms}ms");
         }
+    }
+
+    #[test]
+    fn an_avatar_is_decoded_and_scaled_to_the_circle() {
+        let dir = tempfile::tempdir().unwrap();
+        let face = dir.path().join(".face");
+        // A real encoded image on disk, not a stub - the point is that the
+        // decode path works, and `~/.face` is conventionally a photo.
+        // Saved with an explicit format: `.face` carries no extension for
+        // `save` to infer from, which is exactly why `decode_avatar` sniffs
+        // the content (`with_guessed_format`) rather than trusting the name.
+        image::RgbImage::from_fn(120, 90, |x, _| image::Rgb([x as u8, 0x40, 0x80]))
+            .save_with_format(&face, image::ImageFormat::Png)
+            .unwrap();
+
+        let radius = 28;
+        let pixels = decode_avatar(&face, radius).expect("a real image must decode");
+        let diameter = (radius * 2) as usize;
+        assert_eq!(pixels.len(), diameter * diameter * 4, "scaled to fill the circle's bounding square");
+    }
+
+    /// The real file on this machine, when there is one - a JPEG, which is
+    /// the format `~/.face` conventionally is and the reason a raster
+    /// decoder was needed at all. Skipped where no avatar is set.
+    #[test]
+    fn the_real_user_avatar_decodes_if_one_is_set() {
+        let Ok(home) = std::env::var("HOME") else { return };
+        let user = std::env::var("USER").unwrap_or_default();
+        let Some(path) = avatar_path(&home, &user) else { return };
+        let radius = 28;
+        let pixels = decode_avatar(&path, radius).unwrap_or_else(|| panic!("{path:?} exists but did not decode"));
+        assert_eq!(pixels.len(), ((radius * 2) * (radius * 2) * 4) as usize);
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_avatar_falls_back_rather_than_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(avatar_path(dir.path().to_str().unwrap(), "nobody-here").is_none(), "nothing to find");
+
+        let junk = dir.path().join(".face");
+        std::fs::write(&junk, b"this is not an image").unwrap();
+        assert_eq!(decode_avatar(&junk, 28), None, "a corrupt file must fall back, not panic");
+    }
+
+    #[test]
+    fn dot_face_is_preferred_over_the_other_locations() {
+        let dir = tempfile::tempdir().unwrap();
+        let face = dir.path().join(".face");
+        let icon = dir.path().join(".face.icon");
+        std::fs::write(&icon, b"x").unwrap();
+        std::fs::write(&face, b"x").unwrap();
+        assert_eq!(avatar_path(dir.path().to_str().unwrap(), "u"), Some(face));
+    }
+
+    /// A lock screen's on-screen keyboard is the only way in for a session
+    /// with no physical keyboard, so a password character it cannot type is
+    /// a lockout. Every printable ASCII character must be reachable.
+    #[test]
+    fn every_printable_ascii_character_can_be_typed() {
+        let mut typable: std::collections::HashSet<char> = std::collections::HashSet::new();
+        for row in keyboard_rows() {
+            for key in row {
+                for text in [key.lower, key.upper] {
+                    // Space is a named key; its label is a word, not the
+                    // character it produces.
+                    if key.name == "space" {
+                        typable.insert(' ');
+                    } else if key.name.is_empty() {
+                        typable.extend(text.chars());
+                    }
+                }
+            }
+        }
+        let missing: Vec<char> = (0x20u8..0x7f).map(char::from).filter(|c| !typable.contains(c)).collect();
+        assert!(missing.is_empty(), "these characters cannot be typed on the lock screen: {missing:?}");
     }
 
     #[test]

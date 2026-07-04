@@ -1,5 +1,49 @@
 # TODO / planned features - master checklist
 
+## Lock screen: the avatar was never read, and the keyboard could not type most passwords (2026-08-28)
+
+Two questions, both real gaps.
+
+**`~/.face` was never read.** The file exists on this machine (a 300x300
+JPEG, dated 2026-07-22) and nothing in the codebase ever opened it - a grep
+for `.face`/`AccountsService`/`avatar_path` returned nothing. The lock
+screen drew a coloured circle with the user's initial unconditionally, so a
+machine with an avatar set still showed a letter.
+
+Now looked for as `~/.face`, then `~/.face.icon`, then
+`/var/lib/AccountsService/icons/$USER`, which is where GNOME and KDE keep
+the picture their settings UI sets. Scaled to *cover* the circle and
+centre-cropped rather than letterboxed - a portrait fitted inside a round
+frame reads as a mistake, and every desktop that shows one crops. Masked
+with a one-pixel-soft edge so it is not a jagged cut-out. Falls back to the
+initial when there is no avatar or the file will not decode.
+
+This needed a raster decoder: `~/.face` is JPEG and the only image code here
+was `resvg`, which is SVG-only. Added `image` with default features off and
+just `jpeg` and `png` - two codecs, not the whole format zoo, on a
+compositor that has to build on a low-spec machine.
+
+**The on-screen keyboard could not type most passwords.** It had the
+letters, the digits, and the digits' own shifted symbols (`!` through `)`)
+- and nothing else. No `-`, `_`, `.`, `/`, `=`, `[`, `]`, `;`, `'`, `,`,
+`\`, or backtick. For the case this keyboard exists for - a session with no
+reachable physical keyboard - a password containing any of those meant no
+way in at all. That is a lockout, not an inconvenience.
+
+Every printable ASCII character now has a key, and a test asserts exactly
+that over the whole `0x20..0x7f` range rather than spot-checking a few.
+
+**Verification.** The avatar path is covered by four tests including one
+that decodes the real `~/.face` on this machine through the same function
+the lock screen calls. The lock screen itself could not be screenshotted:
+locking a nested instance hits the pre-existing EGL context-loss crash this
+file already records, confirmed again here (`BAD_SURFACE` on
+`eglSwapBuffers`, then `eglCreatePlatformWindowSurfaceEXT` failing). That is
+environmental and predates this change; the on-screen appearance needs the
+real session.
+
+277 core tests, 165 wayland, 529 total, clippy clean.
+
 ## srdwm now generates the GTK button stylesheet too (2026-08-28)
 
 The previous entry recorded a deliberate decision *not* to write GTK CSS,
