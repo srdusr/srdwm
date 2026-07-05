@@ -8,7 +8,12 @@ impl Engine {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |_, (key, value): (String, Value)| {
             if let Some(v) = ConfigValue::from_lua(&value) {
-                state.borrow_mut().values.insert(key, v);
+                let mut s = state.borrow_mut();
+                // Recorded so a reload can tell "the config states this"
+                // from "this is just the seeded default" - see
+                // `SharedState::config_set_keys`.
+                s.config_set_keys.insert(key.clone());
+                s.values.insert(key, v);
             }
             Ok(())
         })?)

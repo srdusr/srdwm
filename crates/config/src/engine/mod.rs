@@ -35,6 +35,17 @@ struct SharedState {
     /// `WindowManager` by `main.rs` and served over IPC as
     /// `srd keybindings`.
     key_descriptions: HashMap<String, String>,
+    /// Every key the *config* set via `srd.set`, as opposed to a seeded
+    /// default. Cleared and rebuilt on each load, so it always describes
+    /// the config currently in force.
+    ///
+    /// `values` alone cannot answer this: defaults are seeded into it
+    /// before any script runs, so every key looks set. The distinction
+    /// matters because a config file stating a value must be able to
+    /// override a live `srd set` when it is reloaded - otherwise a
+    /// setting changed at runtime can never be corrected from the config
+    /// again.
+    config_set_keys: std::collections::HashSet<String>,
     /// Combos registered with `srd.bind_repeat`, which fire repeatedly while
     /// held (Hyprland's `binde`). A subset of `key_bindings`.
     repeat_keys: std::collections::HashSet<String>,
@@ -77,6 +88,7 @@ impl Engine {
             values: default_config(),
             key_bindings: HashMap::new(),
             key_descriptions: HashMap::new(),
+            config_set_keys: std::collections::HashSet::new(),
             repeat_keys: std::collections::HashSet::new(),
             event_handlers: HashMap::new(),
             config_dir: config_dir.into(),
@@ -193,6 +205,11 @@ impl Engine {
             }
             None => false,
         }
+    }
+
+    /// Keys the loaded config explicitly set - see `config_set_keys`.
+    pub fn config_set_keys(&self) -> Vec<String> {
+        self.state.borrow().config_set_keys.iter().cloned().collect()
     }
 
     pub fn bound_keys(&self) -> Vec<String> {

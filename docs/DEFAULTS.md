@@ -868,7 +868,13 @@ checks the config directory's `.lua` modification times once a second and
 reloads when one changes. Set it to `false` for a config that does expensive
 work at load time. `Mod4+Ctrl+r` still reloads on demand in either case.
 
-**A hand-made change is not undone by a reload.** A reload rebuilds the
+**The config file wins for anything it states.** A reload drops any live
+`srd set` override for a key the config sets itself, because the file is the
+more deliberate statement and has to be able to correct a runtime change.
+Without that rule a value changed once at runtime can never be fixed by
+editing the config: every reload puts it straight back.
+
+**A hand-made change is not undone by a reload, where the config is silent.** A reload rebuilds the
 theme and general settings from the config file, which is right for a file
 edit but would also wipe every live `srd set` - and the titlebar
 right-click menu's "Customize" rows are all live `srd set`s. Every setting

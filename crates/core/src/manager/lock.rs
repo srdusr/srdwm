@@ -73,6 +73,15 @@ impl WindowManager {
         self.live_settings.insert(key.to_string(), value_json);
     }
 
+    /// Drops the recorded live override for `key`, so the next replay does
+    /// not reapply it. Used when a reloaded config states that key itself:
+    /// the file is then the more deliberate statement of intent, and has to
+    /// win, or a value changed at runtime could never be corrected by
+    /// editing the config again.
+    pub fn forget_live_setting(&mut self, key: &str) {
+        self.live_settings.remove(key);
+    }
+
     /// Every live setting recorded so far, for replay after a config
     /// reload. Cloned rather than borrowed: the replay mutates the same
     /// `WindowManager` this came from.

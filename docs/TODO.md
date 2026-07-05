@@ -1,5 +1,42 @@
 # TODO / planned features - master checklist
 
+## "Why is there still a tint on windows": a live override the config could never take back (2026-08-28)
+
+The tint is the drop shadow. `init.lua:65` sets `general.shadows` to
+`false`, and loading that same config in a fresh compositor reports
+`shadows: false` - but the running session reported `true`. Something had
+turned shadows on at runtime, and the session had no way back.
+
+**That "no way back" is a defect I introduced.** The live-settings replay
+added earlier today re-applies every `srd set` after each config reload, so
+the titlebar menu's own Customize rows survive a save. The unintended half:
+a live override then outranked the config file *permanently*. Editing
+`init.lua` and saving could not fix it, because the reload put the override
+straight back - which is exactly the state the session was found in.
+
+Live-always-wins and config-always-wins are both wrong, in opposite
+directions. The rule now: **the config wins for anything it states, and a
+live override survives only where the config is silent.** That needs a
+distinction `values` alone cannot make, since defaults are seeded before any
+script runs and so every key looks set - the config engine now records
+which keys `srd.set` actually touched during the load, cleared and rebuilt
+each time, and restored with everything else if the reload fails.
+
+Verified end to end, both directions:
+
+    config says shadows=false          -> false
+    srd set shadows true               -> true
+    save an unrelated config edit      -> false   (the file wins)
+
+    srd set border_width 9             -> 9       (config never mentions it)
+    save an unrelated config edit      -> 9       (override survives)
+
+The running session was also corrected directly with `srd set shadows
+false`, matching what its own config already asked for, so the tint is gone
+without waiting for a restart.
+
+529 tests, clippy clean.
+
 ## Lock screen: the avatar was never read, and the keyboard could not type most passwords (2026-08-28)
 
 Two questions, both real gaps.

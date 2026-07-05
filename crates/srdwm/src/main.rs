@@ -227,6 +227,64 @@ fn publish_gtk_button_layout(wm: &Rc<RefCell<WindowManager>>) {
     }
 }
 
+/// `srd set` key -> the config key that states the same thing.
+///
+/// Needed so a reload can tell which live overrides the config file itself
+/// has an opinion about. Only the keys that exist on both sides appear; a
+/// live setting with no config equivalent simply survives every reload.
+fn config_key_for_live_setting(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "shadows" => "general.shadows",
+        "rounded_corners" => "general.rounded_corners",
+        "animations" => "general.animations",
+        "night_light" => "general.night_light",
+        "reading_mode" => "general.reading_mode",
+        "phone_mode" => "general.phone_mode",
+        "multi_cursor" => "general.multi_cursor",
+        "per_monitor" => "workspace.per_monitor",
+        "desktop_icons" => "general.desktop_icons",
+        "desktop_icons_all_monitors" => "general.desktop_icons_all_monitors",
+        "close_focus_follows_workspace" => "general.close_focus_follows_workspace",
+        "gap_inner" => "general.window_gap",
+        "border_width" => "theme.decorations.border.width",
+        "border_color" => "theme.decorations.border.active_color",
+        "corner_radius" => "theme.decorations.border.radius",
+        "decoration_mode" => "theme.decorations.default_mode",
+        "button_style" => "theme.decorations.title_bar.button_style",
+        "button_side" => "theme.decorations.title_bar.button_side",
+        "button_mode" => "theme.decorations.title_bar.button_mode",
+        "button_order" => "theme.decorations.title_bar.button_order",
+        "title_centered" => "theme.decorations.title_bar.text_align",
+        "button_glyph_always" => "theme.decorations.title_bar.button_glyph",
+        _ => return None,
+    })
+}
+
+/// Drops every live `srd set` override that the freshly-loaded config
+/// states for itself, so the config file wins.
+///
+/// Live overrides survive a reload by design - otherwise the titlebar
+/// menu's own Customize rows would revert every time the config was saved,
+/// which with reload-on-write is constantly. But "live always wins" is the
+/// opposite failure and a worse one: a value changed once at runtime could
+/// never be corrected by editing the config, because every reload put it
+/// straight back. Found exactly that way - a session reporting
+/// `shadows: true` while its own `init.lua` said `false`, with no way to
+/// fix it from the config.
+///
+/// So the rule is: the config wins for anything it actually mentions, and a
+/// live override survives only where the config is silent.
+fn drop_live_settings_the_config_states(engine: &Engine, wm: &Rc<RefCell<WindowManager>>) {
+    let stated: std::collections::HashSet<String> = engine.config_set_keys().into_iter().collect();
+    let live: Vec<String> = wm.borrow().live_settings().into_iter().map(|(k, _)| k).collect();
+    let mut wm = wm.borrow_mut();
+    for key in live {
+        if config_key_for_live_setting(&key).is_some_and(|config_key| stated.contains(config_key)) {
+            wm.forget_live_setting(&key);
+        }
+    }
+}
+
 /// Copies the loaded config's key bindings into the `WindowManager`, where
 /// the IPC layer can serve them (`srd keybindings`).
 ///
@@ -964,6 +1022,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // `WindowManager::live_settings` for why a hand-made
                     // change has to win over that on a *reload*, even
                     // though the file wins at startup.
+                    drop_live_settings_the_config_states(&engine, &wm);
                     let replayed = srdwm_platform::replay_live_settings(&wm);
                     if replayed > 0 {
                         log::info!("re-applied {replayed} live setting(s) after the reload");
@@ -984,6 +1043,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             publish_keybindings(&engine, &wm);
             publish_gtk_button_layout(&wm);
     publish_gtk_stylesheet(&wm);
+            drop_live_settings_the_config_states(&engine, &wm);
             srdwm_platform::replay_live_settings(&wm);
             // After the reload, so a handler edited in the config since
             // startup is the one that runs.
@@ -1004,6 +1064,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         publish_keybindings(&engine, &wm);
                         publish_gtk_button_layout(&wm);
     publish_gtk_stylesheet(&wm);
+                        drop_live_settings_the_config_states(&engine, &wm);
                         srdwm_platform::replay_live_settings(&wm);
                     } else if !engine.dispatch_keybinding(&combo) {
                         log::debug!("no binding for '{combo}'");
