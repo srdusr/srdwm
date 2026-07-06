@@ -51,11 +51,54 @@ fn memory_path() -> PathBuf {
 /// the file doesn't exist yet or is present but unreadable/corrupt - a
 /// bad state file degrades to "nothing remembered yet", not a startup
 /// failure.
+/// The size `new_managed_window` gives a window before its client has
+/// chosen anything: `800 x 600 + TITLEBAR_HEIGHT`.
+///
+/// An entry recording exactly this is a size no client ever picked - see
+/// `discard_placeholder_entries`.
+fn placeholder_size() -> (u32, u32) {
+    (800, 600 + srdwm_core::TITLEBAR_HEIGHT)
+}
+
+/// Drops entries whose size is exactly the placeholder.
+///
+/// `remove_window` no longer records a size the client never chose, so
+/// nothing new is captured this way. Entries written before that fix are
+/// still on disk, and they are self-perpetuating: a remembered size makes
+/// the next launch non-provisional, which forces the client to that size
+/// instead of asking it to pick, which writes the same value back on close.
+/// An affected app can never escape on its own, so the stale entries have
+/// to be dropped rather than waited out.
+///
+/// Editing the file by hand does not work, which is worth recording: a
+/// running compositor holds the whole table in memory and `save_all` writes
+/// all of it back, so a hand-deleted entry reappears at the next save.
+/// Filtering on load is the only point where the fix actually sticks.
+///
+/// A window genuinely sized exactly 800x632 loses its remembered size once,
+/// and gets it back the moment it is next resized or closed at a real size.
+/// That is a far smaller cost than an app permanently pinned to a shape it
+/// never asked for.
+fn discard_placeholder_entries(apps: &mut HashMap<String, PersistedGeometry>) {
+    let (w, h) = placeholder_size();
+    apps.retain(|app_id, g| {
+        let stale = g.width == w && g.height == h;
+        if stale {
+            log::info!("window_memory: dropping {app_id}'s remembered {w}x{h} - that is the placeholder, not a size it chose");
+        }
+        !stale
+    });
+}
+
 pub(crate) fn load() -> HashMap<String, PersistedGeometry> {
     let path = memory_path();
     let Ok(bytes) = std::fs::read(&path) else { return HashMap::new() };
     match serde_json::from_slice::<PersistedWindowMemory>(&bytes) {
-        Ok(memory) => memory.apps,
+        Ok(memory) => {
+            let mut apps = memory.apps;
+            discard_placeholder_entries(&mut apps);
+            apps
+        }
         Err(e) => {
             log::warn!("window_memory: couldn't parse {path:?} ({e}); starting with nothing remembered");
             HashMap::new()
@@ -94,6 +137,29 @@ pub(crate) fn save_all<'a>(entries: impl Iterator<Item = (&'a str, (i32, i32, u3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_placeholder_sized_entry_is_dropped_on_load() {
+        // The self-perpetuating case: an app pinned to the size the
+        // compositor guessed before it had chosen one.
+        let (w, h) = placeholder_size();
+        let mut apps = HashMap::new();
+        apps.insert("pinned".to_string(), PersistedGeometry { x: 10, y: 20, width: w, height: h });
+        apps.insert("real".to_string(), PersistedGeometry { x: 30, y: 40, width: 1389, height: 933 });
+        discard_placeholder_entries(&mut apps);
+        assert!(!apps.contains_key("pinned"), "the placeholder entry must go");
+        assert!(apps.contains_key("real"), "a real remembered size must survive");
+    }
+
+    #[test]
+    fn an_entry_that_merely_shares_one_dimension_is_kept() {
+        let (w, h) = placeholder_size();
+        let mut apps = HashMap::new();
+        apps.insert("same_width".to_string(), PersistedGeometry { x: 0, y: 0, width: w, height: h + 1 });
+        apps.insert("same_height".to_string(), PersistedGeometry { x: 0, y: 0, width: w + 1, height: h });
+        discard_placeholder_entries(&mut apps);
+        assert_eq!(apps.len(), 2, "only an exact match is the placeholder");
+    }
 
     // Only the pure JSON round-trip is exercised here - `state_dir()`/
     // `load()`/`save_all()` all touch real environment variables and the

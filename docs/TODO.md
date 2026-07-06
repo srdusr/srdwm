@@ -1,5 +1,52 @@
 # TODO / planned features - master checklist
 
+## The tint is AGS pushing shadows back on, and a store cleanup that could not stick (2026-08-28)
+
+Four reports. Two have a single cause each, and one of them is not srdwm's.
+
+**"Firefox has a dark-ish tint when it has focus" - that is the drop
+shadow, and AGS turns it on.** `init.lua` sets `general.shadows = false`;
+the running session reported `true` again after a restart on a binary that
+already had the config-precedence fix. The source is
+`ags_project/lib/srdwm.ts:801`, which pushes the shell's own stored value:
+
+    srdSet("shadows", shadows.peek() ? "true" : "false")
+
+alongside `border_color`, `gap_outer`, `gap_inner` and `corner_radius`. That
+is deliberate on the AGS side - propagating one accent pick to every
+surface is the point of its theme system - but it means srdwm's config
+loses for those keys every time the shell starts. It also explains the
+*focus* part exactly: a focused window gets the full `SHADOW_MAX_ALPHA`
+while an unfocused one is dimmed by `border_inactive_dim`, so focusing a
+window visibly darkens what is behind it.
+
+Worth flagging as a coordination problem rather than a bug in either half:
+srdwm's new rule is that the config wins for keys it states, applied on
+every reload, and AGS pushes its own values at startup. Both are reasonable
+in isolation and they disagree about the same keys.
+
+**Window memory: the earlier cleanup was undone the moment it was made.**
+Five placeholder-sized entries were deleted from
+`window-memory.json` by hand. They came back, because a running compositor
+holds the whole table in memory and `save_all` writes all of it back on the
+next window close - a hand-edited file cannot survive a running session.
+
+`load()` now drops entries whose size is exactly the placeholder
+(`800 x 600 + TITLEBAR_HEIGHT`), which is the only point where the fix
+sticks. `remove_window` already refuses to record such a size, so nothing
+new is captured; this clears what was written before that landed. A window
+genuinely that size loses its memory once and gets it back on the next real
+resize or close - much cheaper than an app permanently pinned to a shape it
+never chose.
+
+**Firefox and Nemo showing no srdwm decorations** is `rules.lua`'s own
+`decorated = false` for both, which is the double-titlebar fix working as
+intended: srdwm draws neither titlebar nor border, and each app draws its
+own chrome. The missing border on Nemo has the same single cause, and the
+owner prefers it.
+
+531 tests, clippy clean.
+
 ## "Why is there still a tint on windows": a live override the config could never take back (2026-08-28)
 
 The tint is the drop shadow. `init.lua:65` sets `general.shadows` to
