@@ -31,6 +31,73 @@ pub(crate) fn measure_text_width(font: &Option<Font>, text: &str, size: f32) -> 
     text.chars().filter(|c| !c.is_control()).map(|ch| font.rasterize(ch, size).0.advance_width).sum()
 }
 
+/// A proportional UI font for prose, falling back to the monospace one.
+///
+/// [`find_system_font`] deliberately prefers a *monospace* face, which is
+/// right for a titlebar title and a menu row - they sit in columns and
+/// benefit from even advances. It is wrong for a sentence. The lock
+/// screen's "Enter Password" prompt rendered in DejaVu Sans Mono, which is
+/// what this machine's font scan picks, and reads as a mistake next to
+/// every other prompt on the system. Reported as the prompt having "a weird
+/// font".
+///
+/// Ranked by preference rather than taking whatever a directory walk turns
+/// up first, so the result does not depend on filesystem order the way the
+/// mono scan historically did (it once picked an italic face and rendered
+/// every titlebar in italic).
+pub(crate) fn find_ui_font() -> Option<Font> {
+    static FONT: OnceLock<Option<Font>> = OnceLock::new();
+    FONT.get_or_init(|| load_ui_font().or_else(load_any_monospace_font)).clone()
+}
+
+fn load_ui_font() -> Option<Font> {
+    // Common, widely-installed proportional faces, best first. Each is
+    // matched against the whole path lowercased, so a distro's own
+    // subdirectory layout does not matter.
+    const PREFERRED: [&str; 8] =
+        ["inter-regular", "cantarell-regular", "notosans-regular", "dejavusans.ttf", "liberationsans-regular", "opensans-regular", "roboto-regular", "freesans"];
+    let mut roots: Vec<String> = ["/usr/share/fonts", "/usr/local/share/fonts"].iter().map(|s| s.to_string()).collect();
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(format!("{home}/.local/share/fonts"));
+        roots.push(format!("{home}/.fonts"));
+    }
+    let mut best: Option<(std::path::PathBuf, usize)> = None;
+    for root in &roots {
+        collect_ui_font(std::path::Path::new(root), &PREFERRED, &mut best);
+    }
+    let (path, _) = best?;
+    let bytes = std::fs::read(&path).ok()?;
+    match Font::from_bytes(bytes, FontSettings::default()) {
+        Ok(f) => {
+            log::info!("ui font: {}", path.display());
+            Some(f)
+        }
+        Err(e) => {
+            log::warn!("failed to parse ui font {}: {e}", path.display());
+            None
+        }
+    }
+}
+
+fn collect_ui_font(dir: &std::path::Path, preferred: &[&str], best: &mut Option<(std::path::PathBuf, usize)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_ui_font(&path, preferred, best);
+            continue;
+        }
+        let name = path.to_string_lossy().to_lowercase();
+        if !(name.ends_with(".ttf") || name.ends_with(".otf")) || name.contains("mono") || name.contains("italic") || name.contains("oblique") {
+            continue;
+        }
+        let Some(rank) = preferred.iter().position(|p| name.contains(p)) else { continue };
+        if best.as_ref().is_none_or(|(_, r)| rank < *r) {
+            *best = Some((path, rank));
+        }
+    }
+}
+
 fn load_any_monospace_font() -> Option<Font> {
     let roots = ["/usr/share/fonts", "/usr/local/share/fonts"];
     let mut home_roots = Vec::new();

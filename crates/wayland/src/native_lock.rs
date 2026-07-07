@@ -803,7 +803,7 @@ fn fill_circle_on_transparent(buf: &mut [u8], width: usize, height: usize, cx: i
 /// box`, which is a genuinely opaque panel, nothing here is a filled
 /// background at all.
 fn render_header_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8>, (i32, i32)) {
-    use crate::decoration::{blit_glyph_on_transparent, find_system_font, FONT_PIXELS};
+    use crate::decoration::{blit_glyph_on_transparent, find_ui_font, FONT_PIXELS};
 
     const WIDTH: usize = 420;
     const HEIGHT: usize = 200;
@@ -812,7 +812,7 @@ fn render_header_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Ve
     const AVATAR_RADIUS: i32 = 28;
     let mut buf = vec![0u8; WIDTH * HEIGHT * 4];
 
-    let font = find_system_font();
+    let font = find_ui_font();
     let (hour, minute, weekday, day, month, _year) = local_time_now();
     let time_str = format!("{hour:02}:{minute:02}");
     let date_str = format!("{}, {} {day}", WEEKDAY_NAMES[weekday.clamp(0, 6) as usize], MONTH_NAMES[(month - 1).clamp(0, 11) as usize]);
@@ -880,7 +880,7 @@ fn render_header_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Ve
 /// `rgb_to_bgra`), promoted to `pub(crate)` there rather than duplicated
 /// here.
 fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8>, (i32, i32)) {
-    use crate::decoration::{blit_glyph_over, find_system_font, rgb_to_bgra, round_bottom_corners, round_top_corners, FONT_PIXELS, TEXT_LEFT_PADDING};
+    use crate::decoration::{blit_glyph_over, find_ui_font, rgb_to_bgra, round_bottom_corners, round_top_corners, FONT_PIXELS, TEXT_LEFT_PADDING};
 
     const WIDTH: usize = 340;
     const HEIGHT: usize = 120;
@@ -898,7 +898,7 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
         }
     }
 
-    let font = find_system_font();
+    let font = find_ui_font();
     let text_color = if native.show_error { theme.error_color } else { theme.text_color };
 
     // Centered, not left-padded like every other text row this codebase
@@ -909,9 +909,18 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
     // (the same two-pass "measure, then centre" `render_header_box`'s own
     // `draw_centered` already does) rather than repeating that closure
     // here for one extra parameter's difference.
-    let mut draw_line_centered = |text: &str, y: f32, color: (u8, u8, u8)| {
+    // `tracking` is extra space added after every glyph. Zero for prose;
+    // the password dots use it because a run of identical bullets with only
+    // their own advance between them reads as one smeared blob rather than
+    // as countable characters - reported as "no spacing in between the
+    // obfuscated password entry". Every real password field spaces them.
+    let mut draw_line_centered_tracked = |text: &str, y: f32, color: (u8, u8, u8), tracking: f32| {
         let Some(font) = &font else { return };
-        let total_width: f32 = text.chars().map(|ch| font.rasterize(ch, FONT_PIXELS).0.advance_width).sum();
+        let count = text.chars().filter(|c| !c.is_control()).count() as f32;
+        // The trailing gap is not part of the drawn run, so it must not be
+        // counted when centring or the row sits half a gap to the left.
+        let glyphs: f32 = text.chars().map(|ch| font.rasterize(ch, FONT_PIXELS).0.advance_width).sum();
+        let total_width: f32 = glyphs + tracking * (count - 1.0).max(0.0);
         let start_x = ((WIDTH as f32 - total_width) / 2.0).max(TEXT_LEFT_PADDING);
         let mut pen_x = start_x;
         for ch in text.chars() {
@@ -924,7 +933,7 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
                 let glyph_y = y - metrics.height as f32 - metrics.ymin as f32;
                 blit_glyph_over(&mut buf, WIDTH, HEIGHT, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, color);
             }
-            pen_x += metrics.advance_width;
+            pen_x += metrics.advance_width + tracking;
         }
     };
 
@@ -940,20 +949,20 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
         // actually drawn would tint the placeholder for no visible reason.
         let toward = if panel_alpha > 0 { theme.box_bg } else { (0, 0, 0) };
         let placeholder = crate::decoration::mix_rgb(theme.text_color, toward, 0.5);
-        draw_line_centered("Enter Password", 65.0, placeholder);
+        draw_line_centered_tracked("Enter Password", 65.0, placeholder, 0.0);
     } else {
         let dots: String = std::iter::repeat_n(theme.dot_char, native.password.chars().count()).collect();
-        draw_line_centered(&dots, 65.0, text_color);
+        draw_line_centered_tracked(&dots, 65.0, text_color, DOT_TRACKING);
     }
 
     let mut status_y = 100.0;
     if theme.show_caps_lock && native.caps_lock {
-        draw_line_centered("Caps Lock is on", status_y, theme.error_color);
+        draw_line_centered_tracked("Caps Lock is on", status_y, theme.error_color, 0.0);
         status_y += 20.0;
     }
     if theme.show_failed_attempts && native.show_error {
         let message = if native.failed_attempts > 1 { format!("{} ({} attempts)", theme.fail_message, native.failed_attempts) } else { theme.fail_message.clone() };
-        draw_line_centered(&message, status_y, theme.error_color);
+        draw_line_centered_tracked(&message, status_y, theme.error_color, 0.0);
     }
 
     // Border, drawn last so it isn't overdrawn by any fill above --
@@ -1099,6 +1108,10 @@ fn keyboard_rows() -> [Vec<KeySpec>; 5] {
     ]
 }
 
+/// Extra space after each password dot. Without it a run of identical
+/// bullets renders as one smeared blob rather than countable characters.
+const DOT_TRACKING: f32 = 5.0;
+
 const KEY_UNIT: i32 = 32;
 const KEY_HEIGHT: i32 = 32;
 const KEY_GAP: i32 = 6;
@@ -1140,6 +1153,37 @@ fn render_keyboard(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<
             let w = (spec.width * KEY_UNIT as f32).round() as i32;
             fill_rect(&mut buf, width, height, x, y, x + w, y + KEY_HEIGHT, keycap_bg, 220);
             let label = if native.shift { spec.upper } else { spec.lower };
+            // The character the OTHER shift state would type, drawn small
+            // in the cap's top-right. A physical key is labelled with both
+            // (`2` and `@` on one cap) and this was labelled with only the
+            // active one, so there was no way to find a symbol without
+            // pressing Shift and hunting for it. Reported as not being able
+            // to see the alternative characters.
+            //
+            // Skipped when the two are the same character (every letter
+            // key differs only by case, which the cap already shows, and a
+            // named key like Enter has no alternate at all).
+            let alternate = if native.shift { spec.lower } else { spec.upper };
+            if spec.name.is_empty() && alternate != label && !alternate.is_empty() {
+                if let Some(font) = &font {
+                    let size = FONT_PIXELS * 0.62;
+                    let alt_width: f32 = alternate.chars().map(|ch| font.rasterize(ch, size).0.advance_width).sum();
+                    let mut pen_x = x as f32 + w as f32 - alt_width - 3.0;
+                    for ch in alternate.chars() {
+                        let (metrics, coverage) = font.rasterize(ch, size);
+                        if metrics.width > 0 && metrics.height > 0 {
+                            let glyph_x = pen_x + metrics.xmin as f32;
+                            let glyph_y = y as f32 + 3.0 + size - metrics.height as f32 - metrics.ymin as f32;
+                            // Dimmed toward the cap so it reads as
+                            // secondary rather than competing with the
+                            // character the key actually types right now.
+                            let dim = crate::decoration::mix_rgb(theme.text_color, keycap_bg, 0.45);
+                            blit_glyph_on_transparent(&mut buf, width, height, glyph_x.round() as i32, glyph_y.round() as i32, &metrics, &coverage, dim);
+                        }
+                        pen_x += metrics.advance_width;
+                    }
+                }
+            }
             if let Some(font) = &font {
                 let total_width: f32 = label.chars().map(|ch| font.rasterize(ch, FONT_PIXELS).0.advance_width).sum();
                 let mut pen_x = x as f32 + (w as f32 - total_width) / 2.0;
