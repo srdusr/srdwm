@@ -454,6 +454,28 @@ pub const RESIZE_MARGIN: i32 = 6;
 /// diagonal drag easier to land on a window srdwm itself has no competing
 /// content in, which is never true here.
 pub const UNDECORATED_RESIZE_MARGIN: i32 = 3;
+
+/// How far *outside* a window's own frame the resize grab zone reaches,
+/// regardless of border width.
+///
+/// The inward margin has to stay narrow - see
+/// [`UNDECORATED_RESIZE_MARGIN`] above for the clicks it was stealing from
+/// Nemo's own buttons. Pixels outside the frame have no such problem:
+/// there is no client content there to take a click from, so the band can
+/// be as generous as it needs to be.
+///
+/// This used to be `border_width` alone, which meant a borderless window
+/// had no outward band at all and its entire resize target was the narrow
+/// inward margin - 3px on an undecorated window. Reported as resizing
+/// working "from one direction" and feeling "very cheap": a 3px target is
+/// missed far more often than it is hit, so it reads as an edge that
+/// sometimes resizes rather than one that always does. Turning borders off
+/// for the macOS look made it strictly worse, since the border had been
+/// quietly providing the only outward reach.
+///
+/// macOS and GNOME both let a pointer grab slightly outside a window's
+/// visible edge for the same reason.
+pub const RESIZE_OUTSET: i32 = 5;
 /// Top-edge resize margin for a *decorated* window's own titlebar band --
 /// unlike [`UNDECORATED_RESIZE_MARGIN`], this has no client content to
 /// avoid stealing a click from (the whole titlebar band is srdwm's own
@@ -557,8 +579,11 @@ impl ResizeEdge {
         // itself needs no matching change - its margin comparisons
         // (`x <= frame.x + m`, etc.) already treat anything at or outside
         // `frame`'s own edge as maximally "near", border pixels included.
-        let bw = border_width as i32;
-        let outer = Rect::new(frame.x - bw, frame.y - bw, frame.width + 2 * border_width, frame.height + 2 * border_width);
+        // Whichever reaches further: the drawn border, or the fixed outward
+        // grab band. See `RESIZE_OUTSET`.
+        let bw = (border_width as i32).max(RESIZE_OUTSET);
+        let reach = bw as u32;
+        let outer = Rect::new(frame.x - bw, frame.y - bw, frame.width + 2 * reach, frame.height + 2 * reach);
         if !outer.contains_point(x, y) {
             return None;
         }
@@ -1283,19 +1308,55 @@ mod tests {
         // though it's what visually reads as the window's edge.
         let f = frame();
         let (_, cy) = f.center();
-        let border_width = 2;
-        // One pixel into the border strip, past the left edge.
+        // A border wider than the fixed outward band, so this test is
+        // actually exercising the border and not `RESIZE_OUTSET`.
+        let border_width = (RESIZE_OUTSET + 3) as u32;
         let x = f.x - 1;
-        assert_eq!(ResizeEdge::hit_test(f, x, cy, true, 0, RESIZE_MARGIN, false, None, false, true), None, "sanity check: with no border, this point really is outside the window");
         assert_eq!(
             ResizeEdge::hit_test(f, x, cy, true, border_width, RESIZE_MARGIN, false, None, false, true),
             Some(TitlebarHit::Resize(ResizeEdge::Left)),
-            "one pixel into the actual drawn border must still register as the left edge"
+            "one pixel into the actual drawn border must register as the left edge"
         );
-        // Just past the border entirely (border_width + 1 outside frame) is
-        // still nothing - the fix widens the dead zone's boundary, it
-        // doesn't remove it.
+        assert_eq!(
+            ResizeEdge::hit_test(f, f.x - border_width as i32 + 1, cy, true, border_width, RESIZE_MARGIN, false, None, false, true),
+            Some(TitlebarHit::Resize(ResizeEdge::Left)),
+            "the far side of a wide border is still the window's edge"
+        );
+        // Past the border entirely: the grab zone has a boundary, it is
+        // just further out than the frame.
         assert_eq!(ResizeEdge::hit_test(f, f.x - border_width as i32 - 1, cy, true, border_width, RESIZE_MARGIN, false, None, false, true), None);
+    }
+
+    /// A borderless window still has somewhere to grab. Before
+    /// `RESIZE_OUTSET` the outward band was `border_width` alone, so
+    /// turning borders off left only the inward margin - 3px on an
+    /// undecorated window, which is missed more often than hit.
+    #[test]
+    fn a_borderless_window_can_still_be_grabbed_from_outside_its_edge() {
+        let f = frame();
+        let (_, cy) = f.center();
+        for dx in 1..=RESIZE_OUTSET {
+            assert_eq!(
+                ResizeEdge::hit_test(f, f.x - dx, cy, false, 0, RESIZE_MARGIN, false, None, false, true),
+                Some(TitlebarHit::Resize(ResizeEdge::Left)),
+                "{dx}px outside a borderless window's left edge must still resize"
+            );
+        }
+        assert_eq!(
+            ResizeEdge::hit_test(f, f.x - RESIZE_OUTSET - 1, cy, false, 0, RESIZE_MARGIN, false, None, false, true),
+            None,
+            "one pixel past the band is not the window"
+        );
+    }
+
+    #[test]
+    fn the_outward_band_reaches_every_edge_not_just_the_left() {
+        let f = frame();
+        let (cx, cy) = f.center();
+        let probe = |x, y| ResizeEdge::hit_test(f, x, y, false, 0, RESIZE_MARGIN, false, None, false, true);
+        assert_eq!(probe(f.right() + RESIZE_OUTSET - 1, cy), Some(TitlebarHit::Resize(ResizeEdge::Right)));
+        assert_eq!(probe(cx, f.y - RESIZE_OUTSET + 1), Some(TitlebarHit::Resize(ResizeEdge::Top)));
+        assert_eq!(probe(cx, f.bottom() + RESIZE_OUTSET - 1), Some(TitlebarHit::Resize(ResizeEdge::Bottom)));
     }
 
     #[test]
