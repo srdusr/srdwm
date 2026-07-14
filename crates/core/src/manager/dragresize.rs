@@ -169,6 +169,21 @@ impl WindowManager {
         self.drag.is_some()
     }
 
+    /// The active resize as `(window, dragged edge, the window's rect when
+    /// the drag began)`, or `None`.
+    ///
+    /// The caller needs all three to keep the *opposite* edge still. A
+    /// resize from the left or top has to hold the right or bottom edge
+    /// exactly where it was: the compositor moves the window's origin the
+    /// instant the pointer moves, but the client only commits a new buffer
+    /// some frames later, so positioning its still-old content at the new
+    /// origin drags the whole window sideways instead of growing it.
+    /// Reported as content resizing "from the right side even when i resize
+    /// from left".
+    pub fn resize_anchor(&self) -> Option<(WindowId, ResizeEdge, Rect)> {
+        self.resize.as_ref().map(|r| (r.window, r.edge, r.orig))
+    }
+
     /// The window the current drag is moving, if any.
     pub fn dragged_window(&self) -> Option<WindowId> {
         self.drag.as_ref().map(|d| d.window)

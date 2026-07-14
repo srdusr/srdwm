@@ -241,6 +241,37 @@ impl CompState {
     /// reading `Window.geometry` unchanged - those are about this
     /// compositor's own bookkeeping staying self-consistent, not about
     /// matching a client's real pixels.
+    /// `geom`'s origin, corrected so an in-progress left/top resize keeps
+    /// its opposite edge fixed. Returns `geom`'s own origin unchanged when
+    /// this window is not being resized, or is being resized from an edge
+    /// whose origin does not move.
+    ///
+    /// `committed` is the client's own last-committed content size, in
+    /// logical points; `scale` converts it to the physical space every rect
+    /// here uses.
+    fn anchor_resizing_origin(
+        wm: &Rc<RefCell<WindowManager>>,
+        id: WindowId,
+        geom: srdwm_core::Rect,
+        committed: smithay::utils::Size<i32, smithay::utils::Logical>,
+        scale: f64,
+    ) -> (i32, i32) {
+        let Some((resizing, edge, orig)) = wm.borrow().resize_anchor() else { return (geom.x, geom.y) };
+        if resizing != id {
+            return (geom.x, geom.y);
+        }
+        let (mut x, mut y) = (geom.x, geom.y);
+        let physical_w = (committed.w as f64 * scale).round() as i32;
+        let physical_h = (committed.h as f64 * scale).round() as i32;
+        if physical_w > 0 && matches!(edge, srdwm_core::ResizeEdge::Left | srdwm_core::ResizeEdge::TopLeft | srdwm_core::ResizeEdge::BottomLeft) {
+            x = orig.right() - physical_w;
+        }
+        if physical_h > 0 && matches!(edge, srdwm_core::ResizeEdge::Top | srdwm_core::ResizeEdge::TopLeft | srdwm_core::ResizeEdge::TopRight) {
+            y = orig.bottom() - physical_h;
+        }
+        (x, y)
+    }
+
     pub(crate) fn effective_frame(&self, id: WindowId, geom: srdwm_core::Rect) -> srdwm_core::Rect {
         Self::effective_frame_of(&self.wm, &self.id_to_window, &self.pending_size_configure, id, geom)
     }
@@ -362,7 +393,19 @@ impl CompState {
             // calls already never did this (X11 windows have no equivalent
             // shadow-margin geometry), which in hindsight was the correct
             // pattern being followed there all along.
-            self.space.map_element(w.clone(), (geom.x, geom.y + band), false);
+            // While resizing from a left or top edge, hold the opposite
+            // edge still. `geom` moves the instant the pointer does, but
+            // the client only commits a matching buffer some frames later,
+            // so placing its still-old content at the new origin slides the
+            // whole window sideways rather than growing it - reported as
+            // content resizing "from the right side even when i resize from
+            // left". Deriving the origin from the size the client has
+            // actually committed keeps the anchored edge exactly where the
+            // drag started, and the dragged edge catches up as commits
+            // arrive. A right/bottom drag needs none of this: its origin
+            // does not move at all.
+            let placed = Self::anchor_resizing_origin(&self.wm, id, geom, w.geometry().size, scale);
+            self.space.map_element(w.clone(), (placed.0, placed.1 + band), false);
             moved = true;
             if let Some(top) = w.toplevel() {
                 // xdg-shell position is a purely compositor-side concept --

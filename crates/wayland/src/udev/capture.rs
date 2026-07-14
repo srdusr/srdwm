@@ -116,6 +116,36 @@ impl CompState {
     }
 }
 
+/// Encodes packed RGB to whatever the destination's extension asks for.
+///
+/// PPM was the only format this ever wrote, which made the capture
+/// unreadable to its actual consumers: a shell drawing thumbnails decodes
+/// PNG/JPEG/WebP and not PPM, so the file was written successfully,
+/// returned successfully, and then silently not drawn. The render itself
+/// was never the problem - only the container.
+///
+/// `.ppm` still produces PPM, so any existing caller keeps working;
+/// anything else is chosen by extension, defaulting to PNG when the
+/// extension is unfamiliar. PNG is the safe default: it is lossless and
+/// universally decodable, and at thumbnail sizes the size difference
+/// against JPEG is tens of kilobytes.
+fn encode_capture(rgb: &[u8], width: u32, height: u32, path: &str) -> Result<Vec<u8>, String> {
+    let extension = std::path::Path::new(path).extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    if extension == "ppm" {
+        let mut out = format!("P6\n{width} {height}\n255\n").into_bytes();
+        out.extend_from_slice(rgb);
+        return Ok(out);
+    }
+    let format = match extension.as_str() {
+        "jpg" | "jpeg" => image::ImageFormat::Jpeg,
+        _ => image::ImageFormat::Png,
+    };
+    let buffer = image::RgbImage::from_raw(width, height, rgb.to_vec()).ok_or_else(|| format!("capture buffer is not {width}x{height} RGB"))?;
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(buffer).write_to(&mut out, format).map_err(|e| format!("encode {extension}: {e}"))?;
+    Ok(out.into_inner())
+}
+
 /// `pixels` is `Xrgb8888` - 4 bytes per pixel, little-endian, so byte
 /// order in memory is B, G, R, X. PPM (`P6`) wants tightly-packed R, G, B
 /// with no pad byte, hence the reorder rather than a straight `memcpy`.
@@ -150,8 +180,7 @@ fn write_ppm(pixels: &[u8], native: (u32, u32), target: Option<(u32, u32)>, path
         }
     }
 
-    let mut out = format!("P6\n{tw} {th}\n255\n").into_bytes();
-    out.extend_from_slice(&rgb);
+    let out = encode_capture(&rgb, tw, th, path)?;
     // Written to a `.tmp` sibling and renamed into place: a reader (AGS's
     // wsPreview poller) racing a partial write is exactly the kind of
     // flicker/corruption a debounced, event-driven cache is supposed to
@@ -160,4 +189,43 @@ fn write_ppm(pixels: &[u8], native: (u32, u32), target: Option<(u32, u32)>, path
     let tmp = format!("{path}.tmp");
     std::fs::write(&tmp, &out).map_err(|e| format!("write {tmp}: {e}"))?;
     std::fs::rename(&tmp, path).map_err(|e| format!("rename to {path}: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_capture;
+
+    fn rgb(w: u32, h: u32) -> Vec<u8> {
+        (0..w * h).flat_map(|i| [(i % 251) as u8, 0x40, 0x80]).collect()
+    }
+
+    #[test]
+    fn the_extension_picks_the_container() {
+        // Checked by magic bytes rather than by trusting the call: the whole
+        // point is that the file a consumer opens is the format it expects.
+        let px = rgb(8, 4);
+        assert!(encode_capture(&px, 8, 4, "/tmp/x.ppm").unwrap().starts_with(b"P6"), "ppm");
+        assert!(encode_capture(&px, 8, 4, "/tmp/x.png").unwrap().starts_with(&[0x89, b'P', b'N', b'G']), "png");
+        assert!(encode_capture(&px, 8, 4, "/tmp/x.jpg").unwrap().starts_with(&[0xff, 0xd8]), "jpg");
+        assert!(encode_capture(&px, 8, 4, "/tmp/x.jpeg").unwrap().starts_with(&[0xff, 0xd8]), "jpeg");
+    }
+
+    #[test]
+    fn an_unfamiliar_extension_falls_back_to_png_rather_than_failing() {
+        let px = rgb(4, 4);
+        let out = encode_capture(&px, 4, 4, "/tmp/thumb.thumbnail").unwrap();
+        assert!(out.starts_with(&[0x89, b'P', b'N', b'G']));
+    }
+
+    #[test]
+    fn a_buffer_that_does_not_match_the_size_is_an_error_not_a_panic() {
+        assert!(encode_capture(&rgb(4, 4), 8, 8, "/tmp/x.png").is_err());
+    }
+
+    #[test]
+    fn the_encoded_image_round_trips_at_the_requested_size() {
+        let out = encode_capture(&rgb(9, 5), 9, 5, "/tmp/x.png").unwrap();
+        let decoded = image::load_from_memory(&out).expect("our own png must decode");
+        assert_eq!((decoded.width(), decoded.height()), (9, 5));
+    }
 }
