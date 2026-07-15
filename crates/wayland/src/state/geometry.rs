@@ -85,6 +85,28 @@ impl CompState {
         //    branch existing is what keeps that gap small in practice
         //    rather than a full commit-cycle wide.
         if wm.borrow().resizing_window() == Some(id) {
+            // Reinstated once more, but no longer as the *live drag
+            // target*. Returning that made the decoration race ahead of
+            // the content it frames: the titlebar and border tracked the
+            // pointer while the client's actual pixels were still whatever
+            // it last committed, so the two visibly disagreed for the whole
+            // drag - reported as the titlebar not resizing at the same
+            // time as the window, and as the resize feeling cheap.
+            //
+            // Now it returns the committed size, anchored to whichever edge
+            // the drag is holding still, which is exactly the rect the
+            // content actually occupies (`sync_geometry` positions it the
+            // same way). Decoration and content therefore move as one, one
+            // commit behind the pointer rather than out of step with each
+            // other. Every other compositor makes this same trade: a frame
+            // glued to its content and slightly behind the cursor reads as
+            // solid, one that leads its own content reads as broken.
+            //
+            // Falling back to the live target when there is no usable
+            // committed size yet keeps the pre-first-commit case working.
+            if let Some(rect) = Self::committed_frame(wm, id_to_window, id, geom) {
+                return rect;
+            }
             return geom;
         }
         // Same reasoning as the active-resize branch just above, for a gap
@@ -117,8 +139,24 @@ impl CompState {
         }) {
             return geom;
         }
-        let Some(w) = wm.borrow().window(id).cloned() else { return geom };
-        let Some(dwindow) = id_to_window.get(&id) else { return geom };
+        match Self::committed_frame(wm, id_to_window, id, geom) {
+            Some(rect) => rect,
+            None => geom,
+        }
+    }
+
+    /// `geom` with its size replaced by what the client actually committed,
+    /// and - during a resize from a left or top edge - its origin moved so
+    /// the opposite edge stays put. `None` when there is nothing committed
+    /// to correct against.
+    fn committed_frame(
+        wm: &Rc<RefCell<WindowManager>>,
+        id_to_window: &HashMap<WindowId, DWindow>,
+        id: WindowId,
+        geom: srdwm_core::Rect,
+    ) -> Option<srdwm_core::Rect> {
+        let w = wm.borrow().window(id).cloned()?;
+        let dwindow = id_to_window.get(&id)?;
         // `dwindow.geometry()` - `xdg_surface::set_window_geometry` - is,
         // per smithay's own implementation, that cached hint *intersected*
         // with `bbox()`, falling back to `bbox()` only if the client never
@@ -180,9 +218,9 @@ impl CompState {
         if content.size.w <= 0 || content.size.h <= 0 {
             // No real committed content yet - racing the first commit
             // right after creation, most likely. Nothing to correct
-            // against, so fall back to the requested rect rather than
-            // collapsing every dimension down to (near) zero.
-            return geom;
+            // against, so let the caller fall back to the requested rect
+            // rather than collapsing every dimension down to (near) zero.
+            return None;
         }
         // `content` (`bbox()`) is in the same *logical* points as
         // `xdg_surface::set_window_geometry` would have been, same as
@@ -203,7 +241,11 @@ impl CompState {
         let scale = wm.borrow().monitors().iter().find(|m| m.id == w.monitor).map(|m| m.scale).unwrap_or(1.0);
         let content_physical = ((content.size.w as f64 * scale).round() as i32, (content.size.h as f64 * scale).round() as i32);
         let band = if w.decorated { TITLEBAR_HEIGHT as i32 } else { 0 };
-        srdwm_core::Rect { x: geom.x, y: geom.y, width: content_physical.0.max(0) as u32, height: (band + content_physical.1.max(0)) as u32 }
+        // Anchored so a left/top drag holds its opposite edge - the same
+        // correction `sync_geometry` applies when positioning the content
+        // itself, so the two agree by construction rather than by luck.
+        let (x, y) = Self::anchor_resizing_origin(wm, id, geom, content.size, scale);
+        Some(srdwm_core::Rect { x, y, width: content_physical.0.max(0) as u32, height: (band + content_physical.1.max(0)) as u32 })
     }
 
     /// The rect a window's border, shadow, occlusion test, and resize-
