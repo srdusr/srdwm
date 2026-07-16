@@ -126,6 +126,26 @@ const CONFIG_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 /// not an error worth interrupting startup for. The compositor's own
 /// titlebars are already correct either way; this only brings the
 /// self-decorating clients into line.
+/// True when this srdwm is running nested inside another compositor's
+/// session rather than owning the machine's own.
+///
+/// Same test `srdwm_wayland::connect` uses to pick the winit backend over
+/// udev/DRM: a host `WAYLAND_DISPLAY` or `DISPLAY` means there is already a
+/// session, and this process is a window inside it.
+///
+/// Anything that writes to the *user's own desktop configuration* must be
+/// gated on this. A nested instance is a test or development window; it is
+/// not the shell, and it has no business rewriting the settings the real
+/// session is using. Learned the hard way: nested runs started with a
+/// scratch srdwm config, which naturally does not set `button_style`, took
+/// the built-in default and wrote traffic-light CSS straight into the real
+/// `~/.config/gtk-3.0/srdwm-buttons.css` - silently changing the look of
+/// every GTK app in the actual session, from a throwaway compositor that
+/// was testing something unrelated.
+fn running_nested() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
+}
+
 /// The stylesheet srdwm owns and rewrites, named so it is obvious in a
 /// directory listing which file is generated and which is the user's.
 const GTK_STYLE_FILE: &str = "srdwm-buttons.css";
@@ -186,6 +206,9 @@ fn gtk_button_css(traffic_lights: bool) -> String {
 /// Best-effort: a missing directory or an unwritable file is logged at
 /// debug and skipped. srdwm's own titlebars are already correct regardless.
 fn publish_gtk_stylesheet(wm: &Rc<RefCell<WindowManager>>) {
+    if running_nested() {
+        return;
+    }
     let Ok(home) = std::env::var("HOME") else { return };
     let traffic_lights = wm.borrow().theme.traffic_light_buttons;
     let css = gtk_button_css(traffic_lights);
@@ -216,6 +239,9 @@ fn publish_gtk_stylesheet(wm: &Rc<RefCell<WindowManager>>) {
 }
 
 fn publish_gtk_button_layout(wm: &Rc<RefCell<WindowManager>>) {
+    if running_nested() {
+        return;
+    }
     let layout = if wm.borrow().theme.buttons_left { "close,minimize,maximize:" } else { ":minimize,maximize,close" };
     match std::process::Command::new("gsettings")
         .args(["set", "org.gnome.desktop.wm.preferences", "button-layout", layout])
