@@ -126,24 +126,33 @@ const CONFIG_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 /// not an error worth interrupting startup for. The compositor's own
 /// titlebars are already correct either way; this only brings the
 /// self-decorating clients into line.
-/// True when this srdwm is running nested inside another compositor's
-/// session rather than owning the machine's own.
-///
-/// Same test `srdwm_wayland::connect` uses to pick the winit backend over
-/// udev/DRM: a host `WAYLAND_DISPLAY` or `DISPLAY` means there is already a
-/// session, and this process is a window inside it.
+/// True when this srdwm runs nested inside another compositor's session --
+/// a window on someone else's desktop - rather than owning the machine's
+/// own outputs.
 ///
 /// Anything that writes to the *user's own desktop configuration* must be
-/// gated on this. A nested instance is a test or development window; it is
-/// not the shell, and it has no business rewriting the settings the real
-/// session is using. Learned the hard way: nested runs started with a
-/// scratch srdwm config, which naturally does not set `button_style`, took
-/// the built-in default and wrote traffic-light CSS straight into the real
+/// gated on this. A nested instance is a test or development window: it
+/// shares `HOME` with the real session, but it is not the shell, and it has
+/// no business rewriting the settings the real session is using. Learned
+/// the hard way: nested runs started with a scratch srdwm config, which
+/// naturally does not set `button_style`, took the built-in default and
+/// wrote traffic-light CSS straight into the real
 /// `~/.config/gtk-3.0/srdwm-buttons.css` - silently changing the look of
 /// every GTK app in the actual session, from a throwaway compositor that
 /// was testing something unrelated.
-fn running_nested() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
+///
+/// Two things this must get right, both of which a bare "is WAYLAND_DISPLAY
+/// set" test gets wrong:
+///
+/// - It must be read *before* the backend binds its own socket. Both
+///   Wayland backends call `set_var("WAYLAND_DISPLAY", ...)` on themselves
+///   once they are up, so afterward even a real udev session looks nested.
+///   Call this once at startup and keep the answer.
+/// - Only the Wayland backend can nest. srdwm-x is the window manager of
+///   the X display it runs on, not a client of another compositor, so a set
+///   `DISPLAY` says nothing about it.
+fn running_nested(kind: PlatformKind) -> bool {
+    matches!(kind, PlatformKind::Wayland) && (std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some())
 }
 
 /// The stylesheet srdwm owns and rewrites, named so it is obvious in a
@@ -234,8 +243,8 @@ fn gtk_button_css(traffic_lights: bool) -> String {
 ///
 /// Best-effort: a missing directory or an unwritable file is logged at
 /// debug and skipped. srdwm's own titlebars are already correct regardless.
-fn publish_gtk_stylesheet(wm: &Rc<RefCell<WindowManager>>) {
-    if running_nested() {
+fn publish_gtk_stylesheet(wm: &Rc<RefCell<WindowManager>>, nested: bool) {
+    if nested {
         return;
     }
     let Ok(home) = std::env::var("HOME") else { return };
@@ -267,8 +276,8 @@ fn publish_gtk_stylesheet(wm: &Rc<RefCell<WindowManager>>) {
     }
 }
 
-fn publish_gtk_button_layout(wm: &Rc<RefCell<WindowManager>>) {
-    if running_nested() {
+fn publish_gtk_button_layout(wm: &Rc<RefCell<WindowManager>>, nested: bool) {
+    if nested {
         return;
     }
     let layout = if wm.borrow().theme.buttons_left { "close,minimize,maximize:" } else { ":minimize,maximize,close" };
@@ -959,8 +968,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // After `apply_general_settings`, which is what copies the config's
     // `button_side` into the theme - publishing before it would broadcast
     // the built-in default rather than the user's choice.
-    publish_gtk_button_layout(&wm);
-    publish_gtk_stylesheet(&wm);
+    // Read once, here, and carried to every later call: after the backend
+    // is up, `running_nested`'s own test can no longer answer honestly.
+    let nested = running_nested(kind);
+    publish_gtk_button_layout(&wm, nested);
+    publish_gtk_stylesheet(&wm, nested);
     apply_default_layout(&engine, &wm);
     let running = engine.running_flag();
     // `general.config_reload_on_write` - on by default. A programmable
@@ -1070,8 +1082,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     apply_general_settings(&engine, &wm);
                     publish_keybindings(&engine, &wm);
-                    publish_gtk_button_layout(&wm);
-    publish_gtk_stylesheet(&wm);
+                    publish_gtk_button_layout(&wm, nested);
+                    publish_gtk_stylesheet(&wm, nested);
                     // After `apply_general_settings`, which rebuilds the
                     // theme from the config file - see
                     // `WindowManager::live_settings` for why a hand-made
@@ -1096,8 +1108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             apply_general_settings(&engine, &wm);
             publish_keybindings(&engine, &wm);
-            publish_gtk_button_layout(&wm);
-    publish_gtk_stylesheet(&wm);
+            publish_gtk_button_layout(&wm, nested);
+            publish_gtk_stylesheet(&wm, nested);
             drop_live_settings_the_config_states(&engine, &wm);
             srdwm_platform::replay_live_settings(&wm);
             // After the reload, so a handler edited in the config since
@@ -1117,8 +1129,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         apply_general_settings(&engine, &wm);
                         publish_keybindings(&engine, &wm);
-                        publish_gtk_button_layout(&wm);
-    publish_gtk_stylesheet(&wm);
+                        publish_gtk_button_layout(&wm, nested);
+                        publish_gtk_stylesheet(&wm, nested);
                         drop_live_settings_the_config_states(&engine, &wm);
                         srdwm_platform::replay_live_settings(&wm);
                     } else if !engine.dispatch_keybinding(&combo) {
@@ -1229,6 +1241,16 @@ mod tests {
             let live = uncommented(&gtk_button_css(traffic_lights));
             assert!(live.contains(".solid-csd headerbar button.titlebutton"));
         }
+    }
+
+    /// srdwm-x is the window manager of the X display it runs on, not a
+    /// client of another compositor, so a set `DISPLAY` must not make it
+    /// look nested and stop it publishing the user's own settings.
+    #[test]
+    fn only_the_wayland_backend_can_be_nested() {
+        assert!(!running_nested(PlatformKind::X11));
+        assert!(!running_nested(PlatformKind::Windows));
+        assert!(!running_nested(PlatformKind::MacOS));
     }
 
     /// A `*/` inside a commented-out style would end the comment early and

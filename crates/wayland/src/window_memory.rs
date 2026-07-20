@@ -113,7 +113,19 @@ pub(crate) fn load() -> HashMap<String, PersistedGeometry> {
 /// story (the same reasoning `monitor_layout::save_output` and `desktop_
 /// icons_state`'s own saver already settled on for the identical shape of
 /// problem).
+///
+/// A nested srdwm never writes it. It shares `HOME` with the session it is
+/// running inside, so a window dragged around in a test compositor would
+/// otherwise overwrite where that same application opens in the user's real
+/// session - a 1280x800 test window's position applied to a 3840x1080
+/// desktop. Loading stays unconditional and deliberate (see `connect`'s own
+/// call site): honouring what a real session remembered is right, writing
+/// back over it is not. Same reasoning as `publish_gtk_stylesheet`'s own
+/// nested guard.
 pub(crate) fn save_all<'a>(entries: impl Iterator<Item = (&'a str, (i32, i32, u32, u32))>) {
+    if crate::running_nested() {
+        return;
+    }
     let apps: HashMap<String, PersistedGeometry> =
         entries.map(|(app_id, (x, y, width, height))| (app_id.to_string(), PersistedGeometry { x, y, width, height })).collect();
     let memory = PersistedWindowMemory { apps };

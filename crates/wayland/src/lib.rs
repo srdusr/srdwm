@@ -96,6 +96,31 @@ pub(crate) fn err(e: impl std::fmt::Display) -> PlatformError {
 /// nested-vs-native. Falls back to winit if udev initialization fails for
 /// any reason (no seat access, no DRM device, ...), logging why rather than
 /// failing outright.
+static NESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True when this srdwm runs nested inside another compositor's session --
+/// a window on someone else's desktop - rather than owning the machine's
+/// own outputs.
+///
+/// Anything that writes to the *user's own desktop configuration or state*
+/// must be gated on this. A nested instance is a test or development
+/// window: it shares `HOME` with the real session, but it is not the shell,
+/// and it has no business rewriting settings the real session is using.
+/// Learned twice - a nested run rewrote the real
+/// `~/.config/gtk-3.0/srdwm-buttons.css` from its scratch config's
+/// defaults, changing every GTK app's window buttons in the live session;
+/// and `window_memory::save_all` would do the same to where every
+/// application opens.
+///
+/// Recorded by `connect` at the moment the backend is chosen, and read
+/// afterward, because it cannot be re-derived later: both backends set
+/// `WAYLAND_DISPLAY` on themselves once they bind their own socket, so
+/// "is there a WAYLAND_DISPLAY" answers yes for a real udev session too
+/// the moment it is up.
+pub fn running_nested() -> bool {
+    NESTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn connect(wm: Rc<RefCell<WindowManager>>, bound_keys: &[String], repeat_keys: &[String]) -> PlatformResult<Box<dyn Platform>> {
     let no_host_display = std::env::var_os("WAYLAND_DISPLAY").is_none() && std::env::var_os("DISPLAY").is_none();
     if no_host_display {
@@ -104,5 +129,11 @@ pub fn connect(wm: Rc<RefCell<WindowManager>>, bound_keys: &[String], repeat_key
             Err(e) => log::warn!("udev/DRM backend unavailable ({e}); falling back to nested winit backend"),
         }
     }
+    // Only the winit backend is reached from here, and it is reached only
+    // when there is a host session to nest inside - either one was found
+    // above, or udev failed and this is a fallback into someone else's
+    // session. Set before `WaylandPlatform::connect`, which binds a socket
+    // and overwrites `WAYLAND_DISPLAY` with its own.
+    NESTED.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(Box::new(WaylandPlatform::connect(wm, bound_keys, repeat_keys)?))
 }
