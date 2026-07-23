@@ -89,6 +89,24 @@ impl CompositorHandler for CompState {
             // own first real size a chance to adopt it from what `on_commit`
             // just recomputed, rather than keep rendering/configuring
             // against the guessed placeholder for one more round-trip.
+            // The first commit that actually carries a buffer is when this
+            // window becomes visible, so it is also when the open-slide
+            // should start - see `windows_shown_once`. Registered here
+            // rather than in `new_managed_window` because a role is created
+            // well before a client paints (measured at ~800ms for a cold
+            // terminal), which is long enough for the whole tween to finish
+            // against an empty frame and for the window to simply appear,
+            // already at rest, with no animation at all.
+            if !self.windows_shown_once.contains(&id) && self.window_has_content(id) {
+                self.windows_shown_once.insert(id);
+                let mut wm = self.wm.borrow_mut();
+                if wm.animations_enabled {
+                    if let Some(win) = wm.window_mut(id) {
+                        let g = win.geometry;
+                        win.anim_from = Some(srdwm_core::Rect { y: g.y + crate::state::OPEN_SLIDE_OFFSET, ..g });
+                    }
+                }
+            }
             self.adopt_provisional_size(id);
             // See `content_epoch`'s doc comment: this is the only per-commit
             // signal the udev backend's rounded-corner mask cache has to

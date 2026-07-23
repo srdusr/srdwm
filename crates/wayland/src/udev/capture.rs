@@ -69,6 +69,11 @@ impl CompState {
         let Some(udev) = self.udev.as_mut() else { return Err("no udev backend".to_string()) };
         let mut elements: Vec<crate::elements::OverlayElement<PixmanRenderer>> = Vec::new();
         for id in ids {
+            // Matches the render loops: a capture must not show a frame the
+            // screen does not (see `window_has_content`).
+            if !Self::has_content(&self.windows_shown_once, &self.id_to_window, id) {
+                continue;
+            }
             let Some(w) = self.id_to_window.get(&id) else { continue };
             let Some(surface) = crate::input::dwindow_wl_surface(w) else { continue };
             let Some(geom) = self.wm.borrow().window(id).map(|w| w.geometry) else { continue };

@@ -461,6 +461,27 @@ pub(crate) struct CompState {
     /// this set is ever consulted, so a surface only reaches the unmap path
     /// once it has legitimately shown something.
     pub(crate) layer_surfaces_shown_once: HashSet<WlSurface>,
+    /// Windows whose surface has committed a buffer at least once.
+    ///
+    /// A toplevel exists, and is placed and decorated, from the moment its
+    /// role is created - which is well before the client has drawn
+    /// anything. Rendering it at that point paints a border and a titlebar
+    /// around empty desktop: an empty frame stands there on its own, then
+    /// snaps to a different size once the real buffer arrives and the
+    /// guessed `800x600` placeholder (`Window::size_is_provisional`) is
+    /// replaced. Measured in a nested session: the frame was drawn ~800ms
+    /// before any content, one full `TITLEBAR_HEIGHT` too tall, which is
+    /// what "the border corners look funny before a window spawns" is.
+    ///
+    /// So this gates two things: nothing is drawn for a window that has
+    /// never had a buffer, and the open-slide starts at the first buffer
+    /// rather than at role creation, so the animation plays where it can
+    /// actually be seen instead of finishing against an empty frame.
+    ///
+    /// Same shape, and the same reason, as `layer_surfaces_shown_once`
+    /// above: a window that has legitimately shown something once is never
+    /// hidden again by this, however its buffer state changes afterward.
+    pub(crate) windows_shown_once: HashSet<WindowId>,
     pub(crate) decorations: HashMap<WindowId, MemoryRenderBuffer>,
     /// The top border strip's rounded-corner bitmap, cached the same way
     /// and at the same trigger points as `decorations` (built in
@@ -787,7 +808,7 @@ impl WindowAnim {
 /// resize tween is reserved for maximize/fullscreen, where the client is
 /// already live and redrawing, not for a window whose first paint may not
 /// have arrived yet).
-const OPEN_SLIDE_OFFSET: i32 = 24;
+pub(crate) const OPEN_SLIDE_OFFSET: i32 = 24;
 
 /// A held keybinding that is firing repeatedly.
 ///

@@ -98,6 +98,11 @@ impl WaylandPlatform {
         let mut occluders: Vec<srdwm_core::Rect> = Vec::new();
         let focused = self.wm.borrow().focused_id();
         for id in self.wm.borrow().visible_windows_front_to_back().map(|w| w.id).collect::<Vec<_>>() {
+            // Matches the render loops: a capture must not show a frame the
+            // screen does not (see `window_has_content`).
+            if !crate::state::CompState::has_content(&self.state.windows_shown_once, &self.state.id_to_window, id) {
+                continue;
+            }
             let Some(w) = self.wm.borrow().window(id).cloned() else { continue };
             if let Some(deco) = self.state.decorations.get(&id) {
                 if let Ok(elem) = MemoryRenderBufferRenderElement::from_buffer(renderer, (w.geometry.x as f64, w.geometry.y as f64), deco, None, None, None, Kind::Unspecified) {

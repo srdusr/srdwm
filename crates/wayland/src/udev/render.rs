@@ -303,6 +303,14 @@ impl CompState {
                     let mut elements: Vec<crate::elements::OverlayElement<smithay::backend::renderer::gles::GlesRenderer>> =
                         crate::cursor::render_elements(&cursor_status, &cursor_buffers, &mut gpu.renderer, udev.pointer_pos, origin, udev.heads[index].size);
                     for &id in &ids {
+                        // Nothing is drawn for a window that has never committed a
+                        // buffer - otherwise its border, titlebar and shadow
+                        // stand around empty desktop until the client paints,
+                        // then jump when the placeholder size is replaced. See
+                        // `window_has_content`.
+                        if !Self::has_content(&self.windows_shown_once, &self.id_to_window, id) {
+                            continue;
+                        }
                         let Some(w) = self.wm.borrow().window(id).cloned() else { continue };
                         let Some(dwindow) = self.id_to_window.get(&id) else { continue };
                         let Some(surface) = crate::elements::window_wl_surface(dwindow) else { continue };
@@ -541,6 +549,11 @@ impl CompState {
                 // window is stacked in front.
                 let mut occluders: Vec<srdwm_core::Rect> = Vec::with_capacity(ids.len());
                 for &id in &ids {
+                    // See the GPU loop above: a window with no buffer yet has
+                    // nothing for a frame to go around.
+                    if !Self::has_content(&self.windows_shown_once, &self.id_to_window, id) {
+                        continue;
+                    }
                     let Some(w) = self.wm.borrow().window(id).cloned() else { continue };
                     // `w.geometry` is the animation's *target*, not
                     // necessarily where the window is actually drawn this

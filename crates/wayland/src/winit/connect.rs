@@ -168,6 +168,7 @@ impl WaylandPlatform {
             dead_layer_surfaces: HashSet::new(),
             hidden_layer_surfaces: HashMap::new(),
             layer_surfaces_shown_once: HashSet::new(),
+            windows_shown_once: HashSet::new(),
             decorations: HashMap::new(),
             border_top_decorations: HashMap::new(),
             border_bottom_decorations: HashMap::new(),

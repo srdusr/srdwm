@@ -19,18 +19,13 @@ impl CompState {
             if wm.window(id).is_some_and(|w| w.size_is_provisional) {
                 self.provisional_size.insert(id);
             }
-            // Starts the open-slide tween (see `WindowAnim`'s doc comment):
-            // the window's first `sync_geometry` call below will see this,
-            // register the tween, and place it here - a few pixels below
-            // its resting position - rather than jumping straight to
-            // `geometry`. Same size throughout, so no extra client configure
-            // is needed for the tween itself.
-            if wm.animations_enabled {
-                if let Some(win) = wm.window_mut(id) {
-                    let g = win.geometry;
-                    win.anim_from = Some(srdwm_core::Rect { y: g.y + OPEN_SLIDE_OFFSET, ..g });
-                }
-            }
+            // The open-slide tween is NOT started here, deliberately.
+            // A toplevel role exists well before its client paints
+            // anything, so starting it here ran the animation against an
+            // empty frame and left the window simply appearing, already at
+            // rest. `CompositorHandler::commit` starts it at the first
+            // commit that carries a buffer instead - see
+            // `windows_shown_once`.
             id
         };
 
@@ -383,6 +378,7 @@ impl CompState {
         self.shadow_buffers.remove(&id);
         self.border_side_buffers.remove(&id);
         self.decoration_signatures.remove(&id);
+        self.windows_shown_once.remove(&id);
         self.last_synced_size.remove(&id);
         self.content_epoch.remove(&id);
         self.rounded_content_buffers.remove(&id);

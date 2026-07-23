@@ -314,6 +314,41 @@ impl CompState {
         (x, y)
     }
 
+    /// True when this window has something on screen to draw a frame
+    /// around - it has committed a buffer at least once.
+    ///
+    /// A toplevel is placed and decorated the moment its role is created,
+    /// which is well before the client paints. Drawing it then puts a
+    /// border, a titlebar and a shadow around bare desktop, at the guessed
+    /// placeholder size (`Window::size_is_provisional`), and that empty
+    /// frame then jumps when the real buffer arrives at the real size.
+    ///
+    /// A window that cannot be resolved to a surface at all counts as
+    /// drawable, deliberately: this hides a window only on positive
+    /// evidence that it has never drawn, so nothing whose surface plumbing
+    /// works differently (an XWayland window, say) can be hidden by a
+    /// lookup that simply did not apply to it.
+    ///
+    /// See `windows_shown_once` for why the answer latches once true.
+    ///
+    /// Takes the two maps rather than `&self` so a render loop can call it
+    /// while it already holds `self.udev` mutably borrowed.
+    pub(crate) fn has_content(shown_once: &HashSet<WindowId>, id_to_window: &HashMap<WindowId, DWindow>, id: WindowId) -> bool {
+        if shown_once.contains(&id) {
+            return true;
+        }
+        let Some(surface) = id_to_window.get(&id).and_then(crate::elements::window_wl_surface) else { return true };
+        smithay::backend::renderer::utils::with_renderer_surface_state(
+            &surface,
+            |state: &mut smithay::backend::renderer::utils::RendererSurfaceState| state.buffer().is_some(),
+        )
+        .unwrap_or(false)
+    }
+
+    pub(crate) fn window_has_content(&self, id: WindowId) -> bool {
+        Self::has_content(&self.windows_shown_once, &self.id_to_window, id)
+    }
+
     pub(crate) fn effective_frame(&self, id: WindowId, geom: srdwm_core::Rect) -> srdwm_core::Rect {
         Self::effective_frame_of(&self.wm, &self.id_to_window, &self.pending_size_configure, id, geom)
     }

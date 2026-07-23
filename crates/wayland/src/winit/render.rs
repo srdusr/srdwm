@@ -236,6 +236,10 @@ impl WaylandPlatform {
         let monitor_bounds: Vec<srdwm_core::Rect> = self.wm.borrow().monitors().iter().map(|m| m.full_geometry).collect();
         let mut occluders: Vec<srdwm_core::Rect> = Vec::with_capacity(ids.len());
         for id in ids {
+            // See `window_has_content`: no buffer yet means no frame yet.
+            if !crate::state::CompState::has_content(&self.state.windows_shown_once, &self.state.id_to_window, id) {
+                continue;
+            }
             let Some(w) = self.wm.borrow().window(id).cloned() else { continue };
             // `w.geometry` is the animation's target, not necessarily where
             // the window is actually drawn this frame - see the matching
