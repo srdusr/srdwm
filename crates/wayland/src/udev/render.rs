@@ -315,10 +315,17 @@ impl CompState {
                         let Some(dwindow) = self.id_to_window.get(&id) else { continue };
                         let Some(surface) = crate::elements::window_wl_surface(dwindow) else { continue };
                         let geom = self.window_anims.get(&id).map(crate::state::WindowAnim::current_rect).unwrap_or(w.geometry);
+                        // Content is positioned from `frame`, not `geom`, for
+                        // the same reason as the Pixman loop's own content
+                        // push below: `geom` is the live drag target and
+                        // moves a frame ahead of the client, so content drawn
+                        // from it slides out from under the decoration drawn
+                        // around it.
+                        let frame = crate::state::CompState::effective_frame_of(&self.wm, &self.id_to_window, &self.pending_size_configure, id, geom);
                         let band = if w.decorated { srdwm_core::TITLEBAR_HEIGHT as i32 } else { 0 };
                         let raw_offset = dwindow.geometry().loc;
                         let content_offset = Point::<i32, Logical>::from((raw_offset.x.max(0), raw_offset.y.max(0)));
-                        let pos = (geom.x - origin.x - content_offset.x, geom.y + band - origin.y - content_offset.y);
+                        let pos = (frame.x - origin.x - content_offset.x, frame.y + band - origin.y - content_offset.y);
                         elements.extend(crate::elements::surface_content_elements(&mut gpu.renderer, &surface, pos, w.opacity));
                         // Border strips (top/bottom) and the titlebar bitmap,
                         // reusing the exact same cached `MemoryRenderBuffer`s
@@ -1005,7 +1012,22 @@ impl CompState {
                             // exactly on this same real content top-left --
                             // the margin has already been compensated for
                             // once, inside the buffer itself.
-                            let content_pos = (geom.x - origin.x, geom.y + band - origin.y);
+                            // `frame`, not `geom`: `geom` is the live drag
+                            // target, which moves with the pointer on the
+                            // very frame the pointer moves, while every
+                            // decoration around it is drawn from `frame` --
+                            // the committed size anchored to the edge the
+                            // drag is not holding. Drawing content from one
+                            // and its frame from the other is what made a
+                            // titlebar look detached from its own window
+                            // while resizing, and made dragging a left edge
+                            // look like it moved the right one: the stale
+                            // buffer slid left with the pointer, carrying
+                            // its old width, while the border stayed put.
+                            // Outside a resize the two are identical --
+                            // `committed_frame` only ever corrects the far
+                            // edge - so this changes nothing else.
+                            let content_pos = (frame.x - origin.x, frame.y + band - origin.y);
                             // Only for the *fallback* path below
                             // (`surface_content_elements`, pushed when
                             // masking is off or fails): that renders the

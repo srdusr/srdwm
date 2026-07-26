@@ -489,7 +489,12 @@ impl WaylandPlatform {
                     // shift content away from the border instead of into it.
                     let raw_offset = dwindow.geometry().loc;
                     let content_offset = smithay::utils::Point::<i32, smithay::utils::Logical>::from((raw_offset.x.max(0), raw_offset.y.max(0)));
-                    let pos = (geom.x - content_offset.x, geom.y + band - content_offset.y);
+                    // `frame`, not `geom` - see the matching comment in
+                    // `udev/render.rs`'s own content push: content and the
+                    // decoration around it have to come from the same rect,
+                    // or they visibly disagree for as long as a resize drag
+                    // is ahead of the client.
+                    let pos = (frame.x - content_offset.x, frame.y + band - content_offset.y);
                     let rounded = rounded_corners_enabled.then_some(self.state.rounded_corners_program.as_ref()).flatten().and_then(|program| {
                         let corners = if w.decorated { crate::rounded_corners::RoundedCorners::BOTTOM_ONLY } else { crate::rounded_corners::RoundedCorners::ALL };
                         crate::rounded_corners::rounded_content_element(renderer, program, &surface, pos, w.opacity, w.corner_radius as f32, corners)
