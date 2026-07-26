@@ -237,7 +237,7 @@ impl WaylandPlatform {
         let mut occluders: Vec<srdwm_core::Rect> = Vec::with_capacity(ids.len());
         for id in ids {
             // See `window_has_content`: no buffer yet means no frame yet.
-            if !crate::state::CompState::has_content(&self.state.windows_shown_once, &self.state.id_to_window, id) {
+            if !crate::state::CompState::has_content(&self.state.awaiting_first_buffer, id) {
                 continue;
             }
             let Some(w) = self.wm.borrow().window(id).cloned() else { continue };

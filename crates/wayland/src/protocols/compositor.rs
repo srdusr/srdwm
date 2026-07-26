@@ -91,14 +91,14 @@ impl CompositorHandler for CompState {
             // against the guessed placeholder for one more round-trip.
             // The first commit that actually carries a buffer is when this
             // window becomes visible, so it is also when the open-slide
-            // should start - see `windows_shown_once`. Registered here
+            // should start - see `awaiting_first_buffer`. Registered here
             // rather than in `new_managed_window` because a role is created
             // well before a client paints (measured at ~800ms for a cold
             // terminal), which is long enough for the whole tween to finish
             // against an empty frame and for the window to simply appear,
             // already at rest, with no animation at all.
-            if !self.windows_shown_once.contains(&id) && self.window_has_content(id) {
-                self.windows_shown_once.insert(id);
+            if self.awaiting_first_buffer.contains(&id) && self.surface_has_buffer(id) {
+                self.awaiting_first_buffer.remove(&id);
                 let mut wm = self.wm.borrow_mut();
                 if wm.animations_enabled {
                     if let Some(win) = wm.window_mut(id) {

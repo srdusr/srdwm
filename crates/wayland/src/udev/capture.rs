@@ -71,7 +71,7 @@ impl CompState {
         for id in ids {
             // Matches the render loops: a capture must not show a frame the
             // screen does not (see `window_has_content`).
-            if !Self::has_content(&self.windows_shown_once, &self.id_to_window, id) {
+            if !Self::has_content(&self.awaiting_first_buffer, id) {
                 continue;
             }
             let Some(w) = self.id_to_window.get(&id) else { continue };

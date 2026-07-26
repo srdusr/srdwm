@@ -461,27 +461,36 @@ pub(crate) struct CompState {
     /// this set is ever consulted, so a surface only reaches the unmap path
     /// once it has legitimately shown something.
     pub(crate) layer_surfaces_shown_once: HashSet<WlSurface>,
-    /// Windows whose surface has committed a buffer at least once.
+    /// Native Wayland toplevels that srdwm has created but whose client
+    /// has not yet drawn anything.
     ///
-    /// A toplevel exists, and is placed and decorated, from the moment its
-    /// role is created - which is well before the client has drawn
-    /// anything. Rendering it at that point paints a border and a titlebar
-    /// around empty desktop: an empty frame stands there on its own, then
-    /// snaps to a different size once the real buffer arrives and the
-    /// guessed `800x600` placeholder (`Window::size_is_provisional`) is
-    /// replaced. Measured in a nested session: the frame was drawn ~800ms
-    /// before any content, one full `TITLEBAR_HEIGHT` too tall, which is
-    /// what "the border corners look funny before a window spawns" is.
+    /// A toplevel is placed and decorated from the moment its role is
+    /// created, which is well before the client paints. Rendering it then
+    /// paints a border and a titlebar around empty desktop: an empty frame
+    /// stands there on its own, then snaps to a different size once the
+    /// real buffer arrives and the guessed `800x600` placeholder
+    /// (`Window::size_is_provisional`) is replaced. Measured in a nested
+    /// session: ~800ms of empty frame, one full `TITLEBAR_HEIGHT` too tall.
     ///
-    /// So this gates two things: nothing is drawn for a window that has
-    /// never had a buffer, and the open-slide starts at the first buffer
-    /// rather than at role creation, so the animation plays where it can
-    /// actually be seen instead of finishing against an empty frame.
+    /// This gates two things: nothing is drawn for a window still in this
+    /// set, and the open-slide starts when a window leaves it, so the
+    /// animation plays where it can be seen instead of finishing against
+    /// an empty frame.
     ///
-    /// Same shape, and the same reason, as `layer_surfaces_shown_once`
-    /// above: a window that has legitimately shown something once is never
-    /// hidden again by this, however its buffer state changes afterward.
-    pub(crate) windows_shown_once: HashSet<WindowId>,
+    /// Membership is the fail-safe direction, and that is the whole point
+    /// of the design. A window is hidden only when srdwm itself put it
+    /// here - `new_managed_window`, the one path that creates a native
+    /// toplevel - and `CompositorHandler::commit` takes it out again on
+    /// the first commit that carries a buffer. Nothing else can ever land
+    /// in it, so no window whose plumbing works differently can be hidden
+    /// by a lookup that did not apply to it. The first version of this
+    /// asked the renderer "does this surface have a buffer right now" from
+    /// inside the render loop, defaulting to hidden when the answer was
+    /// no; an XWayland window, whose surface state that lookup does not
+    /// describe, went invisible in the owner's live session while staying
+    /// clickable - reported as "I can click close where the button would
+    /// be and it does close, but it is still invisible".
+    pub(crate) awaiting_first_buffer: HashSet<WindowId>,
     pub(crate) decorations: HashMap<WindowId, MemoryRenderBuffer>,
     /// The top border strip's rounded-corner bitmap, cached the same way
     /// and at the same trigger points as `decorations` (built in

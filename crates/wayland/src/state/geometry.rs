@@ -315,38 +315,30 @@ impl CompState {
     }
 
     /// True when this window has something on screen to draw a frame
-    /// around - it has committed a buffer at least once.
+    /// around, i.e. its client has painted at least once.
     ///
-    /// A toplevel is placed and decorated the moment its role is created,
-    /// which is well before the client paints. Drawing it then puts a
-    /// border, a titlebar and a shadow around bare desktop, at the guessed
-    /// placeholder size (`Window::size_is_provisional`), and that empty
-    /// frame then jumps when the real buffer arrives at the real size.
+    /// Reads one set and nothing else - see `awaiting_first_buffer` for
+    /// why the answer must never depend on a lookup that can fail. Takes
+    /// the set rather than `&self` so a render loop can call it while it
+    /// already holds `self.udev` mutably borrowed.
+    pub(crate) fn has_content(awaiting_first_buffer: &HashSet<WindowId>, id: WindowId) -> bool {
+        !awaiting_first_buffer.contains(&id)
+    }
+
+    /// Whether this window's own surface has a buffer attached right now.
     ///
-    /// A window that cannot be resolved to a surface at all counts as
-    /// drawable, deliberately: this hides a window only on positive
-    /// evidence that it has never drawn, so nothing whose surface plumbing
-    /// works differently (an XWayland window, say) can be hidden by a
-    /// lookup that simply did not apply to it.
-    ///
-    /// See `windows_shown_once` for why the answer latches once true.
-    ///
-    /// Takes the two maps rather than `&self` so a render loop can call it
-    /// while it already holds `self.udev` mutably borrowed.
-    pub(crate) fn has_content(shown_once: &HashSet<WindowId>, id_to_window: &HashMap<WindowId, DWindow>, id: WindowId) -> bool {
-        if shown_once.contains(&id) {
-            return true;
-        }
-        let Some(surface) = id_to_window.get(&id).and_then(crate::elements::window_wl_surface) else { return true };
+    /// Only `CompositorHandler::commit` asks this, about a surface it was
+    /// just handed, to decide whether a window can stop
+    /// `awaiting_first_buffer`. Nothing on the render path may ask it: a
+    /// window whose surface state this does not describe would answer
+    /// "no" and be hidden for ever.
+    pub(crate) fn surface_has_buffer(&self, id: WindowId) -> bool {
+        let Some(surface) = self.id_to_window.get(&id).and_then(crate::elements::window_wl_surface) else { return false };
         smithay::backend::renderer::utils::with_renderer_surface_state(
             &surface,
             |state: &mut smithay::backend::renderer::utils::RendererSurfaceState| state.buffer().is_some(),
         )
         .unwrap_or(false)
-    }
-
-    pub(crate) fn window_has_content(&self, id: WindowId) -> bool {
-        Self::has_content(&self.windows_shown_once, &self.id_to_window, id)
     }
 
     pub(crate) fn effective_frame(&self, id: WindowId, geom: srdwm_core::Rect) -> srdwm_core::Rect {

@@ -308,7 +308,7 @@ impl CompState {
                         // stand around empty desktop until the client paints,
                         // then jump when the placeholder size is replaced. See
                         // `window_has_content`.
-                        if !Self::has_content(&self.windows_shown_once, &self.id_to_window, id) {
+                        if !Self::has_content(&self.awaiting_first_buffer, id) {
                             continue;
                         }
                         let Some(w) = self.wm.borrow().window(id).cloned() else { continue };
@@ -558,7 +558,7 @@ impl CompState {
                 for &id in &ids {
                     // See the GPU loop above: a window with no buffer yet has
                     // nothing for a frame to go around.
-                    if !Self::has_content(&self.windows_shown_once, &self.id_to_window, id) {
+                    if !Self::has_content(&self.awaiting_first_buffer, id) {
                         continue;
                     }
                     let Some(w) = self.wm.borrow().window(id).cloned() else { continue };

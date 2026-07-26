@@ -19,13 +19,15 @@ impl CompState {
             if wm.window(id).is_some_and(|w| w.size_is_provisional) {
                 self.provisional_size.insert(id);
             }
-            // The open-slide tween is NOT started here, deliberately.
-            // A toplevel role exists well before its client paints
-            // anything, so starting it here ran the animation against an
-            // empty frame and left the window simply appearing, already at
-            // rest. `CompositorHandler::commit` starts it at the first
-            // commit that carries a buffer instead - see
-            // `windows_shown_once`.
+            // Nothing is drawn for this window until its client paints,
+            // and the open-slide tween starts then rather than here - a
+            // toplevel role exists well before a client's first buffer, so
+            // starting the animation here ran it against an empty frame and
+            // left the window simply appearing, already at rest.
+            // `CompositorHandler::commit` does both. This is the only place
+            // anything is ever put into `awaiting_first_buffer`; see that
+            // field for why that matters.
+            self.awaiting_first_buffer.insert(id);
             id
         };
 
@@ -378,7 +380,7 @@ impl CompState {
         self.shadow_buffers.remove(&id);
         self.border_side_buffers.remove(&id);
         self.decoration_signatures.remove(&id);
-        self.windows_shown_once.remove(&id);
+        self.awaiting_first_buffer.remove(&id);
         self.last_synced_size.remove(&id);
         self.content_epoch.remove(&id);
         self.rounded_content_buffers.remove(&id);
