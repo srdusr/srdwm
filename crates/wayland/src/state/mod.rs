@@ -173,6 +173,12 @@ pub(crate) struct CompState {
     pub(crate) compositor_state: CompositorState,
     pub(crate) xdg_shell_state: XdgShellState,
     pub(crate) _xdg_decoration_state: XdgDecorationState,
+    /// KDE's older decoration protocol - see `protocols/kde_decoration.rs`
+    /// for why it is advertised alongside `xdg-decoration` rather than
+    /// instead of it. Read by `KdeDecorationHandler`, so unlike the
+    /// xdg-decoration state above this one is not an underscore-prefixed
+    /// keep-alive.
+    pub(crate) kde_decoration_state: smithay::wayland::shell::kde::decoration::KdeDecorationState,
     pub(crate) shm_state: ShmState,
     /// `zwp_linux_dmabuf_v1` - see `protocols.rs`'s `DmabufHandler` impl.
     /// Without this global, no client can hand the compositor a GPU buffer

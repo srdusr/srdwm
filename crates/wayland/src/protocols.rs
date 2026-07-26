@@ -23,6 +23,7 @@ mod misc;
 mod seat;
 mod selection;
 mod xdg_activation;
+mod kde_decoration;
 mod xdg_decoration;
 mod xdg_shell;
 

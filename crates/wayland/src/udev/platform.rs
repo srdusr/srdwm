@@ -178,6 +178,14 @@ impl UdevPlatform {
             compositor_state,
             xdg_shell_state,
             _xdg_decoration_state: xdg_decoration_state,
+            // Default mode advertised before a client creates a decoration
+            // object at all - see `protocols/kde_decoration.rs`. Server,
+            // so a GTK application that reads only this protocol is told
+            // srdwm decorates, which is the whole point of advertising it.
+            kde_decoration_state: smithay::wayland::shell::kde::decoration::KdeDecorationState::new::<CompState>(
+                &display_handle,
+                smithay::reexports::wayland_protocols_misc::server_decoration::server::org_kde_kwin_server_decoration_manager::Mode::Server,
+            ),
             shm_state,
             dmabuf_state,
             xdg_activation_state: XdgActivationState::new::<CompState>(&display_handle),

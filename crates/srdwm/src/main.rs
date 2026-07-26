@@ -164,22 +164,43 @@ const GTK_STYLE_FILE: &str = "srdwm-buttons.css";
 /// gives the user's own rules the last word, since later rules win.
 const GTK_STYLE_IMPORT: &str = "@import url(\"srdwm-buttons.css\");";
 
-/// The CSS for one button style, without the shared reset in `GTK_BUTTON_BASE`.
+/// The selectors a toolkit puts its window buttons under.
 ///
-/// Every style is generated into the stylesheet on every write. Exactly one is
-/// live and the rest are commented out, so the file doubles as the menu of
-/// what `button_style` can be: you can see what each one would do, and read
-/// the rules rather than guess at them.
+/// GTK3 and GTK4 disagree, and a stylesheet that names only one silently
+/// does nothing for half the applications on the desktop. Measured, not
+/// assumed: a diagnostic rule that turned the buttons a flat colour
+/// reached Nemo (GTK3) through `headerbar button.titlebutton` and
+/// gnome-calculator (GTK4) through `windowcontrols button`, and neither
+/// selector reached the other. `headerbar` itself works in both, so the
+/// titlebar block above needs no such split.
+///
+/// Both are always written. A toolkit ignores a selector whose node it
+/// does not have, so naming both costs a few lines and covers both.
+const GTK_BUTTON_SELECTORS: [&str; 2] = ["headerbar button.titlebutton", "windowcontrols button"];
+
+/// The CSS for one button style, as a template over `{sel}` - one of
+/// `GTK_BUTTON_SELECTORS`.
+///
+/// Every style is generated into the stylesheet on every write. Exactly one
+/// is live and the rest are commented out, so the file doubles as the menu
+/// of what `button_style` can be: you can see what each one would do, and
+/// read the rules rather than guess at them.
 const GTK_BUTTON_STYLES: [(&str, &str); 2] = [
     (
         "traditional",
-        "headerbar button.titlebutton {\n  min-width: 24px;\n  min-height: 24px;\n  border-radius: 4px;\n}\n\nheaderbar button.titlebutton > image {\n  opacity: 1;\n}\n\nheaderbar button.titlebutton.close {\n  background-image: -gtk-icontheme(\"window-close-symbolic\");\n  background-repeat: no-repeat;\n  background-position: center;\n  background-size: 16px 16px;\n}\n\nheaderbar button.titlebutton.minimize {\n  background-image: -gtk-icontheme(\"window-minimize-symbolic\");\n  background-repeat: no-repeat;\n  background-position: center;\n  background-size: 16px 16px;\n}\n\nheaderbar button.titlebutton.maximize {\n  background-image: -gtk-icontheme(\"window-maximize-symbolic\");\n  background-repeat: no-repeat;\n  background-position: center;\n  background-size: 16px 16px;\n}\n\nheaderbar button.titlebutton:hover {\n  background-color: alpha(currentColor, 0.14);\n}\n\nheaderbar button.titlebutton:active {\n  background-color: alpha(currentColor, 0.22);\n}\n",
+        "{sel} {\n  min-width: 24px;\n  min-height: 24px;\n  border-radius: 4px;\n}\n\n{sel} > image {\n  opacity: 1;\n}\n\n{sel}.close {\n  background-image: -gtk-icontheme(\"window-close-symbolic\");\n  background-repeat: no-repeat;\n  background-position: center;\n  background-size: 16px 16px;\n}\n\n{sel}.minimize {\n  background-image: -gtk-icontheme(\"window-minimize-symbolic\");\n  background-repeat: no-repeat;\n  background-position: center;\n  background-size: 16px 16px;\n}\n\n{sel}.maximize {\n  background-image: -gtk-icontheme(\"window-maximize-symbolic\");\n  background-repeat: no-repeat;\n  background-position: center;\n  background-size: 16px 16px;\n}\n\n{sel}:hover {\n  background-color: alpha(currentColor, 0.14);\n}\n\n{sel}:active {\n  background-color: alpha(currentColor, 0.22);\n}\n",
     ),
     (
         "traffic_lights",
-        "headerbar button.titlebutton {\n  min-width: 13px;\n  min-height: 13px;\n  border-radius: 9999px;\n}\n\nheaderbar button.titlebutton > image {\n  opacity: 0;\n}\n\nheaderbar button.titlebutton.close {\n  background-image: radial-gradient(circle at 32% 28%, #ffb3ad 0%, #ff5f57 42%, #dd4b43 100%);\n}\n\nheaderbar button.titlebutton.minimize {\n  background-image: radial-gradient(circle at 32% 28%, #ffe2a8 0%, #ffbd2e 42%, #dba024 100%);\n}\n\nheaderbar button.titlebutton.maximize {\n  background-image: radial-gradient(circle at 32% 28%, #9df0a6 0%, #28c840 42%, #1f9f34 100%);\n}\n\nheaderbar button.titlebutton:hover {\n  filter: brightness(1.12);\n}\n\nheaderbar button.titlebutton:active {\n  filter: brightness(0.9);\n}\n",
+        "{sel} {\n  min-width: 13px;\n  min-height: 13px;\n  border-radius: 9999px;\n}\n\n{sel} > image {\n  opacity: 0;\n}\n\n{sel}.close {\n  background-image: radial-gradient(circle at 32% 28%, #ffb3ad 0%, #ff5f57 42%, #dd4b43 100%);\n}\n\n{sel}.minimize {\n  background-image: radial-gradient(circle at 32% 28%, #ffe2a8 0%, #ffbd2e 42%, #dba024 100%);\n}\n\n{sel}.maximize {\n  background-image: radial-gradient(circle at 32% 28%, #9df0a6 0%, #28c840 42%, #1f9f34 100%);\n}\n\n{sel}:hover {\n  filter: brightness(1.12);\n}\n\n{sel}:active {\n  filter: brightness(0.9);\n}\n",
     ),
 ];
+
+/// One style's rules, written out once for every selector a toolkit might
+/// use.
+fn button_style_rules(template: &str) -> String {
+    GTK_BUTTON_SELECTORS.iter().map(|sel| template.replace("{sel}", sel)).collect()
+}
 
 /// The reset every style starts from.
 ///
@@ -188,7 +209,14 @@ const GTK_BUTTON_STYLES: [(&str, &str); 2] = [
 /// `image` widget. Clearing that background is what leaves a button with
 /// nothing drawn in it at all, so each style sets a background of its own
 /// rather than relying on un-hiding something underneath.
-const GTK_BUTTON_BASE: &str = "headerbar button.titlebutton,\n.solid-csd headerbar button.titlebutton {\n  background-image: none;\n  background-color: transparent;\n  border: none;\n  box-shadow: none;\n  padding: 0;\n}\n\n";
+fn gtk_button_base() -> String {
+    let mut selectors: Vec<String> = Vec::new();
+    for sel in GTK_BUTTON_SELECTORS {
+        selectors.push(sel.to_string());
+        selectors.push(format!(".solid-csd {sel}"));
+    }
+    format!("{} {{\n  background-image: none;\n  background-color: transparent;\n  border: none;\n  box-shadow: none;\n  padding: 0;\n}}\n\n", selectors.join(",\n"))
+}
 
 /// The generated stylesheet body for the configured button style.
 ///
@@ -253,8 +281,9 @@ fn gtk_titlebar_css(look: &TitlebarLook) -> String {
     if !look.title_centered {
         out.push_str("headerbar .title {\n  margin-left: 0;\n}\n\n");
     }
-    out.push_str(GTK_BUTTON_BASE);
-    for (name, body) in GTK_BUTTON_STYLES {
+    out.push_str(&gtk_button_base());
+    for (name, template) in GTK_BUTTON_STYLES {
+        let body = button_style_rules(template);
         if name == active {
             out.push_str(&format!("/* button_style = \"{name}\" - in use */\n\n{body}\n"));
         } else {
@@ -1294,6 +1323,7 @@ mod tests {
         for traffic_lights in [true, false] {
             let live = uncommented(&gtk_titlebar_css(&look(traffic_lights)));
             assert!(live.contains(".solid-csd headerbar button.titlebutton"));
+            assert!(live.contains(".solid-csd windowcontrols button"));
         }
     }
 
@@ -1332,6 +1362,20 @@ mod tests {
         }
     }
 
+    /// GTK3 and GTK4 put their window buttons under different selectors,
+    /// and a stylesheet naming only one silently does nothing for half the
+    /// applications on the desktop.
+    #[test]
+    fn every_style_is_written_for_both_toolkits() {
+        for traffic_lights in [true, false] {
+            let live = uncommented(&gtk_titlebar_css(&look(traffic_lights)));
+            for sel in GTK_BUTTON_SELECTORS {
+                assert!(live.contains(&format!("{sel}.close")), "no close rule for {sel}");
+                assert!(live.contains(&format!("{sel}:hover")), "no hover rule for {sel}");
+            }
+        }
+    }
+
     /// srdwm-x is the window manager of the X display it runs on, not a
     /// client of another compositor, so a set `DISPLAY` must not make it
     /// look nested and stop it publishing the user's own settings.
@@ -1346,8 +1390,8 @@ mod tests {
     /// leave that style's rules live alongside the configured one.
     #[test]
     fn no_style_body_can_terminate_the_comment_that_hides_it() {
-        for (_, body) in GTK_BUTTON_STYLES {
-            assert!(!body.contains("*/"), "a style body closes a comment");
+        for (_, template) in GTK_BUTTON_STYLES {
+            assert!(!template.contains("*/"), "a style body closes a comment");
         }
     }
 }
