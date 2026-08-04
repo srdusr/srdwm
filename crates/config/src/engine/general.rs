@@ -102,10 +102,18 @@ impl Engine {
     /// and window-switcher cycling, where one step per press is unusable.
     pub(super) fn fn_bind_repeat(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
-        Ok(self.lua.create_function(move |lua, (combo, f): (String, mlua::Function)| {
+        Ok(self.lua.create_function(move |lua, (combo, f, description): (String, mlua::Function, Option<String>)| {
             let combo = srdwm_core::canonicalize_key_combo(&combo);
             let key = lua.create_registry_value(f)?;
             let mut s = state.borrow_mut();
+            // Takes a description exactly like `bind` does. It did not, and
+            // mlua drops the extra argument silently rather than raising --
+            // so a config that documented its repeat bindings got no error
+            // and no description, and every one of them showed up in a
+            // launcher as a bare key combo.
+            if let Some(description) = description.filter(|d| !d.trim().is_empty()) {
+                s.key_descriptions.insert(combo.clone(), description);
+            }
             s.repeat_keys.insert(combo.clone());
             s.key_bindings.insert(combo, key);
             Ok(())

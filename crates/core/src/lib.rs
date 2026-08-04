@@ -13,7 +13,7 @@ pub mod window;
 pub mod workspace;
 
 pub use context_menu::{ContextMenu, MenuAction};
-pub use event::{canonicalize_key_combo, key_combo_string, parse_key_combo, Event, MouseButton, Modifiers};
+pub use event::{canonicalize_key_combo, display_key_combo, key_combo_string, parse_key_combo, Event, MouseButton, Modifiers};
 pub use geometry::Rect;
 pub use layout::{Layout, MasterStackLayout, NoOpLayout, TilingConfig};
 pub use lock_config::LockConfig;

@@ -427,7 +427,17 @@ pub(crate) fn handle_request(line: &[u8], wm: &std::rc::Rc<std::cell::RefCell<Wi
             let list: Vec<KeybindingInfo> = wm
                 .keybindings
                 .iter()
-                .map(|b| KeybindingInfo { combo: b.combo.clone(), description: b.description.clone(), grabbed: b.grabbed })
+                // `display_key_combo`, not the stored combo: what is stored
+                // is the canonical dispatch key (`Shift+Mod4+h`), and a
+                // panel or launcher showing that verbatim is showing an X11
+                // modifier name nothing on a keyboard is labelled with. The
+                // form here is what the owner wrote in their own config, and
+                // parses back to the same binding.
+                .map(|b| KeybindingInfo {
+                    combo: srdwm_core::display_key_combo(&b.combo),
+                    description: b.description.clone(),
+                    grabbed: b.grabbed,
+                })
                 .collect();
             (serde_json::to_vec(&KeybindingsResponse { keybindings: list }).unwrap_or_default(), false)
         }

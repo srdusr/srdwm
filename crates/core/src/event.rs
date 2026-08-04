@@ -104,6 +104,37 @@ pub fn parse_key_combo(combo: &str) -> Option<(Modifiers, &str)> {
     Some((modifiers, key_name))
 }
 
+/// The form of a combo to *show a person*, as distinct from the canonical
+/// form everything internal is keyed by.
+///
+/// Two differences, both of which matter only on screen:
+///
+/// - `Mod4` is written `Super`. `Mod4` is the X11 modifier's name, not the
+///   key's; nothing on a keyboard is labelled Mod4, and a launcher listing
+///   "Mod4+Return" is showing an implementation detail.
+/// - Modifiers come out in the order people write them - Super, Ctrl, Alt,
+///   Shift - rather than the canonical Ctrl/Shift/Alt/Mod4 order, which
+///   renders the owner's own `Super+Shift+h` binding as `Shift+Mod4+h`.
+///
+/// Round-trips: [`parse_key_combo`] accepts `Super` and takes modifiers in
+/// any order, so a string from here can be pasted straight into a config.
+/// Nothing dispatches on this form - [`canonicalize_key_combo`] still owns
+/// what a binding is stored and looked up as.
+pub fn display_key_combo(combo: &str) -> String {
+    let Some((modifiers, key_name)) = parse_key_combo(combo) else { return combo.to_string() };
+    let mut out = String::new();
+    for (flag, name) in
+        [(Modifiers::SUPER, "Super"), (Modifiers::CTRL, "Ctrl"), (Modifiers::ALT, "Alt"), (Modifiers::SHIFT, "Shift")]
+    {
+        if modifiers.contains(flag) {
+            out.push_str(name);
+            out.push('+');
+        }
+    }
+    out.push_str(key_name);
+    out
+}
+
 /// Re-orders a combo string into the canonical form [`key_combo_string`]
 /// produces, regardless of what order its modifiers were written in, *and*
 /// normalizes the key name to the exact casing [`crate::keysyms::
@@ -180,6 +211,27 @@ pub enum Event {
 
 #[cfg(test)]
 mod tests {
+    /// A launcher shows this string to a person, so it has to read like the
+    /// key on the keyboard and like what the config author wrote.
+    #[test]
+    fn display_form_uses_super_and_the_order_people_write() {
+        assert_eq!(display_key_combo("Shift+Mod4+h"), "Super+Shift+h");
+        assert_eq!(display_key_combo("Ctrl+Mod4+k"), "Super+Ctrl+k");
+        assert_eq!(display_key_combo("Shift+Alt+Tab"), "Alt+Shift+Tab");
+        assert_eq!(display_key_combo("Mod4+Return"), "Super+Return");
+        assert_eq!(display_key_combo("Print"), "Print");
+    }
+
+    /// The display form must be pasteable back into a config, or telling
+    /// someone their binding is "Super+Shift+h" sends them to a string that
+    /// does not work.
+    #[test]
+    fn display_form_parses_back_to_the_same_binding() {
+        for combo in ["Shift+Mod4+h", "Ctrl+Mod4+k", "Shift+Alt+Tab", "Mod4+Return", "Mod4+1"] {
+            assert_eq!(canonicalize_key_combo(&display_key_combo(combo)), canonicalize_key_combo(combo));
+        }
+    }
+
     use super::*;
 
     #[test]
