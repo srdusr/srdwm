@@ -73,8 +73,26 @@ pub(crate) fn sync_toplevel_metadata(state: &mut CompState, id: WindowId, surfac
         // window back to the front any time its title happened to
         // update - reported live as an older window jumping in front of
         // a newer, focused one with no user action to explain it.
+        // Before the rules, and before anything is drawn: a real `app_id`
+        // is the first moment the window-memory store can be looked up at
+        // all, since a toplevel role exists before its client sends
+        // `set_app_id` and `add_window` therefore searched the store for the
+        // empty string. See `apply_remembered_geometry`. A rule's own
+        // explicit `geometry` still wins, which is why this runs first and
+        // `reapply_rules_if_pending` runs after.
+        let restored = state.wm.borrow_mut().apply_remembered_geometry(id);
+        if restored {
+            // The backend keeps its own copy of "this size is only a guess"
+            // (`provisional_size`), and `adopt_provisional_size` reads that
+            // one, not the core flag. Leaving this id in it meant the
+            // client's next commit overwrote the size just restored with
+            // whatever the client would have opened at - the position came
+            // back and the size did not, which is a stranger result than
+            // nothing being restored at all.
+            state.provisional_size.remove(&id);
+        }
         let reapplied = state.wm.borrow_mut().reapply_rules_if_pending(id);
-        if reapplied {
+        if reapplied || restored {
             state.redraw_decoration_buffer(id);
             state.sync_geometry(id);
         }

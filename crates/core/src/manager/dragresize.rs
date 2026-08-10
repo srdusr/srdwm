@@ -395,6 +395,59 @@ impl WindowManager {
     /// `crates/wayland/src/window_memory.rs` restoring what was persisted
     /// from a *previous* session at startup, before any real drag/resize
     /// has happened this run.
+    /// Applies a remembered geometry to a window whose `app_id` was not
+    /// known when it was placed.
+    ///
+    /// `add_window` looks the store up by `app_id`, but a Wayland toplevel
+    /// role exists before its client has sent `set_app_id` - so at placement
+    /// time the id is usually the empty string, the lookup misses, and every
+    /// window falls through to a fresh cascade. That is why "windows do not
+    /// remember their size and position" and "windows spawn on top of each
+    /// other" were the same bug: the store was written correctly and read at
+    /// the one moment it could not match.
+    ///
+    /// Called again from the backend the moment a real `app_id` arrives,
+    /// which is still before the client's first buffer, so nothing has been
+    /// drawn at the wrong place yet.
+    ///
+    /// Only touches a window that is still sitting where the cascade put it
+    /// (`size_is_provisional`). A rule's explicit `geometry`, a maximize, a
+    /// dialog's centring and a client's own chosen size all clear that flag,
+    /// and each of them is a more specific decision than "wherever I last
+    /// left this app". Returns whether anything moved.
+    pub fn apply_remembered_geometry(&mut self, id: WindowId) -> bool {
+        let Some(w) = self.windows.get(&id) else { return false };
+        if !w.size_is_provisional || w.is_dialog || w.maximized || w.fullscreen || w.app_id.is_empty() {
+            return false;
+        }
+        let Some((x, y, width, height)) = self.remembered_geometry.get(&w.app_id).copied() else { return false };
+        let (min_w, min_h) = w.min_size;
+        let (width, height) = (width.max(min_w), height.max(min_h));
+        // Same two-step as `add_window`: whichever monitor the remembered
+        // point actually lands on - checked against full geometry, so a
+        // spot under a bar still counts as on-screen - else the monitor the
+        // window is already on. Then clamped into that monitor's *usable*
+        // area, which is what keeps a window from reopening beneath a bar.
+        let monitor = self
+            .monitors
+            .iter()
+            .find(|m| m.full_geometry.contains_point(x, y))
+            .or_else(|| self.monitors.iter().find(|m| m.id == w.monitor))
+            .map(|m| (m.id, m.geometry));
+        let Some((monitor_id, area)) = monitor else { return false };
+        let Some(w) = self.windows.get_mut(&id) else { return false };
+        w.monitor = monitor_id;
+        w.geometry.width = width;
+        w.geometry.height = height;
+        w.geometry.x = x.clamp(area.x, (area.right() - width as i32).max(area.x));
+        w.geometry.y = y.clamp(area.y, (area.bottom() - height as i32).max(area.y));
+        // A remembered size is a real preference, not the placeholder the
+        // cascade handed out, so the client no longer gets to replace it
+        // (`adopt_provisional_size`).
+        w.size_is_provisional = false;
+        true
+    }
+
     pub fn set_remembered_geometry(&mut self, app_id: String, geometry: (i32, i32, u32, u32)) {
         self.remembered_geometry.insert(app_id, geometry);
     }

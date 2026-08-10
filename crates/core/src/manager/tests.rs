@@ -116,6 +116,54 @@
         assert!(!win.size_is_provisional, "a deliberately remembered size must never be second-guessed by the client's own default");
     }
 
+    /// The real shape of the bug: a Wayland toplevel exists before its
+    /// client sends `set_app_id`, so `add_window` searched the store for the
+    /// empty string and every window fell through to a fresh cascade. That
+    /// is why "windows do not remember their size" and "windows spawn on top
+    /// of each other" were one bug.
+    #[test]
+    fn a_window_that_learns_its_app_id_late_still_gets_its_remembered_geometry() {
+        let mut wm = wm_with_monitor();
+        wm.set_remembered_geometry("late-app".to_string(), (400, 300, 500, 400));
+        let id = wm.alloc_window_id();
+        // Added with no app_id at all, exactly as a real toplevel arrives.
+        wm.add_window(Window::new(id, "late"));
+        assert!(wm.window(id).unwrap().size_is_provisional, "should have been cascaded, nothing to look up yet");
+
+        wm.window_mut(id).unwrap().app_id = "late-app".to_string();
+        assert!(wm.apply_remembered_geometry(id));
+
+        let win = wm.window(id).unwrap();
+        assert_eq!((win.geometry.x, win.geometry.y), (400, 300));
+        assert_eq!((win.geometry.width, win.geometry.height), (500, 400));
+        assert!(!win.size_is_provisional, "a restored size is a real preference, not a guess");
+    }
+
+    /// Every decision more specific than "wherever I last left this app"
+    /// has to survive a late app_id.
+    #[test]
+    fn a_late_app_id_does_not_overwrite_a_more_specific_placement() {
+        for setup in ["dialog", "maximized", "already-sized"] {
+            let mut wm = wm_with_monitor();
+            wm.set_remembered_geometry("late-app".to_string(), (400, 300, 500, 400));
+            let id = wm.alloc_window_id();
+            wm.add_window(Window::new(id, "late"));
+            {
+                let w = wm.window_mut(id).unwrap();
+                w.app_id = "late-app".to_string();
+                match setup {
+                    "dialog" => w.is_dialog = true,
+                    "maximized" => w.maximized = true,
+                    // What a client committing its own size leaves behind.
+                    _ => w.size_is_provisional = false,
+                }
+            }
+            let before = wm.window(id).unwrap().geometry;
+            assert!(!wm.apply_remembered_geometry(id), "{setup} should not be overridden");
+            assert_eq!(wm.window(id).unwrap().geometry, before, "{setup} geometry moved");
+        }
+    }
+
     #[test]
     fn a_rules_explicit_geometry_is_never_provisional() {
         let mut wm = wm_with_monitor();

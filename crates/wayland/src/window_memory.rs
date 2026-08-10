@@ -106,6 +106,20 @@ pub(crate) fn load() -> HashMap<String, PersistedGeometry> {
     }
 }
 
+/// True when this instance is nested AND has been given no state directory
+/// of its own, so anything it wrote would land in the real session's store.
+///
+/// The guard cannot simply be "nested", even though that is the case it
+/// exists for. A test instance is the only thing that ever needs to
+/// exercise saving, and refusing every nested write makes the feature
+/// untestable without pointing a compositor at the owner's real desktop.
+/// Pointing `SRDWM_STATE_PATH` (or `XDG_STATE_HOME`) somewhere else is a
+/// deliberate act that says exactly where the writes should go, so a nested
+/// instance that has done it is allowed to write there.
+fn writes_would_land_in_the_real_session() -> bool {
+    crate::running_nested() && std::env::var_os("SRDWM_STATE_PATH").is_none() && std::env::var_os("XDG_STATE_HOME").is_none()
+}
+
 /// Overwrites the whole persisted table from `entries` - called after
 /// every drag/resize-end (see `input/pointer.rs`'s call site), which are
 /// rare, real user actions, not a per-frame event, so writing the whole
@@ -123,7 +137,7 @@ pub(crate) fn load() -> HashMap<String, PersistedGeometry> {
 /// back over it is not. Same reasoning as `publish_gtk_stylesheet`'s own
 /// nested guard.
 pub(crate) fn save_all<'a>(entries: impl Iterator<Item = (&'a str, (i32, i32, u32, u32))>) {
-    if crate::running_nested() {
+    if writes_would_land_in_the_real_session() {
         return;
     }
     let apps: HashMap<String, PersistedGeometry> =
