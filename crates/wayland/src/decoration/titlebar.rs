@@ -36,6 +36,66 @@ use super::font::{blit_glyph, find_system_font, FONT_PIXELS, TEXT_LEFT_PADDING};
 /// titlebar at all - but `0` is also the correct, harmless value if
 /// `round_corners` handling ever changes to allow it).
 #[allow(clippy::too_many_arguments)]
+/// The most characters of a title that are ever measured.
+///
+/// Nothing legible survives past this in any titlebar a person would use,
+/// but a client is free to set a title of any length at all - a browser
+/// tab carrying a whole data URL, say - and every character costs a
+/// rasterization before the layout below can decide it does not fit. This
+/// bounds that work without bounding what is drawn: a title this long is
+/// elided many times over regardless.
+pub(crate) const MAX_TITLE_CHARS: usize = 256;
+
+/// Lays a title out into `available` pixels, ending it with an ellipsis if
+/// it does not fit.
+///
+/// Truncating at the end is what Windows, GNOME and KDE all do, and it
+/// keeps the informative half of a window title - an application or
+/// document name almost always begins distinctively and ends in boilerplate
+/// ("... - Mozilla Firefox"). The ellipsis matters on its own: hard-cutting
+/// a title mid-glyph, which is what this did before, leaves no sign that
+/// anything was removed, so a truncated name reads as the whole name.
+///
+/// Prefers a real "…" and falls back to three periods when the system font
+/// has no such glyph, since a missing glyph rasterizes to nothing at all
+/// and would silently reintroduce the invisible-truncation problem.
+pub(crate) fn lay_out_title(font: &fontdue::Font, title: &str, available: f32) -> Vec<(fontdue::Metrics, Vec<u8>)> {
+    let ellipsis: &[char] = if font.lookup_glyph_index('\u{2026}') != 0 { &['\u{2026}'] } else { &['.', '.', '.'] };
+    let mut glyphs: Vec<(fontdue::Metrics, Vec<u8>)> = Vec::new();
+    let mut width = 0.0f32;
+    let mut truncated = false;
+    for ch in title.chars().filter(|c| !c.is_control()).take(MAX_TITLE_CHARS) {
+        let (metrics, coverage) = font.rasterize(ch, FONT_PIXELS);
+        if width + metrics.advance_width > available {
+            truncated = true;
+            break;
+        }
+        width += metrics.advance_width;
+        glyphs.push((metrics, coverage));
+    }
+    if title.chars().filter(|c| !c.is_control()).count() > MAX_TITLE_CHARS {
+        truncated = true;
+    }
+    if !truncated {
+        return glyphs;
+    }
+    let marks: Vec<(fontdue::Metrics, Vec<u8>)> = ellipsis.iter().map(|&c| font.rasterize(c, FONT_PIXELS)).collect();
+    let marks_width: f32 = marks.iter().map(|(m, _)| m.advance_width).sum();
+    // Drop whole characters off the end until the ellipsis fits beside what
+    // is left. A title with no room even for the ellipsis draws nothing
+    // rather than a lone "…", which says less than an empty titlebar does.
+    while !glyphs.is_empty() && width + marks_width > available {
+        if let Some((metrics, _)) = glyphs.pop() {
+            width -= metrics.advance_width;
+        }
+    }
+    if glyphs.is_empty() && marks_width > available {
+        return Vec::new();
+    }
+    glyphs.extend(marks);
+    glyphs
+}
+
 pub fn render_titlebar(
     width: u32,
     height: u32,
@@ -132,21 +192,8 @@ pub fn render_titlebar(
         // advance crosses `text_limit` still gets drawn (matches a real
         // window's furniture starting exactly at `text_limit`, not one
         // glyph-width short of it), only the *next* one is dropped.
-        let mut glyphs: Vec<(fontdue::Metrics, Vec<u8>)> = Vec::new();
-        let mut total_width = 0.0f32;
-        for ch in title.chars() {
-            if ch.is_control() {
-                continue;
-            }
-            let (metrics, coverage) = font.rasterize(ch, FONT_PIXELS);
-            let advance = metrics.advance_width;
-            let already_past_limit = text_start + total_width >= text_limit;
-            if already_past_limit {
-                break;
-            }
-            total_width += advance;
-            glyphs.push((metrics, coverage));
-        }
+        let glyphs = lay_out_title(&font, title, text_limit - text_start);
+        let total_width: f32 = glyphs.iter().map(|(m, _)| m.advance_width).sum();
         // Centered on the *whole* titlebar width, not on the narrower
         // `text_start..text_limit` span left over after reserving the
         // button squares - matches real macOS, which ignores its own

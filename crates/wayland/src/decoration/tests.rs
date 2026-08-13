@@ -967,3 +967,51 @@ fn snap_flyout_has_an_internal_grid_line_between_columns() {
     let idx = (30 * width as usize + cell_w as usize) * 4;
     assert_eq!(buf[idx + 3], 255, "column boundary must be drawn, not just the outer border");
 }
+
+/// A long title used to be hard-cut mid-glyph, which leaves no sign that
+/// anything was removed - a truncated name reads as the whole name.
+#[test]
+fn a_long_title_is_elided_rather_than_cut() {
+    let Some(font) = super::font::find_system_font() else { return };
+    let long = "a-very-long-window-title-that-cannot-possibly-fit-in-a-narrow-titlebar.txt";
+    let laid_out = super::titlebar::lay_out_title(&font, long, 120.0);
+    let width: f32 = laid_out.iter().map(|(m, _)| m.advance_width).sum();
+    assert!(width <= 120.0, "elided title still overflows: {width}");
+    let full: f32 = long.chars().map(|c| font.metrics(c, super::font::FONT_PIXELS).advance_width).sum();
+    assert!(width < full, "nothing was elided at all");
+    // The last glyph must be an ellipsis mark, not whatever character the
+    // cut happened to land on.
+    let ellipsis = if font.lookup_glyph_index('\u{2026}') != 0 { '\u{2026}' } else { '.' };
+    let expected = font.rasterize(ellipsis, super::font::FONT_PIXELS);
+    let last = laid_out.last().expect("title elided to nothing");
+    assert_eq!(last.1, expected.1, "a title was cut without an ellipsis");
+}
+
+/// A title that fits must be left exactly alone - no ellipsis, nothing
+/// dropped.
+#[test]
+fn a_title_that_fits_is_not_touched() {
+    let Some(font) = super::font::find_system_font() else { return };
+    let short = "Files";
+    let laid_out = super::titlebar::lay_out_title(&font, short, 400.0);
+    assert_eq!(laid_out.len(), short.chars().count());
+}
+
+/// A titlebar too narrow even for the ellipsis draws nothing, rather than a
+/// lone "..." that says less than an empty titlebar.
+#[test]
+fn a_titlebar_with_no_room_at_all_draws_no_title() {
+    let Some(font) = super::font::find_system_font() else { return };
+    assert!(super::titlebar::lay_out_title(&font, "anything", 1.0).is_empty());
+}
+
+/// A client may set a title of any length; nothing should rasterize
+/// thousands of glyphs to discover that.
+#[test]
+fn a_pathologically_long_title_is_bounded() {
+    let Some(font) = super::font::find_system_font() else { return };
+    let huge: String = std::iter::repeat('x').take(20_000).collect();
+    let laid_out = super::titlebar::lay_out_title(&font, &huge, 400.0);
+    assert!(laid_out.len() < super::titlebar::MAX_TITLE_CHARS);
+}
+
