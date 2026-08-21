@@ -1010,7 +1010,7 @@ fn a_titlebar_with_no_room_at_all_draws_no_title() {
 #[test]
 fn a_pathologically_long_title_is_bounded() {
     let Some(font) = super::font::find_system_font() else { return };
-    let huge: String = std::iter::repeat('x').take(20_000).collect();
+    let huge = "x".repeat(20_000);
     let laid_out = super::titlebar::lay_out_title(&font, &huge, 400.0);
     assert!(laid_out.len() < super::titlebar::MAX_TITLE_CHARS);
 }

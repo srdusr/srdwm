@@ -35,7 +35,6 @@ use super::font::{blit_glyph, find_system_font, FONT_PIXELS, TEXT_LEFT_PADDING};
 /// titlebar (there is none in practice - an undecorated window has no
 /// titlebar at all - but `0` is also the correct, harmless value if
 /// `round_corners` handling ever changes to allow it).
-#[allow(clippy::too_many_arguments)]
 /// The most characters of a title that are ever measured.
 ///
 /// Nothing legible survives past this in any titlebar a person would use,
@@ -96,6 +95,7 @@ pub(crate) fn lay_out_title(font: &fontdue::Font, title: &str, available: f32) -
     glyphs
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_titlebar(
     width: u32,
     height: u32,
