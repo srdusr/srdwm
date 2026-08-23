@@ -668,6 +668,10 @@ impl CompState {
         let width = ((content.size.w as f64 * scale).round() as u32).max(srdwm_core::placement::MIN_WINDOW_WIDTH);
         let height = ((content.size.h as f64 * scale).round() as u32).max(srdwm_core::placement::MIN_WINDOW_HEIGHT) + band;
         let Some(w) = wm.window_mut(id) else { return };
+        // What placement was given to work with, kept so
+        // `replace_with_real_size` can tell whether the client actually
+        // chose something different.
+        let placed_size = (w.geometry.width, w.geometry.height);
         // The client has now made a real choice, so this size is no longer
         // a guess. Clearing the core flag is what lets `remove_window`
         // remember it: that path deliberately refuses to remember a size
@@ -680,5 +684,12 @@ impl CompState {
             w.geometry.x = w.geometry.x.min(monitor.right() - width as i32).max(monitor.x);
             w.geometry.y = w.geometry.y.min(monitor.bottom() - height as i32).max(monitor.y);
         }
+        // Now that the real size is known, place the window again for it.
+        // `add_window` had to decide where this window went before its
+        // client had committed anything, so it placed the `800x600`
+        // placeholder rather than the window - see
+        // `replace_with_real_size`. Still before the first buffer, so
+        // nothing has been drawn at the placeholder-sized position.
+        wm.replace_with_real_size(id, placed_size);
     }
 }

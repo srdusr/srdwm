@@ -116,6 +116,46 @@
         assert!(!win.size_is_provisional, "a deliberately remembered size must never be second-guessed by the client's own default");
     }
 
+    /// A client that accepts the size placement assumed must not be moved
+    /// again: re-placing would consume another cascade step for nothing,
+    /// and the cascade wraps - measured, two windows landing on exactly
+    /// the same spot because the extra steps wrapped one back to the origin.
+    #[test]
+    fn a_window_that_keeps_the_assumed_size_is_not_placed_twice() {
+        let mut wm = wm_with_monitor();
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "w"));
+        let placed = wm.window(id).unwrap().geometry;
+        assert!(!wm.replace_with_real_size(id, (placed.width, placed.height)));
+        assert_eq!(wm.window(id).unwrap().geometry, placed);
+    }
+
+    /// And a client that chooses a different size gets placed for the size
+    /// it really is, not for the placeholder a backend guessed.
+    #[test]
+    fn a_window_that_chooses_its_own_size_is_placed_again_for_it() {
+        let mut wm = wm_with_monitor();
+        let first = wm.alloc_window_id();
+        wm.add_window(Window::new(first, "first"));
+        let second = wm.alloc_window_id();
+        wm.add_window(Window::new(second, "second"));
+        let assumed = wm.window(second).unwrap().geometry;
+        // The client turns out to be much smaller than the placeholder.
+        {
+            let w = wm.window_mut(second).unwrap();
+            w.geometry.width = 300;
+            w.geometry.height = 200;
+        }
+        // The return value is an implementation detail - it says whether
+        // anything moved, and the right position may be the one it already
+        // had. What matters is where it ends up.
+        wm.replace_with_real_size(second, (assumed.width, assumed.height));
+        let placed = wm.window(second).unwrap().geometry;
+        assert_eq!((placed.width, placed.height), (300, 200), "the real size must be kept");
+        let other = wm.window(first).unwrap().geometry;
+        assert!(!other.overlaps(&placed), "a window small enough to fit clear should not be stacked: {other:?} vs {placed:?}");
+    }
+
     /// The real shape of the bug: a Wayland toplevel exists before its
     /// client sends `set_app_id`, so `add_window` searched the store for the
     /// empty string and every window fell through to a fresh cascade. That

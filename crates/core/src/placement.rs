@@ -158,6 +158,16 @@ pub fn clamp_into(rect: Rect, area: Rect) -> Rect {
 
 pub struct SmartPlacement;
 
+/// How many of the most central free positions `SmartPlacement::free_spot`
+/// rotates between.
+///
+/// One would be the best placement every time and put every consecutively
+/// opened window in the same place; the whole list would scatter windows
+/// into corners for no reason. Four is enough that opening the same
+/// application repeatedly does not stack it in one spot, while every choice
+/// is still among the most central positions available.
+const CENTRAL_CHOICES: usize = 4;
+
 impl SmartPlacement {
     /// Place a new window of `size` given the geometries of windows already
     /// occupying `monitor`. Tries a grid cell first, falling back to cascade.
@@ -180,7 +190,95 @@ impl SmartPlacement {
         if existing.is_empty() {
             return Self::cascade(monitor, size, cfg, cascade_step);
         }
-        Self::grid(monitor, existing, size, cfg, cascade_step).unwrap_or_else(|| Self::cascade(monitor, size, cfg, cascade_step))
+        // A spot where the window covers nothing is always the right answer
+        // when one exists, and is what "smart placement" means in every
+        // window manager that has it. Only when the screen genuinely cannot
+        // fit the window clear of everything else does this fall through to
+        // the diagonal cascade, which is what Windows does once its own
+        // screen fills up.
+        Self::free_spot(monitor, existing, size, cascade_step)
+            .or_else(|| Self::grid(monitor, existing, size, cfg, cascade_step))
+            .unwrap_or_else(|| Self::cascade(monitor, size, cfg, cascade_step))
+    }
+
+    /// A position where a `size` window overlaps nothing already on screen,
+    /// or `None` when the monitor cannot fit one.
+    ///
+    /// The candidate positions are the edges of what is already there --
+    /// every existing window's left and right edge, plus the monitor's own,
+    /// and the same vertically - taken both as "put my left edge here" and
+    /// "put my right edge here". That is Openbox's `place_overlap` reduced
+    /// to the case this needs, and the reasoning behind it is that a
+    /// rectangle packed against other rectangles is always flush with one of
+    /// their edges: nothing is gained by testing the space between two
+    /// edges, so a handful of candidates covers every distinct arrangement.
+    ///
+    /// Why this replaced a fixed grid: the grid asked whether a *cell* was
+    /// free and then placed the window at the cell's corner at its own,
+    /// larger size. An ordinary 800x600 window on a 1280x800 screen overlaps
+    /// every cell of a 2x2 grid, so no cell was ever free, the grid returned
+    /// nothing, and every window fell through to the cascade - measured,
+    /// five windows opening at 30,30 then 60,60 then 90,90 and so on, which
+    /// is exactly "they spawn on top of each other, predominantly one side".
+    ///
+    /// Ties go to the position nearest the middle of the monitor. Several
+    /// free spots usually exist and the first in scan order is always the
+    /// top-left one, which is the other half of the same complaint.
+    fn free_spot(monitor: &Monitor, existing: &[Rect], size: (u32, u32), cascade_step: u32) -> Option<Rect> {
+        let area = monitor.geometry;
+        let (w, h) = (size.0 as i32, size.1 as i32);
+        if w > area.width as i32 || h > area.height as i32 {
+            return None;
+        }
+        let mut xs: Vec<i32> = vec![area.x, area.right() - w];
+        let mut ys: Vec<i32> = vec![area.y, area.bottom() - h];
+        for r in existing {
+            xs.push(r.x);
+            xs.push(r.right());
+            xs.push(r.x - w);
+            xs.push(r.right() - w);
+            ys.push(r.y);
+            ys.push(r.bottom());
+            ys.push(r.y - h);
+            ys.push(r.bottom() - h);
+        }
+        xs.retain(|&x| x >= area.x && x + w <= area.right());
+        ys.retain(|&y| y >= area.y && y + h <= area.bottom());
+        xs.sort_unstable();
+        xs.dedup();
+        ys.sort_unstable();
+        ys.dedup();
+
+        let centre = (area.x + area.width as i32 / 2, area.y + area.height as i32 / 2);
+        let mut free: Vec<(i64, Rect)> = Vec::new();
+        for &x in &xs {
+            for &y in &ys {
+                let candidate = Rect::new(x, y, size.0, size.1);
+                if existing.iter().any(|r| r.overlaps(&candidate)) {
+                    continue;
+                }
+                let cx = x + w / 2 - centre.0;
+                let cy = y + h / 2 - centre.1;
+                free.push(((cx as i64) * (cx as i64) + (cy as i64) * (cy as i64), candidate));
+            }
+        }
+        if free.is_empty() {
+            return None;
+        }
+        // Nearest the middle first: several free spots usually exist and the
+        // first in scan order is always the top-left one, which is half of
+        // "windows spawn predominantly one side".
+        free.sort_by_key(|(distance, rect)| (*distance, rect.x, rect.y));
+        // Then rotate through the best few rather than always taking the
+        // single best. Least-overlap placement is deterministic, so opening
+        // one window at a time - open, use, close, open the next - puts
+        // every one of them in exactly the same place, which was reported
+        // here before as "every window spawns in the exact same spot, not at
+        // all like Windows". Rotating keeps the no-overlap guarantee (every
+        // candidate in this list is free) while giving consecutive windows
+        // somewhere different to land.
+        let choices = free.len().min(CENTRAL_CHOICES);
+        Some(free[cascade_step as usize % choices].1)
     }
 
     fn grid(monitor: &Monitor, existing: &[Rect], size: (u32, u32), cfg: &PlacementConfig, cascade_step: u32) -> Option<Rect> {
@@ -336,20 +434,46 @@ mod tests {
         assert!(!first.overlaps(&second), "second window must not overlap the first: {first:?} vs {second:?}");
     }
 
+    /// Cascade is the last resort now, not the second one: it runs when the
+    /// screen genuinely cannot fit the window clear of what is already
+    /// there. This test used to assert the opposite - that a full *grid*
+    /// forced a cascade - which stopped being true once a free position
+    /// was looked for first, and rightly so: a free spot existed in that
+    /// case and cascading on top of things instead was the bug.
     #[test]
-    fn cascade_kicks_in_once_grid_is_full() {
-        let cfg = PlacementConfig { max_grid: 1, ..Default::default() };
-        // max_grid=1 means the grid is always a single cell, so a second
-        // window can never find a free grid cell and must cascade.
-        let first = SmartPlacement::place(&monitor(), &[], (400, 300), &cfg, 0);
-        let second = SmartPlacement::place(&monitor(), &[first], (400, 300), &cfg, 1);
-        assert_ne!(first, second);
-        // First window is grid-placed (offset by grid_margin); the second no
-        // longer fits any grid cell and falls back to cascade, which steps
-        // from the monitor origin by `cascade_offset` per window opened so
-        // far this session (the caller's own counter, passed in as `1` here).
-        assert_eq!(second.x, cfg.cascade_offset * 2);
-        assert_eq!(second.y, cfg.cascade_offset * 2);
+    fn cascade_is_the_last_resort_when_nothing_fits_clear() {
+        let cfg = PlacementConfig::default();
+        let area = monitor().geometry;
+        // One window covering the whole usable area: no free position for
+        // anything, at any size.
+        let covered = [area];
+        let placed = SmartPlacement::place(&monitor(), &covered, (400, 300), &cfg, 1);
+        assert_eq!(placed.x, cfg.cascade_offset * 2);
+        assert_eq!(placed.y, cfg.cascade_offset * 2);
+    }
+
+    /// The point of looking for a free position at all.
+    #[test]
+    fn a_second_window_does_not_land_on_top_of_the_first() {
+        let cfg = PlacementConfig::default();
+        // The measured case: 800x600 windows on a 1280x800 screen, where
+        // every cell of a 2x2 grid overlaps the first window, so the grid
+        // could never find one and everything cascaded into a pile.
+        let first = Rect::new(30, 30, 800, 600);
+        let second = SmartPlacement::place(&monitor(), &[first], (800, 600), &cfg, 1);
+        assert!(!first.overlaps(&second), "second window landed on the first: {first:?} vs {second:?}");
+    }
+
+    /// Every rotated choice must still be a free one - rotating is for
+    /// variety, never at the cost of the guarantee.
+    #[test]
+    fn every_rotation_choice_is_still_free_of_the_windows_already_open() {
+        let cfg = PlacementConfig::default();
+        let existing = [Rect::new(0, 0, 300, 200)];
+        for step in 0..8 {
+            let placed = SmartPlacement::place(&monitor(), &existing, (300, 200), &cfg, step);
+            assert!(!existing[0].overlaps(&placed), "step {step} overlapped: {placed:?}");
+        }
     }
 
     #[test]

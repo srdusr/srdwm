@@ -411,6 +411,59 @@ impl WindowManager {
         self.order.iter().filter_map(|id| self.windows.get(id))
     }
 
+    /// Re-runs smart placement for a window that has just learned its real
+    /// size.
+    ///
+    /// `add_window` has to place a window before its client has committed
+    /// anything, so it places the placeholder size a backend guessed --
+    /// `800x600` - and not the size the window actually turns out to be.
+    /// Every placement decision was therefore made about the wrong
+    /// rectangle: measured on a 1280x800 screen, four small terminals were
+    /// all told they were 800x600, no two of those fit side by side, so
+    /// every one of them fell through to the cascade and landed on top of
+    /// the last. The windows themselves were a quarter of that size and
+    /// would have fitted four abreast.
+    ///
+    /// Called from the backend at the moment the client's real size is
+    /// adopted, which is still before its first buffer, so nothing has been
+    /// drawn at the placeholder-sized position.
+    ///
+    /// Only for a window still sitting where placement put it: a remembered
+    /// geometry, a rule, a dialog and a maximize have all already cleared
+    /// `size_is_provisional` by this point, and each is a more deliberate
+    /// decision than smart placement.
+    pub fn replace_with_real_size(&mut self, id: WindowId, placed_size: (u32, u32)) -> bool {
+        let Some(w) = self.windows.get(&id) else { return false };
+        if w.is_dialog || w.maximized || w.fullscreen {
+            return false;
+        }
+        // The client accepted the size placement already assumed, so the
+        // decision it made was about the right rectangle after all. Leaving
+        // it alone matters: re-running placement here would consume another
+        // cascade step for no reason, and the cascade wraps - measured, two
+        // windows landing on exactly the same spot because the extra steps
+        // wrapped one of them back to the origin.
+        if placed_size == (w.geometry.width, w.geometry.height) {
+            return false;
+        }
+        let (workspace, monitor_id, size) = (w.workspace, w.monitor, (w.geometry.width, w.geometry.height));
+        let layout_name = self.workspace(workspace).map(|ws| ws.layout.clone()).unwrap_or_default();
+        if layout_name == "tiling" {
+            return false;
+        }
+        let Some(monitor) = self.monitors.iter().find(|m| m.id == monitor_id).cloned() else { return false };
+        let existing: Vec<Rect> = self.windows_on_workspace(workspace).filter(|other| other.id != id).map(|other| other.geometry).collect();
+        let step = self.next_cascade_step.get();
+        self.next_cascade_step.set(step.wrapping_add(1));
+        let placed = SmartPlacement::place(&monitor, &existing, size, &self.placement, step);
+        let Some(w) = self.windows.get_mut(&id) else { return false };
+        if w.geometry == placed {
+            return false;
+        }
+        w.geometry = placed;
+        true
+    }
+
     pub(super) fn windows_on_workspace(&self, workspace: WorkspaceId) -> impl Iterator<Item = &Window> {
         self.windows.values().filter(move |w| w.workspace == workspace)
     }
