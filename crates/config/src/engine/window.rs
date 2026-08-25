@@ -66,6 +66,26 @@ impl Engine {
         })?)
     }
 
+    /// `srd.window.resize("right", "grow")` - grow or shrink the focused
+    /// window one step along that axis. The second argument defaults to
+    /// growing, so `srd.window.resize("right")` reads naturally.
+    pub(super) fn fn_window_resize_direction(&self) -> Result<mlua::Function<'_>> {
+        let state = self.state.clone();
+        Ok(self.lua.create_function(move |_, (direction, mode): (String, Option<String>)| {
+            let dir = parse_direction(&direction, "srd.window.resize")?;
+            let grow = match mode.as_deref() {
+                None | Some("grow") => true,
+                Some("shrink") => false,
+                Some(other) => {
+                    return Err(mlua::Error::RuntimeError(format!("srd.window.resize: expected \"grow\" or \"shrink\", got {other:?}")))
+                }
+            };
+            let wm = state.borrow().wm.clone();
+            wm.borrow_mut().resize_window_direction(dir, grow);
+            Ok(())
+        })?)
+    }
+
     /// `srd.window.next()` / `srd.window.prev()` - cycle focus through the
     /// windows on the current workspace (Hyprland's `cyclenext`).
     pub(super) fn fn_window_cycle(&self, forward: bool) -> Result<mlua::Function<'_>> {

@@ -41,6 +41,7 @@ impl Engine {
         window.set("toggle_pin", self.fn_window_action(WindowAction::TogglePin)?)?;
         window.set("focus", self.fn_window_focus_direction()?)?;
         window.set("move", self.fn_window_move_direction()?)?;
+        window.set("resize", self.fn_window_resize_direction()?)?;
         window.set("next", self.fn_window_cycle(true)?)?;
         window.set("prev", self.fn_window_cycle(false)?)?;
         window.set("set_decorations", self.fn_window_set_decorations()?)?;

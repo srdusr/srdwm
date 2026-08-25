@@ -116,6 +116,98 @@
         assert!(!win.size_is_provisional, "a deliberately remembered size must never be second-guessed by the client's own default");
     }
 
+    /// "Super+Shift+H should move the window in increments, one side,
+    /// middle, other side - not just to the extreme left."
+    #[test]
+    fn a_directional_move_steps_rather_than_slamming_to_the_edge() {
+        let mut wm = wm_with_monitor();
+        let id = wm.alloc_window_id();
+        let mut w = Window::new(id, "w");
+        w.geometry = Rect::new(800, 400, 400, 300);
+        wm.add_window(w);
+        wm.focus_window(id);
+        wm.window_mut(id).unwrap().geometry = Rect::new(800, 400, 400, 300);
+
+        wm.move_window_direction(Direction::Left);
+        let after_one = wm.window(id).unwrap().geometry.x;
+        assert!(after_one < 800, "did not move");
+        assert!(after_one > 0, "slammed to the edge in one press: {after_one}");
+
+        // Repeated presses keep walking it across, and it stops flush.
+        for _ in 0..20 {
+            wm.move_window_direction(Direction::Left);
+        }
+        assert_eq!(wm.window(id).unwrap().geometry.x, 0, "should end flush against the left edge");
+    }
+
+    /// Keyboard resize: the missing half of "we are missing keybinds like
+    /// screen lock, resize windows".
+    #[test]
+    fn keyboard_resize_grows_and_shrinks_from_the_far_edge() {
+        let mut wm = wm_with_monitor();
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "w"));
+        wm.focus_window(id);
+        wm.window_mut(id).unwrap().geometry = Rect::new(100, 100, 600, 400);
+
+        wm.resize_window_direction(Direction::Right, true);
+        let grown = wm.window(id).unwrap().geometry;
+        assert!(grown.width > 600, "did not grow: {grown:?}");
+        assert_eq!((grown.x, grown.y), (100, 100), "the top-left must not move");
+
+        wm.resize_window_direction(Direction::Right, false);
+        assert_eq!(wm.window(id).unwrap().geometry.width, 600, "shrink should undo the grow");
+    }
+
+    /// A window can be resized neither to nothing nor off the screen.
+    #[test]
+    fn keyboard_resize_stays_within_its_limits() {
+        let mut wm = wm_with_monitor();
+        let id = wm.alloc_window_id();
+        wm.add_window(Window::new(id, "w"));
+        wm.focus_window(id);
+        wm.window_mut(id).unwrap().geometry = Rect::new(100, 100, 600, 400);
+        let area = wm.monitors()[0].geometry;
+
+        for _ in 0..40 {
+            wm.resize_window_direction(Direction::Right, true);
+            wm.resize_window_direction(Direction::Down, true);
+        }
+        let big = wm.window(id).unwrap().geometry;
+        assert!(big.right() <= area.right(), "grew off the right: {big:?}");
+        assert!(big.bottom() <= area.bottom(), "grew off the bottom: {big:?}");
+
+        for _ in 0..40 {
+            wm.resize_window_direction(Direction::Right, false);
+            wm.resize_window_direction(Direction::Down, false);
+        }
+        let small = wm.window(id).unwrap().geometry;
+        assert!(small.width >= crate::placement::MIN_WINDOW_WIDTH, "shrank below the minimum width");
+        assert!(small.height >= crate::placement::MIN_WINDOW_HEIGHT, "shrank below the minimum height");
+    }
+
+    /// A tiling workspace still swaps with the neighbour: there a window
+    /// does not own its own geometry, and stepping it would be undone by
+    /// the next arrange.
+    #[test]
+    fn a_directional_move_still_swaps_on_a_tiling_workspace() {
+        let mut wm = wm_with_monitor();
+        let ws = wm.current_workspace();
+        wm.set_layout(ws, "tiling");
+        let left = wm.alloc_window_id();
+        wm.add_window(Window::new(left, "left"));
+        let right = wm.alloc_window_id();
+        wm.add_window(Window::new(right, "right"));
+        // Side by side, so "the window to the left" is unambiguous.
+        wm.window_mut(left).unwrap().geometry = Rect::new(0, 0, 900, 1000);
+        wm.window_mut(right).unwrap().geometry = Rect::new(960, 0, 900, 1000);
+        wm.focus_window(right);
+
+        assert_eq!(wm.move_window_direction(Direction::Left), Some(left), "should have swapped with its neighbour");
+        assert_eq!(wm.window(right).unwrap().geometry.x, 0, "the two should have traded places");
+        assert_eq!(wm.window(left).unwrap().geometry.x, 960);
+    }
+
     /// A client that accepts the size placement assumed must not be moved
     /// again: re-placing would consume another cascade step for nothing,
     /// and the cascade wraps - measured, two windows landing on exactly
@@ -2343,6 +2435,11 @@
     #[test]
     fn moving_a_window_swaps_it_with_its_neighbour() {
         let mut wm = wm_with_monitor();
+        // Swapping is tiling behaviour. On a dynamic workspace a window owns
+        // its own geometry and "move it right" moves it - see
+        // `a_directional_move_steps_rather_than_slamming_to_the_edge`.
+        let ws = wm.current_workspace();
+        wm.set_layout(ws, "tiling");
         let left = wm.alloc_window_id();
         let mut a = Window::new(left, "left");
         a.geometry = Rect::new(0, 0, 400, 400);
@@ -2364,7 +2461,7 @@
     }
 
     #[test]
-    fn moving_with_no_neighbour_pushes_to_the_monitor_edge() {
+    fn moving_with_no_neighbour_walks_to_the_monitor_edge() {
         let mut wm = wm_with_monitor();
         let id = wm.alloc_window_id();
         let mut w = Window::new(id, "only");
@@ -2373,10 +2470,21 @@
         wm.window_mut(id).unwrap().geometry = Rect::new(500, 300, 200, 150);
         wm.focus_window(id);
 
+        // One press moves one step, not all the way: the owner asked for
+        // increments rather than "just extreme left/up/right/down".
         assert_eq!(wm.move_window_direction(Direction::Left), None);
+        let stepped = wm.window(id).unwrap().geometry.x;
+        assert!(stepped < 500 && stepped > 0, "should have stepped, not slammed: {stepped}");
+
+        // Held down, it still ends flush against the edge.
+        for _ in 0..20 {
+            wm.move_window_direction(Direction::Left);
+        }
         assert_eq!(wm.window(id).unwrap().geometry.x, 0, "should hug the left edge");
 
-        wm.move_window_direction(Direction::Down);
+        for _ in 0..20 {
+            wm.move_window_direction(Direction::Down);
+        }
         let g = wm.window(id).unwrap().geometry;
         let mon = wm.primary_monitor().unwrap().geometry;
         assert_eq!(g.bottom(), mon.bottom(), "should hug the bottom edge");

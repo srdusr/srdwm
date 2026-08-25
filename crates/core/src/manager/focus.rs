@@ -149,8 +149,29 @@ impl WindowManager {
     /// predictable either way. With no neighbour in that direction the
     /// window is pushed to the corresponding edge of its monitor instead, so
     /// the key still does something sensible.
+    /// How far one press moves a window, as a fraction of the monitor.
+    ///
+    /// An eighth crosses the screen in eight presses, which is fine
+    /// control without being tedious, and passes through the middle at the
+    /// fourth - the owner asked for "increments, or one side, middle,
+    /// other side", and stepping gives both.
+    const MOVE_STEP_FRACTION: i32 = 8;
+
     pub fn move_window_direction(&mut self, dir: Direction) -> Option<WindowId> {
         let focused = self.focused_id()?;
+        // Only a tiling layout swaps with the neighbour. Everywhere else a
+        // window has its own geometry and "move it left" means move it, not
+        // trade places with whatever happens to be over there.
+        let tiling = self
+            .windows
+            .get(&focused)
+            .and_then(|w| self.workspace(w.workspace))
+            .map(|ws| ws.layout == "tiling")
+            .unwrap_or(false);
+        if !tiling {
+            self.nudge_window(focused, dir);
+            return None;
+        }
         match self.neighbour_in(dir) {
             Some(other) => {
                 let a = self.windows.get(&focused)?.geometry;
@@ -184,4 +205,70 @@ impl WindowManager {
         }
     }
 
+    /// Grows or shrinks the focused window one step along `dir`.
+    ///
+    /// The keyboard counterpart to dragging an edge. srdwm has had
+    /// Super+right-drag since before this, which covers the mouse, but
+    /// nothing resized a window without one - reported as a missing
+    /// keybinding alongside screen lock.
+    ///
+    /// `grow` decides which way: growing extends the window's far edge in
+    /// `dir`, shrinking pulls it back, so Right always affects the right
+    /// edge whichever way it moves. The window's top-left stays put, which
+    /// is what every keyboard resize does and what keeps repeated presses
+    /// predictable.
+    ///
+    /// Bounded by the same minimums a drag is, and by the monitor's usable
+    /// area, so a window can neither be resized to nothing nor grown off
+    /// the screen.
+    pub fn resize_window_direction(&mut self, dir: Direction, grow: bool) -> Option<WindowId> {
+        let focused = self.focused_id()?;
+        let area = self.windows.get(&focused).and_then(|w| self.monitor_for(w.monitor)).map(|m| m.geometry)?;
+        let step_x = (area.width as i32 / Self::MOVE_STEP_FRACTION).max(1);
+        let step_y = (area.height as i32 / Self::MOVE_STEP_FRACTION).max(1);
+        let w = self.windows.get_mut(&focused)?;
+        let (min_w, min_h) = (w.min_size.0.max(crate::placement::MIN_WINDOW_WIDTH) as i32, w.min_size.1.max(crate::placement::MIN_WINDOW_HEIGHT) as i32);
+        let delta_x = if grow { step_x } else { -step_x };
+        let delta_y = if grow { step_y } else { -step_y };
+        match dir {
+            Direction::Left | Direction::Right => {
+                let room = area.right() - w.geometry.x;
+                w.geometry.width = (w.geometry.width as i32 + delta_x).clamp(min_w, room.max(min_w)) as u32;
+            }
+            Direction::Up | Direction::Down => {
+                let room = area.bottom() - w.geometry.y;
+                w.geometry.height = (w.geometry.height as i32 + delta_y).clamp(min_h, room.max(min_h)) as u32;
+            }
+        }
+        Some(focused)
+    }
+
+    /// Moves a window one step in `dir`, stopping flush against the edge of
+    /// its monitor's usable area.
+    ///
+    /// This is what a directional move does outside a tiling layout. It used
+    /// to slam the window all the way to the edge in one press, which the
+    /// owner reported as "it should move in increments, one side, middle,
+    /// other side - not just extreme left/up/right/down".
+    ///
+    /// The step is a fraction of the monitor rather than a pixel count, so
+    /// the same keypress feels the same on a laptop panel and on a 4K
+    /// display. Landing within one step of an edge snaps flush to it, so the
+    /// window can always be put exactly against the side rather than a few
+    /// pixels short of it.
+    fn nudge_window(&mut self, id: WindowId, dir: Direction) {
+        let Some(area) = self.windows.get(&id).and_then(|w| self.monitor_for(w.monitor)).map(|m| m.geometry) else { return };
+        let step_x = (area.width as i32 / Self::MOVE_STEP_FRACTION).max(1);
+        let step_y = (area.height as i32 / Self::MOVE_STEP_FRACTION).max(1);
+        let Some(w) = self.windows.get_mut(&id) else { return };
+        let (width, height) = (w.geometry.width as i32, w.geometry.height as i32);
+        let (min_x, max_x) = (area.x, (area.right() - width).max(area.x));
+        let (min_y, max_y) = (area.y, (area.bottom() - height).max(area.y));
+        match dir {
+            Direction::Left => w.geometry.x = (w.geometry.x - step_x).max(min_x),
+            Direction::Right => w.geometry.x = (w.geometry.x + step_x).min(max_x),
+            Direction::Up => w.geometry.y = (w.geometry.y - step_y).max(min_y),
+            Direction::Down => w.geometry.y = (w.geometry.y + step_y).min(max_y),
+        }
+    }
 }

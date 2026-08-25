@@ -684,6 +684,14 @@ fn move_window_dispatch_swaps_with_the_neighbour_and_focuses_the_target_first() 
     let mut server = IpcServer::bind_in(dir.path(), "test").unwrap();
     let wm = Rc::new(RefCell::new(WindowManager::new()));
     wm.borrow_mut().set_monitors(vec![srdwm_core::Monitor::new(0, "primary", srdwm_core::Rect::new(0, 0, 1920, 1080))]);
+    // Swapping with the neighbour is tiling behaviour. On a dynamic
+    // workspace a directional move steps the window itself - see
+    // `WindowManager::nudge_window`.
+    {
+        let mut wm = wm.borrow_mut();
+        let ws = wm.current_workspace();
+        wm.set_layout(ws, "tiling");
+    }
     let (a, b) = {
         let mut wm = wm.borrow_mut();
         let a = wm.alloc_window_id();
