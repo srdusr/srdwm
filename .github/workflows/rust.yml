@@ -20,7 +20,8 @@ jobs:
             libx11-dev libxcb1-dev libxcb-randr0-dev libxcb-keysyms1-dev \
             libwayland-dev wayland-protocols libxkbcommon-dev \
             libegl1-mesa-dev libgles2-mesa-dev libinput-dev libudev-dev \
-            libgbm-dev libdrm-dev libseat-dev
+            libgbm-dev libdrm-dev libseat-dev \
+            libpixman-1-dev libpam0g-dev libclang-dev
       - run: cargo build --workspace
       - run: cargo test --workspace
       - run: cargo clippy --workspace --no-deps -- -D warnings
