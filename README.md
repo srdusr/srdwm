@@ -1,39 +1,38 @@
-# SRDWM
+# srdwm
 
-SRDWM is a cross-platform window manager. You configure it entirely in
-Lua. Every backend draws a real title bar. Every title bar supports drag,
-resize, minimize, maximize, and close. No backend falls back to a plain
-border instead.
+A cross-platform window manager configured in Lua.
 
-This is a Rust rewrite of an earlier C++ prototype; see
-[`docs/PRIOR_ART.md`](docs/PRIOR_ART.md) for what carried over, what got
-fixed, and what other window managers informed the design. The C++
-version itself has been removed from the tree (it was actively
-misleading to keep alongside a fully working rewrite) - git history
-still has it if anyone needs it.
+Every backend draws a real title bar, and every title bar supports drag,
+resize, minimize, maximize and close. No backend falls back to a plain
+border.
+
+## Features
+
+- Tiling, dynamic, floating, centred and manual layouts, switchable at
+  runtime
+- Server-side decorations with working buttons on every backend
+- Lua configuration with hot reload on write
+- Multi-monitor, with per-monitor layout and workspace assignment
+- Window rules matched on class, title and role
+- Session lock, desktop icons with context menus, and a global menu over
+  `com.canonical.AppMenu.Registrar`
+- Layer-shell and XWayland on Wayland
+- Optional GPU rendering path (GBM and EGL) alongside the software one
+- Headless outputs for testing without hardware
 
 ## Status
 
-All four backends are equal in design intent. Implementation depth
-differs only because Linux is the only platform with a working
-development machine right now.
+| Backend | State |
+| --- | --- |
+| Wayland | Complete and used daily. Decorations, session lock, desktop icons, global menu, layer-shell, XWayland, optional GPU rendering, headless outputs, and a virtual pointer that can be pinned to one window. |
+| X11 | Working. Reparenting window manager with a drawn title bar, buttons, drag, resize and a right-click window menu. Feature-matched against the Wayland backend. |
+| Windows | Under development. Border tinting through `DwmSetWindowAttribute`, low-level input hooks and monitor enumeration are written and `cfg(windows)`-gated, but are not yet built or run on Windows. |
+| macOS | Under development. Window control through the Accessibility API is written and `cfg(target_os = "macos")`-gated, but is not yet built or run on macOS. |
 
-| Backend | Status |
-|---|---|
-| Wayland | Daily-driver complete: real decorations (titlebar text, resize, snap), session lock, desktop icons with right-click menus, global menu (`com.canonical.AppMenu.Registrar`/dbusmenu), layer-shell, XWayland, an optional GPU (GBM+EGL) render path alongside the default software one, fake (headless) monitors, and a Phase-2 multi-cursor primitive (pinning a virtual pointer to one window). Verified end-to-end on real Linux hardware. |
-| X11 | Working: a reparenting window manager with a drawn title bar (buttons, drag, resize, right-click window menu). Feature-audited for parity with the Wayland backend. Verified end-to-end on real Linux hardware. |
-| Windows | Under development. Real, `cfg(windows)`-gated code exists for border tinting (`DwmSetWindowAttribute`), low-level input hooks, and monitor enumeration. This code has never been built or run on a Windows machine, because no Windows machine is available in the current development environment. |
-| macOS | Under development. Real, `cfg(target_os = "macos")`-gated code exists for the Accessibility-API window control this backend needs. This code has never been built or run on a macOS machine, because no macOS machine is available in the current development environment. |
-
-Full detail, including exactly what's real vs. stubbed and why, is in
-[`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) --
-note that some of its own detail (test counts, specifically) predates
-this rewrite's later growth; `docs/TODO.md` is the actively-maintained
-list of what's pending, with `cargo test --workspace` as the actual
-current count. Crate layout and design rationale are in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); a survey against
-comparable compositors and full desktop environments is in
-[`docs/FEATURE_GAP.md`](docs/FEATURE_GAP.md).
+`docs/IMPLEMENTATION_STATUS.md` breaks down what is complete per backend,
+`docs/TODO.md` tracks what is pending, `docs/ARCHITECTURE.md` covers the
+crate layout, and `docs/FEATURE_GAP.md` compares srdwm against other
+compositors and desktop environments.
 
 ## Building
 
@@ -42,16 +41,26 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-Linux needs the usual X11/Wayland/EGL/GLES/xkbcommon/libinput/libseat
-development headers (`x11rb` and `smithay` link against them); on Arch:
+Linux needs the X11, Wayland, EGL, GLES, xkbcommon, libinput and libseat
+development headers, which `x11rb` and `smithay` link against. On Arch:
 
 ```bash
 sudo pacman -S libx11 libxcb wayland wayland-protocols egl-wayland \
-    mesa xkbcommon libinput libseat lua54
+    mesa xkbcommon libinput libseat pixman pam clang
 ```
 
-`mlua` builds Lua 5.4 from source (`vendored` feature), so no system Lua
-package is required.
+On Debian and Ubuntu:
+
+```bash
+sudo apt install libx11-dev libxcb1-dev libxcb-randr0-dev \
+    libxcb-keysyms1-dev libwayland-dev wayland-protocols \
+    libxkbcommon-dev libegl1-mesa-dev libgles2-mesa-dev libinput-dev \
+    libudev-dev libgbm-dev libdrm-dev libseat-dev libpixman-1-dev \
+    libpam0g-dev libclang-dev
+```
+
+Lua is built from source through `mlua`'s `vendored` feature, so no
+system Lua package is needed.
 
 ## Running
 
@@ -59,10 +68,11 @@ package is required.
 cargo run -p srdwm
 ```
 
-Backend selection is automatic: Wayland if `WAYLAND_DISPLAY` or
-`XDG_SESSION_TYPE=wayland` is set, X11 otherwise (override by unsetting
-those env vars). To try it without touching your real session, run it
-against a nested server:
+The backend is chosen automatically: Wayland when `WAYLAND_DISPLAY` or
+`XDG_SESSION_TYPE=wayland` is set, X11 otherwise. Unset those variables
+to force X11.
+
+To try it without disturbing your session, run it nested:
 
 ```bash
 Xephyr :99 -screen 1280x800 &
@@ -71,11 +81,10 @@ DISPLAY=:99 SRDWM_CONFIG_PATH="$PWD/config/srd" cargo run -p srdwm
 
 ## Configuration
 
-Config lives at `$SRDWM_CONFIG_PATH`, or `$XDG_CONFIG_HOME/srd`, or
-`~/.config/srd`. [`config/srd/`](config/srd/) in this repo is a
-complete working example (`init.lua` loads `keybindings.lua`, `layouts.lua`,
-`themes.lua`, `monitors.lua`, `rules.lua`, `startup.lua`). Full API and
-default values: [`docs/DEFAULTS.md`](docs/DEFAULTS.md).
+srdwm reads `$SRDWM_CONFIG_PATH`, then `$XDG_CONFIG_HOME/srd`, then
+`~/.config/srd`. [`config/srd/`](config/srd/) is a complete working
+example: `init.lua` loads `keybindings.lua`, `layouts.lua`, `themes.lua`,
+`monitors.lua`, `rules.lua` and `startup.lua`.
 
 ```lua
 local srd = require("srd")
@@ -89,6 +98,9 @@ srd.layout.configure("tiling", { master_ratio = 0.6, gaps = { inner = 8, outer =
 
 srd.theme.set_colors({ background = "#2e3440", accent = "#88c0d0" })
 ```
+
+Every option and its default is listed in
+[`docs/DEFAULTS.md`](docs/DEFAULTS.md).
 
 ## License
 
