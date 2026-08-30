@@ -1,6 +1,14 @@
-# srdwm
+<h1 align="center">srdwm</h1>
 
-A cross-platform window manager configured in Lua.
+<p align="center">A cross-platform window manager configured in Lua.</p>
+
+<p align="center">
+  <a href="https://github.com/srdusr/srdwm/actions/workflows/rust.yml"><img alt="build" src="https://github.com/srdusr/srdwm/actions/workflows/rust.yml/badge.svg"></a>
+  <img alt="rust" src="https://img.shields.io/badge/rust-2021-orange.svg">
+  <a href="LICENSE"><img alt="licence" src="https://img.shields.io/badge/licence-MIT-blue.svg"></a>
+</p>
+
+![srdwm running a Wayland session](assets/preview.jpg)
 
 Every backend draws a real title bar, and every title bar supports drag,
 resize, minimize, maximize and close. No backend falls back to a plain
