@@ -155,9 +155,9 @@ fn desktop_dir(home: &Path) -> PathBuf {
 /// desktop environment bootstraps an empty one on first run), sorted by
 /// name. `saved` is `desktop_icons_state`'s own persisted `id -> cell` map
 /// - an icon with a saved entry keeps that exact cell; every other icon
-/// (new files, or a first run with nothing saved yet) fills the next free
-/// cell in top-to-bottom, then wrap-to-next-column order, skipping any
-/// cell a saved icon already claims.
+///   (new files, or a first run with nothing saved yet) fills the next free
+///   cell in top-to-bottom, then wrap-to-next-column order, skipping any
+///   cell a saved icon already claims.
 ///
 /// `rows_per_column` bounds how many icons stack vertically before
 /// wrapping - derived from the primary monitor's own usable height, see

@@ -422,9 +422,9 @@ pub(crate) struct WorkspacesEvent<'a> {
 
 /// A third, independently-diffed event on the same `subscribe` connection
 /// - see `WorkspacesEvent`'s own doc comment for why this isn't folded
-/// into either of the other two: a layout cycle touches no window and no
-/// workspace, so it needs its own change-diff to avoid pushing an
-/// unrelated payload on every unrelated change.
+///   into either of the other two: a layout cycle touches no window and no
+///   workspace, so it needs its own change-diff to avoid pushing an
+///   unrelated payload on every unrelated change.
 #[derive(Serialize)]
 pub(crate) struct KeyboardLayoutEvent<'a> {
     pub(crate) event: &'static str,

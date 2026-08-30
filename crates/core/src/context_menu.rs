@@ -51,11 +51,11 @@ pub enum MenuAction {
     Separator,
     /// A non-interactive section label (`"Move to Workspace"`, `"Customize"`)
     /// - dimmer, smaller text, never highlighted, click is a no-op just
-    /// like [`Self::Separator`]. Replaces an earlier hack that embedded
-    /// box-drawing characters directly in an ordinary item's label, which
-    /// rendered (and behaved, right up until the dispatch site's own
-    /// special-case) exactly like a clickable row that happened to do
-    /// nothing - confusing on both counts.
+    ///   like [`Self::Separator`]. Replaces an earlier hack that embedded
+    ///   box-drawing characters directly in an ordinary item's label, which
+    ///   rendered (and behaved, right up until the dispatch site's own
+    ///   special-case) exactly like a clickable row that happened to do
+    ///   nothing - confusing on both counts.
     Header,
 }
 
@@ -180,8 +180,8 @@ impl ContextMenu {
     /// The y-offset row `index` starts at, relative to the menu's own top
     /// - every row height up to (not including) `index`, summed. `row_
     /// at`/rendering both walk rows this same way, so a mismatch between
-    /// "where a row is drawn" and "where a click resolves to" can't creep
-    /// in from computing the two differently.
+    ///   "where a row is drawn" and "where a click resolves to" can't creep
+    ///   in from computing the two differently.
     pub fn row_y(&self, index: usize) -> i32 {
         (0..index.min(self.items.len())).map(|i| self.row_height_for(i)).sum::<u32>() as i32
     }

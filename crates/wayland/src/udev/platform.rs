@@ -704,13 +704,13 @@ impl Platform for UdevPlatform {
 
     /// One `srdwm_core::Monitor` per head, positioned in the global space
     /// - or several, when `srd.monitor.split` has requested that head be
-    /// divided into logical sub-monitors ("monitors inside monitors"; see
-    /// `srdwm_core::monitor::MonitorSplit`'s own doc comment). This is
-    /// what makes core's layout engine multi-monitor-aware in practice:
-    /// `arrange_workspace` groups windows by `monitor` and lays each group
-    /// out inside that monitor's rectangle - a split just means more,
-    /// smaller rectangles feeding the same grouping, no other core-side
-    /// change needed.
+    ///   divided into logical sub-monitors ("monitors inside monitors"; see
+    ///   `srdwm_core::monitor::MonitorSplit`'s own doc comment). This is
+    ///   what makes core's layout engine multi-monitor-aware in practice:
+    ///   `arrange_workspace` groups windows by `monitor` and lays each group
+    ///   out inside that monitor's rectangle - a split just means more,
+    ///   smaller rectangles feeding the same grouping, no other core-side
+    ///   change needed.
     fn monitors(&mut self) -> PlatformResult<Vec<srdwm_core::Monitor>> {
         let Some(udev) = self.state.udev.as_ref() else { return Ok(Vec::new()) };
         let wm = self.state.wm.clone();

@@ -39,15 +39,15 @@ impl CompositorHandler for CompState {
     ///
     /// Fixed by registering our own pre-commit hook here, in `new_surface`
     /// - called at `wl_compositor.create_surface`, strictly before any
-    /// later `get_layer_surface` on the same surface could register
-    /// smithay's own hook. Hooks run in registration order (`tree.rs`:
-    /// `pre_commit_hooks` is a plain `Vec`, pushed and iterated in order),
-    /// so ours always runs first and can neutralize the stale reset state
-    /// before smithay's hook ever inspects it. This depends on that
-    /// ordering guarantee holding in future smithay versions - it isn't
-    /// documented as an API contract, just an implementation detail
-    /// confirmed against 0.7.0's source - so re-check this file against
-    /// whatever smithay version replaces it.
+    ///   later `get_layer_surface` on the same surface could register
+    ///   smithay's own hook. Hooks run in registration order (`tree.rs`:
+    ///   `pre_commit_hooks` is a plain `Vec`, pushed and iterated in order),
+    ///   so ours always runs first and can neutralize the stale reset state
+    ///   before smithay's hook ever inspects it. This depends on that
+    ///   ordering guarantee holding in future smithay versions - it isn't
+    ///   documented as an API contract, just an implementation detail
+    ///   confirmed against 0.7.0's source - so re-check this file against
+    ///   whatever smithay version replaces it.
     ///
     /// Cost: one closure registered per `wl_surface` (not just layer
     /// surfaces, since we don't know in advance which ones will become

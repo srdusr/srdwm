@@ -89,7 +89,7 @@ pub(super) fn button_box(width: usize, height: usize, offset: usize, from_left: 
 /// alpha to clip it away), this blends *toward* `color` over whatever's
 /// already in `buf` - the titlebar background, always already opaque here
 /// - so the result stays fully opaque at every edge pixel rather than
-/// letting the background show through a soft ring.
+///   letting the background show through a soft ring.
 pub(super) fn fill_button_dot(buf: &mut [u8], width: usize, height: usize, offset: usize, from_left: bool, margin: f32, color: (u8, u8, u8)) {
     let (x0, y0, x1, y1) = button_box(width, height, offset, from_left, margin);
     let cx = (x0 + x1) as f32 / 2.0;

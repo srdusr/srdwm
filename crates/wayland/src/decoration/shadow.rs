@@ -229,7 +229,7 @@ pub(super) fn rounded_edge_distance(dx: u32, dy: u32, radius: u32) -> u32 {
 /// How far outside `[margin, margin + extent)` - the window's own span
 /// along one axis, inside the shadow's `margin`-pixel border on each side
 /// - position `pos` sits, in pixels. `0` anywhere inside that span
-/// (including exactly on its edge).
+///   (including exactly on its edge).
 fn edge_distance(pos: u32, margin: u32, extent: u32) -> u32 {
     if pos < margin {
         margin - pos

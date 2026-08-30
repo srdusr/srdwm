@@ -34,9 +34,9 @@ const SERVICE: &str = "srdwm";
 /// password itself, resolves to `false`. Deliberately no distinction
 /// between "wrong password" and "something is broken" in the return value
 /// - fail secure means every non-success path stays locked, not just the
-/// ones that are the user's own fault. Logged at `warn` for whoever's
-/// debugging a setup problem, never at a level that would put the
-/// password itself in a log.
+///   ones that are the user's own fault. Logged at `warn` for whoever's
+///   debugging a setup problem, never at a level that would put the
+///   password itself in a log.
 pub fn authenticate(username: &str, password: &str) -> bool {
     let conversation = Conversation::with_credentials(username, password);
     let mut context = match Context::new(SERVICE, Some(username), conversation) {

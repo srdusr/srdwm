@@ -498,8 +498,8 @@ pub const DECORATED_TOP_RESIZE_MARGIN: i32 = RESIZE_MARGIN;
 /// How much wider than [`RESIZE_MARGIN`] a corner's own diagonal-resize
 /// zone reaches, as a multiplier on whatever margin is actually in effect
 /// - see `ResizeEdge::resize_edge_at`'s doc comment for why corners need
-/// more room than a straight edge at all, not just a proportionally bigger
-/// dead-simple hit box.
+///   more room than a straight edge at all, not just a proportionally bigger
+///   dead-simple hit box.
 ///
 /// Bumped from `3` (18px at the default `RESIZE_MARGIN`) to `5` (30px):
 /// reported live as still too tight to land reliably, and there's real

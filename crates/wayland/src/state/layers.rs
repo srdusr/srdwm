@@ -19,12 +19,12 @@ impl CompState {
     /// diff; this is the same fix for a client that hides by committing a
     /// null buffer while keeping the `zwlr_layer_surface_v1` object alive
     /// - cheaper than destroying and recreating it, and exactly what
-    /// AGS's dock does to hide itself for a fullscreen window. Without
-    /// this, the dock's last-requested exclusive zone stayed reserved the
-    /// entire time it was hidden - a real, empty, unexplained band at the
-    /// screen edge, reported live by an AGS peer session's own measurement
-    /// across a genuine fullscreen toggle (the dock's zone correctly
-    /// dropped to 0 on a real *maximize*, ruling that path out).
+    ///   AGS's dock does to hide itself for a fullscreen window. Without
+    ///   this, the dock's last-requested exclusive zone stayed reserved the
+    ///   entire time it was hidden - a real, empty, unexplained band at the
+    ///   screen edge, reported live by an AGS peer session's own measurement
+    ///   across a genuine fullscreen toggle (the dock's zone correctly
+    ///   dropped to 0 on a real *maximize*, ruling that path out).
     ///
     /// `hidden_layer_surfaces` (see its own doc comment) is what makes the
     /// reverse direction work: `unmap_layer` removes the surface from

@@ -471,9 +471,9 @@ pub(crate) fn make_buffers() -> CursorBuffers {
 
 /// [`pointer_bitmap`]'s hotspot: the fingertip, near the top of the canvas
 /// - unlike the centered resize/crosshair/move shapes, a pointing hand's
-/// "active point" for click purposes is where the finger tip actually is,
-/// the same reasoning the built-in arrow's tip-at-origin hotspot already
-/// uses.
+///   "active point" for click purposes is where the finger tip actually is,
+///   the same reasoning the built-in arrow's tip-at-origin hotspot already
+///   uses.
 const POINTER_HOTSPOT: (i32, i32) = (9, 1);
 
 /// One cursor render element, whatever the source.

@@ -512,16 +512,16 @@ pub(crate) struct NativeLockFrame<'a> {
 /// password box's drop shadow, the box itself, and the on-screen keyboard
 /// - header/box/keyboard stacked and centered together via `lock_stack_
 /// layout`, the same layout `CompState::native_lock_click` hit-tests
-/// against. Mirrors `lock::lock_render_elements`'s shape/signature so both
-/// backends can call whichever mode applies with the same pattern.
-/// Takes every buffer by reference rather than `&mut CompState`, same
-/// reasoning `lock::lock_render_elements`'s own doc comment gives for
-/// taking a bare surface instead: both backends' render loops call this
-/// while already holding a field-specific `&mut` borrow (`self.udev`/the
-/// winit backend's own renderer), not a whole-`self` one, so a caller has
-/// to extract every field of `NativeLockFrame` *before* that borrow
-/// starts (cheap `MemoryRenderBuffer` clones, not a deep pixel copy) and
-/// pass the clones in.
+///   against. Mirrors `lock::lock_render_elements`'s shape/signature so both
+///   backends can call whichever mode applies with the same pattern.
+///   Takes every buffer by reference rather than `&mut CompState`, same
+///   reasoning `lock::lock_render_elements`'s own doc comment gives for
+///   taking a bare surface instead: both backends' render loops call this
+///   while already holding a field-specific `&mut` borrow (`self.udev`/the
+///   winit backend's own renderer), not a whole-`self` one, so a caller has
+///   to extract every field of `NativeLockFrame` *before* that borrow
+///   starts (cheap `MemoryRenderBuffer` clones, not a deep pixel copy) and
+///   pass the clones in.
 pub(crate) fn native_lock_render_elements<R>(frame: NativeLockFrame<'_>, output_size: (i32, i32), renderer: &mut R) -> Vec<MemoryRenderBufferRenderElement<R>>
 where
     R: Renderer + ImportAll + ImportMem,

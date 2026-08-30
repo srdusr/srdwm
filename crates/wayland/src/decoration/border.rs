@@ -1,7 +1,7 @@
 //! The four solid-colour strips around a decorated window's own `geometry`
 //! - top/bottom rendered as small rounded bitmaps (their own two outer
-//! corners cut to match `titlebar::render_titlebar`'s), left/right left to
-//! the caller as plain flat fills (`elements::border_side_render_element`).
+//!   corners cut to match `titlebar::render_titlebar`'s), left/right left to
+//!   the caller as plain flat fills (`elements::border_side_render_element`).
 
 use super::color::rgb_to_bgra;
 use super::corners::{round_bottom_corners, round_top_corners, InnerRing};
@@ -138,8 +138,8 @@ fn clip_middle_beyond_thickness(buf: &mut [u8], width: usize, radius: usize, row
 /// decorated window or not (a decorated window still gets its own bottom
 /// two corners content-masked - `RoundedCorners::BOTTOM_ONLY`, not `NONE`
 /// - specifically so this strip has real rounded content to meet). See
-/// [`InnerRing`]'s own doc comment for why that's a different circle from
-/// the titlebar-aligned one `render_border_top` sometimes needs.
+///   [`InnerRing`]'s own doc comment for why that's a different circle from
+///   the titlebar-aligned one `render_border_top` sometimes needs.
 pub fn render_border_bottom(width: u32, thickness: u32, color: (u8, u8, u8), radius: u32) -> Vec<u8> {
     let (width, thickness) = (width.max(1) as usize, thickness.max(1) as usize);
     let height = thickness.max(radius as usize).max(1);

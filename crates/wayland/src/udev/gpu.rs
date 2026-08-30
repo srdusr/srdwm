@@ -144,12 +144,12 @@ const COLOR_FORMATS: [DrmFourcc; 2] = [DrmFourcc::Argb8888, DrmFourcc::Xrgb8888]
 /// here, matching the existing legacy path's own connector handling) is
 /// *not* an atomic-vs-legacy switch, despite that being an easy assumption
 /// - reading smithay's own source (`backend/drm/device/mod.rs`) directly
-/// showed `DrmDevice::create_internal` tries atomic capability first and
-/// falls back to a `Legacy` internal variant automatically if the driver
-/// doesn't support it, both exposed through the one `DrmDevice` type via
-/// its own `is_atomic()` query - logged here, not assumed, since Phase 1's
-/// probe never got far enough to find this out empirically on this
-/// specific machine's `i915` driver.
+///   showed `DrmDevice::create_internal` tries atomic capability first and
+///   falls back to a `Legacy` internal variant automatically if the driver
+///   doesn't support it, both exposed through the one `DrmDevice` type via
+///   its own `is_atomic()` query - logged here, not assumed, since Phase 1's
+///   probe never got far enough to find this out empirically on this
+///   specific machine's `i915` driver.
 ///
 /// Deliberately does **not** yet call `initialize_output` for any specific
 /// head, or touch `render_udev_frame` at all - this function's whole job

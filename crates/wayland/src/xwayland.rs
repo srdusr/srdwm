@@ -247,9 +247,9 @@ pub(crate) struct EwmhState {
     /// `appmenu-gtk-module` shim case), these two together are already a
     /// complete, unambiguous `com.canonical.dbusmenu` address on their own
     /// - checked first in `read_global_menu`, before the GTK/Unity atoms,
-    /// so a Qt app running under a KDE Plasma session (which sets these,
-    /// never any `_GTK_*` atom) isn't rejected by `bus_name`'s hard
-    /// requirement on `_GTK_UNIQUE_BUS_NAME` before ever reaching them.
+    ///   so a Qt app running under a KDE Plasma session (which sets these,
+    ///   never any `_GTK_*` atom) isn't rejected by `bus_name`'s hard
+    ///   requirement on `_GTK_UNIQUE_BUS_NAME` before ever reaching them.
     kde_appmenu_service_name: Option<u32>,
     kde_appmenu_object_path: Option<u32>,
 }

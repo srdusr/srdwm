@@ -77,10 +77,10 @@ impl Engine {
     /// connected (real Wayland/X11 display available, `WAYLAND_DISPLAY`/
     /// `DISPLAY` set for anything `srd.spawn`ed from the handler to inherit)
     /// - see `main.rs`. Config that starts background processes (a bar,
-    /// wallpaper daemon, clipboard watcher) belongs in a `"ready"` handler,
-    /// not at a config file's top level: top-level code runs during
-    /// `load_init`, which is *before* the platform connects, so anything
-    /// spawned there inherits no display socket to connect to at all.
+    ///   wallpaper daemon, clipboard watcher) belongs in a `"ready"` handler,
+    ///   not at a config file's top level: top-level code runs during
+    ///   `load_init`, which is *before* the platform connects, so anything
+    ///   spawned there inherits no display socket to connect to at all.
     pub(super) fn fn_on(&self) -> Result<mlua::Function<'_>> {
         let state = self.state.clone();
         Ok(self.lua.create_function(move |lua, (name, f): (String, mlua::Function)| {

@@ -86,8 +86,8 @@ pub struct WaylandPlatform {
 
 /// Target frame budget for the winit (nested) backend's self-imposed pacing
 /// - see `poll_events`' doc comment. 60fps to match `OutputMode`'s own
-/// `refresh: 60_000` a few lines below, not because either number is
-/// special.
+///   `refresh: 60_000` a few lines below, not because either number is
+///   special.
 const TARGET_FRAME_TIME: Duration = Duration::from_micros(1_000_000 / 60);
 
 

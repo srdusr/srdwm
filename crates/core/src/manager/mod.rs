@@ -119,12 +119,12 @@ pub struct WindowManager {
     /// owns real output hardware (`drain_output_position_requests`) on its
     /// own next poll. Core has no way to reposition a real `Output` itself
     /// - monitor geometry flows one direction, backend into core, via
-    /// `set_monitors` - so a request from an IPC caller (an AGS display-
-    /// settings panel wanting to set up monitor mirroring, concretely) has
-    /// to cross back over that boundary the same indirect way window
-    /// geometry changes do in the other direction: queued here, applied by
-    /// the backend, and `set_monitors` reports the result back on the
-    /// backend's next monitor query, same as any other hotplug/reconfigure.
+    ///   `set_monitors` - so a request from an IPC caller (an AGS display-
+    ///   settings panel wanting to set up monitor mirroring, concretely) has
+    ///   to cross back over that boundary the same indirect way window
+    ///   geometry changes do in the other direction: queued here, applied by
+    ///   the backend, and `set_monitors` reports the result back on the
+    ///   backend's next monitor query, same as any other hotplug/reconfigure.
     output_position_requests: Vec<(MonitorId, i32, i32)>,
     /// Same cross-boundary-request pattern as `output_position_requests`
     /// just above, for Phase 2 of the multi-cursor plan - pinning a
@@ -206,9 +206,9 @@ pub struct WindowManager {
     /// switching workspace changes what's visible on every screen at
     /// once). Still meaningful even when `per_monitor_workspaces` is `true`
     /// - it's the fallback `workspace_for_monitor` returns for a monitor
-    /// that has never had its own workspace switched independently yet,
-    /// and what a plain `current_workspace()` call reports either way. See
-    /// `visible_windows`'s doc comment for the filter this actually drives.
+    ///   that has never had its own workspace switched independently yet,
+    ///   and what a plain `current_workspace()` call reports either way. See
+    ///   `visible_windows`'s doc comment for the filter this actually drives.
     current_workspace: WorkspaceId,
     /// Whichever workspace was current immediately before the current one
     /// became current - see `switch_workspace`'s doc comment.
@@ -244,7 +244,7 @@ pub struct WindowManager {
     /// turned on, or a newly connected monitor) falls back to
     /// `current_workspace`, the same shared value shared-mode always uses
     /// - see `workspace_for_monitor`. Unused, and left empty, whenever
-    /// `per_monitor_workspaces` is `false`.
+    ///   `per_monitor_workspaces` is `false`.
     monitor_workspaces: HashMap<MonitorId, WorkspaceId>,
     next_workspace_id: WorkspaceId,
     next_window_id: WindowId,

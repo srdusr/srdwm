@@ -194,8 +194,8 @@ fn announce(state: &mut CompState, manager: &ZwlrForeignToplevelManagerV1, id: W
 
 /// Re-sends title/app_id/state/done to every handle a window currently has
 /// - one per bound manager. Used both right after `announce` creates a
-/// fresh handle and whenever state actually changes (`set_maximized`,
-/// `update_activated`).
+///   fresh handle and whenever state actually changes (`set_maximized`,
+///   `update_activated`).
 pub(crate) fn send_state(state: &mut CompState, id: WindowId) {
     let Some(handles) = state.foreign_toplevel_handles.get(&id).cloned() else { return };
     send_state_to(state, id, &handles);

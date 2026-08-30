@@ -631,11 +631,11 @@ impl CompState {
 
     /// Called from `CompositorHandler::commit`, right after `w.on_commit()`
     /// - the first time a window still in `provisional_size` commits a
-    /// real, non-empty buffer, adopts the client's own chosen content size
-    /// into `Window::geometry` instead of leaving `add_window`'s guessed
-    /// placeholder in place. A no-op once `provisional_size` no longer
-    /// names this window (the ordinary case, checked first, so every other
-    /// commit pays only one `HashSet` lookup).
+    ///   real, non-empty buffer, adopts the client's own chosen content size
+    ///   into `Window::geometry` instead of leaving `add_window`'s guessed
+    ///   placeholder in place. A no-op once `provisional_size` no longer
+    ///   names this window (the ordinary case, checked first, so every other
+    ///   commit pays only one `HashSet` lookup).
     ///
     /// Position is left exactly where `SmartPlacement` put it - only
     /// clamped so a client that picked a bigger size than the guess can't

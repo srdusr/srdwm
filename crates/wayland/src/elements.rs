@@ -273,8 +273,8 @@ pub(crate) fn rounded_content_buffer<'a>(
 /// Every mapped layer-shell surface on `output` whose [`Layer`] `include`
 /// accepts, each rendered via [`surface_content_elements`] at full opacity
 /// - layer-shell surfaces (bars, docks, wallpaper engines) don't have a
-/// per-surface opacity concept the way `srd.rule`'s `opacity` gives
-/// windows.
+///   per-surface opacity concept the way `srd.rule`'s `opacity` gives
+///   windows.
 ///
 /// Order matches smithay's own `space_render_elements` (0.7.0): `.rev()`
 /// on `map.layers()` before rendering, so surfaces sharing one `Layer`
@@ -523,19 +523,19 @@ pub(crate) fn popup_surface_under(state: &CompState, pos: Point<f64, Logical>) -
 /// by contrast, is always in *global* space (`Space` tracks every window
 /// across the whole desktop, not per-output). Comparing the two directly
 /// - what this function used to do - only ever produced a real overlap
-/// for a head whose own `origin` happened to be `(0, 0)`, i.e. the first/
-/// primary monitor in a left-to-right layout; every window on any other
-/// monitor could never be found "touched" by that monitor's own damage at
-/// all, no matter how much of it was actually changing on screen. A
-/// client relying on this path alone - a video window the user had
-/// switched focus *away* from, since the separate always-unconditional
-/// pass above only covers the focused/hovered window - never received
-/// another frame callback once srdwm's own bootstrap-configure frame
-/// callback was used up, and simply stopped rendering new frames forever:
-/// reported live as a paused-looking video on a second monitor, audio
-/// still playing underneath (a completely separate pipeline, unaffected).
-/// Same root cause and same fix shape as `output_layer_elements`'s own
-/// local/global mismatch, found earlier the same session.
+///   for a head whose own `origin` happened to be `(0, 0)`, i.e. the first/
+///   primary monitor in a left-to-right layout; every window on any other
+///   monitor could never be found "touched" by that monitor's own damage at
+///   all, no matter how much of it was actually changing on screen. A
+///   client relying on this path alone - a video window the user had
+///   switched focus *away* from, since the separate always-unconditional
+///   pass above only covers the focused/hovered window - never received
+///   another frame callback once srdwm's own bootstrap-configure frame
+///   callback was used up, and simply stopped rendering new frames forever:
+///   reported live as a paused-looking video on a second monitor, audio
+///   still playing underneath (a completely separate pipeline, unaffected).
+///   Same root cause and same fix shape as `output_layer_elements`'s own
+///   local/global mismatch, found earlier the same session.
 pub(crate) fn windows_touched_by_damage<'a>(
     space: &'a Space<DWindow>,
     damage: &'a [Rectangle<i32, Physical>],

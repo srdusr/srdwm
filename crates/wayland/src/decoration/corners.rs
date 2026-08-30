@@ -277,14 +277,14 @@ fn scale_pixel(buf: &mut [u8], width: usize, x: usize, y: usize, mask: f32) {
 /// cut anything *inside* it - so the strip's own "extra" rows (past its
 /// nominal `border_width`, present whenever `corner_radius > border_width`
 /// - see `render_border_top`'s own doc comment) stayed a solid *filled*
-/// quarter-disk out to the centre column/row, then hit `clip_middle_
+///   quarter-disk out to the centre column/row, then hit `clip_middle_
 /// beyond_thickness`'s hard, unblended rectangular cut at exactly column/
-/// row `radius` - which is essentially the disk's own *most opaque*
-/// point (dead centre, mask ~1.0), not somewhere the curve had already
-/// faded out. The result: a solid wedge of border colour with two straight
-/// inner edges meeting the titlebar/content at a right angle, not a
-/// uniform-width curved ring - confirmed live, zoomed: a clean rectangular
-/// step, not a blend, reported as "squares on the inside corners."
+///   row `radius` - which is essentially the disk's own *most opaque*
+///   point (dead centre, mask ~1.0), not somewhere the curve had already
+///   faded out. The result: a solid wedge of border colour with two straight
+///   inner edges meeting the titlebar/content at a right angle, not a
+///   uniform-width curved ring - confirmed live, zoomed: a clean rectangular
+///   step, not a blend, reported as "squares on the inside corners."
 ///
 /// The fix: cut *this* pixel wherever it falls within `border_width` of
 /// the *same* shared centre `blend_corner_pixel` already cut around --

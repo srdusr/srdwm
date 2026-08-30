@@ -129,13 +129,13 @@ pub(crate) struct DecorationSignature {
     /// Which of *this* window's own titlebar buttons (if any) is currently
     /// hovered, and the glyph-reveal animation's current progress (0..=255)
     /// - see `CompState::hovered_titlebar_button`'s own doc comment.
-    /// Included here, progress and all, so hovering (or un-hovering) a
-    /// button - and every intermediate frame of the reveal animating in
-    /// between - is a real signature change, not silently absorbed by the
-    /// cache this struct exists to drive; a signature that only recorded
-    /// *which* button was hovered, not the animation's own progress, would
-    /// cache the very first frame of the reveal and never rebuild again
-    /// for the rest of it.
+    ///   Included here, progress and all, so hovering (or un-hovering) a
+    ///   button - and every intermediate frame of the reveal animating in
+    ///   between - is a real signature change, not silently absorbed by the
+    ///   cache this struct exists to drive; a signature that only recorded
+    ///   *which* button was hovered, not the animation's own progress, would
+    ///   cache the very first frame of the reveal and never rebuild again
+    ///   for the rest of it.
     pub(crate) hovered_button: Option<(srdwm_core::TitlebarHit, u8)>,
     /// `theme.title_centered` at the time this was rendered - a live
     /// `srd`-side theme change (there's no `srd set` for this yet, but
@@ -153,8 +153,8 @@ pub(crate) struct DecorationSignature {
     /// (`redraw_decoration_buffer`'s own call site) but were missing from
     /// this struct entirely until a full-pipeline audit found the mismatch
     /// - a live change to any of the three would have compared equal
-    /// against a stale signature and silently never rebuilt the titlebar
-    /// this window already has cached.
+    ///   against a stale signature and silently never rebuilt the titlebar
+    ///   this window already has cached.
     pub(crate) button_glyph_always: bool,
     pub(crate) button_order: Option<srdwm_core::ButtonOrder>,
     pub(crate) traffic_light_buttons: bool,
@@ -510,8 +510,8 @@ pub(crate) struct CompState {
     pub(crate) border_bottom_decorations: HashMap<WindowId, MemoryRenderBuffer>,
     /// What `redraw_decoration_buffer` last actually rendered for a window
     /// - every input its own rasterization reads (width, `decorated`,
-    /// focus, title text, border colour/width) - so a call that would
-    /// rebuild the exact same pixels can skip doing so instead.
+    ///   focus, title text, border colour/width) - so a call that would
+    ///   rebuild the exact same pixels can skip doing so instead.
     ///
     /// Exists because `main.rs`'s `sync()` calls `Platform::redraw_
     /// decoration` - which always reaches this - for *every visible
@@ -559,14 +559,14 @@ pub(crate) struct CompState {
     /// A window's drop-shadow bitmap (`decoration::shadow_bitmap`), cached
     /// the same way and at the same trigger points as `border_top_decorations`
     /// - rebuilt only on creation or a real size change, not per frame, for
-    /// the identical damage-tracking reason (a fresh `Id` every frame means
-    /// `OutputDamageTracker` never finds a previous-frame match, so the
-    /// shadow - like the border strips before this caching existed - would
-    /// mark itself fully damaged forever, keeping the output page-flipping
-    /// on an otherwise fully static screen). `None` for a maximized or
-    /// fullscreen window, or with `general.shadows` off - see the render
-    /// call site for why those don't get a shadow at all rather than a
-    /// zero-alpha one.
+    ///   the identical damage-tracking reason (a fresh `Id` every frame means
+    ///   `OutputDamageTracker` never finds a previous-frame match, so the
+    ///   shadow - like the border strips before this caching existed - would
+    ///   mark itself fully damaged forever, keeping the output page-flipping
+    ///   on an otherwise fully static screen). `None` for a maximized or
+    ///   fullscreen window, or with `general.shadows` off - see the render
+    ///   call site for why those don't get a shadow at all rather than a
+    ///   zero-alpha one.
     pub(crate) shadow_buffers: HashMap<WindowId, MemoryRenderBuffer>,
     /// The compiled rounded-corner GLES shader program (`rounded_corners::
     /// compile`), if that succeeded - `None` on the udev backend always
@@ -639,13 +639,13 @@ pub(crate) struct CompState {
     /// Client-visible size (`geometry` minus the titlebar band, converted
     /// to logical points for whichever monitor the window is currently on
     /// - see `sync_geometry`'s own doc comment) last sent to each window
-    /// via `xdg_toplevel.configure`. `sync_geometry` runs on
-    /// every pointer-motion tick while a window is being dragged or resized
-    /// (see `input::handle_pointer_position`); a plain move changes only
-    /// position, not size, so without this it was re-sending a configure
-    /// and re-rasterizing the titlebar's text from scratch on every single
-    /// motion event of every drag, which is what made moving a window
-    /// stutter. Only a real size change now does either.
+    ///   via `xdg_toplevel.configure`. `sync_geometry` runs on
+    ///   every pointer-motion tick while a window is being dragged or resized
+    ///   (see `input::handle_pointer_position`); a plain move changes only
+    ///   position, not size, so without this it was re-sending a configure
+    ///   and re-rasterizing the titlebar's text from scratch on every single
+    ///   motion event of every drag, which is what made moving a window
+    ///   stutter. Only a real size change now does either.
     pub(crate) last_synced_size: HashMap<WindowId, (i32, i32)>,
     /// Windows whose `Window::size_is_provisional` was `true` at creation
     /// and whose client hasn't sent a real, non-empty content commit yet --

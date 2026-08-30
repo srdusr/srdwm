@@ -8,14 +8,14 @@ impl Platform for X11Platform {
     /// Was `wait_for_event()` (blocks indefinitely for the first event,
     /// only draining any backlog after that), which left `srd`'s IPC socket
     /// - polled at the end of this method - unresponsive for as long as
-    /// nothing happened on the X11 connection at all: no keypress, no mouse
-    /// motion, nothing. A script sitting on `srd clients` while the user's
-    /// hands were off the keyboard for a few seconds would just hang for
-    /// exactly that long. Replaced with a bounded `poll(2)` on the
-    /// connection's own fd (`~16ms`, matching the Wayland backends' own
-    /// frame-ish cadence) so this method always returns roughly that often
-    /// regardless of X11 activity, draining whatever's actually arrived
-    /// (zero or more events) each time rather than requiring at least one.
+    ///   nothing happened on the X11 connection at all: no keypress, no mouse
+    ///   motion, nothing. A script sitting on `srd clients` while the user's
+    ///   hands were off the keyboard for a few seconds would just hang for
+    ///   exactly that long. Replaced with a bounded `poll(2)` on the
+    ///   connection's own fd (`~16ms`, matching the Wayland backends' own
+    ///   frame-ish cadence) so this method always returns roughly that often
+    ///   regardless of X11 activity, draining whatever's actually arrived
+    ///   (zero or more events) each time rather than requiring at least one.
     fn poll_events(&mut self) -> PlatformResult<Vec<Event>> {
         self.conn.flush().map_err(err)?;
         let fd = self.conn.stream().as_raw_fd();

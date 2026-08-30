@@ -190,14 +190,14 @@ pub(crate) struct UdevHead {
     /// exact same head still "ready" and every prior damage still pending,
     /// tried the exact same flip again, failed the exact same way, forever
     /// - a true busy loop with no backoff at all, not merely a missed
-    /// optimization. Confirmed live from a real session log: tens of
-    /// thousands of consecutive `page flip failed: Device or resource
+    ///   optimization. Confirmed live from a real session log: tens of
+    ///   thousands of consecutive `page flip failed: Device or resource
     /// busy` lines a few *microseconds* apart, the compositor's one thread
-    /// spinning flat out on nothing else, which is what actually explains
-    /// the user's report of losing pointer input and the ability to
-    /// switch VTs at all after switching away and back once - not a
-    /// separate input bug, this loop simply never yielded the CPU back to
-    /// anything else, libinput's own event processing included.
+    ///   spinning flat out on nothing else, which is what actually explains
+    ///   the user's report of losing pointer input and the ability to
+    ///   switch VTs at all after switching away and back once - not a
+    ///   separate input bug, this loop simply never yielded the CPU back to
+    ///   anything else, libinput's own event processing included.
     pub(crate) flip_retry_after: Option<Instant>,
 }
 

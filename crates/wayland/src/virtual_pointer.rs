@@ -50,8 +50,8 @@
 //! "degrade honestly" convention elsewhere (`monitor_layout::load`,
 //! `icon_theme::find_icon`). Pinned motion (below) has no such limitation
 //! - it never touches `udev`/`bounds()` at all, so it works identically
-//! on both backends, which is what makes the winit/nested backend a real
-//! place to validate it.
+//!   on both backends, which is what makes the winit/nested backend a real
+//!   place to validate it.
 //!
 //! **Phase 2 of this project's own multi-cursor plan** (see
 //! `docs/TODO.md`'s "Multi-cursor Phase 2" entry for the full reasoning):
@@ -137,7 +137,7 @@ pub struct VirtualPointerData {
     /// `DataInit::init` requires per-object user data to be `Send + Sync`
     /// - `Dispatch::request` only ever hands out `&self`, not `&mut
     /// self`, for the object the request arrived on, so interior
-    /// mutability is unavoidable either way.
+    ///   mutability is unavoidable either way.
     pending_axis: Mutex<Option<AxisFrame>>,
     /// Set by `CompState::set_virtual_pointer_pin` - see this module's
     /// own doc comment for the full Phase 2 design. `Some(id)` routes
