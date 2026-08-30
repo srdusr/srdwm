@@ -235,7 +235,7 @@ pub fn render_snap_flyout(columns: u32, cell_width: u32, cell_height: u32, label
     let mut buf = vec![0u8; width * height * 4];
 
     let bg_px = rgb_to_bgra(bg, 255);
-    for px in buf.chunks_exact_mut(4) {
+    for px in buf.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&bg_px);
     }
 

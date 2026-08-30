@@ -75,7 +75,7 @@ pub fn render_border_top(width: u32, thickness: u32, color: (u8, u8, u8), radius
     let height = thickness.max(radius as usize).max(1);
     let bg = rgb_to_bgra(color, 255);
     let mut buf = vec![0u8; width * height * 4];
-    for px in buf.chunks_exact_mut(4) {
+    for px in buf.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&bg);
     }
     // Without an inner ring at all, the corner stayed a solid filled disk
@@ -145,7 +145,7 @@ pub fn render_border_bottom(width: u32, thickness: u32, color: (u8, u8, u8), rad
     let height = thickness.max(radius as usize).max(1);
     let bg = rgb_to_bgra(color, 255);
     let mut buf = vec![0u8; width * height * 4];
-    for px in buf.chunks_exact_mut(4) {
+    for px in buf.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&bg);
     }
     // Plain `radius`, not `radius + thickness` (what this line passed

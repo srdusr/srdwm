@@ -893,7 +893,7 @@ fn render_ui_box(native: &NativeLock, theme: &srdwm_core::LockConfig) -> (Vec<u8
     let panel_alpha = (theme.box_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
     if panel_alpha > 0 {
         let bg = rgb_to_bgra(theme.box_bg, panel_alpha);
-        for px in buf.chunks_exact_mut(4) {
+        for px in buf.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&bg);
         }
     }

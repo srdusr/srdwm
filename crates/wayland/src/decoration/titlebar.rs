@@ -151,7 +151,7 @@ pub fn render_titlebar(
     let traffic_lights = traffic_lights && !is_dialog;
     let bg = rgb_to_bgra(background, 255);
     let mut buf = vec![0u8; width * height * 4];
-    for px in buf.chunks_exact_mut(4) {
+    for px in buf.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&bg);
     }
 

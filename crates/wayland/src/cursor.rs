@@ -661,7 +661,7 @@ fn load_theme_cursor(theme: &xcursor::CursorTheme, size: u32, names: &[&str]) ->
 /// bitmap built here.
 fn rgba_to_bgra(pixels_rgba: &[u8]) -> Vec<u8> {
     let mut bgra = Vec::with_capacity(pixels_rgba.len());
-    for px in pixels_rgba.chunks_exact(4) {
+    for px in pixels_rgba.as_chunks::<4>().0 {
         bgra.push(px[2]);
         bgra.push(px[1]);
         bgra.push(px[0]);

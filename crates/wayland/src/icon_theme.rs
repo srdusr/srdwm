@@ -214,7 +214,7 @@ pub(crate) fn rasterize_svg(path: &Path, width: u32, height: u32) -> Option<Vec<
     resvg::render(&tree, transform, &mut pixmap.as_mut());
     let rgba = pixmap.data();
     let mut bgra = vec![0u8; rgba.len()];
-    for (dst, src) in bgra.chunks_exact_mut(4).zip(rgba.chunks_exact(4)) {
+    for (dst, src) in bgra.as_chunks_mut::<4>().0.iter_mut().zip(rgba.as_chunks::<4>().0) {
         dst[0] = src[2];
         dst[1] = src[1];
         dst[2] = src[0];
